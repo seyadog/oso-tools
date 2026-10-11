@@ -1,18 +1,19 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { Backend, FileDrag, Folder, Forward, Profile, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
   const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true, profile: null }];
-  const profiles: Profile[] = [{ id: "default", name: "default" }];
+  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null }];
+  const proxies: Proxy[] = [];
   let activeProfile = "default";
   let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
@@ -85,7 +86,7 @@ export function mockBackend(): Backend {
       const srv = servers.filter((s) => inProfile(eff(s)));
       const holds = (fid: number) => srv.some((s) => { for (let f = folders.find((x) => x.id === s.parent); f; f = folders.find((x) => x.id === f!.parent)) if (f.id === fid) return true; return false; });
       const fol = folders.filter((f) => viewAll || folderProfile(f.id) === activeProfile || holds(f.id) || (folderProfile(f.id) === null && !servers.some((s) => s.parent === f.id)));
-      return { folders: structuredClone(fol), servers: structuredClone(srv).map((s) => ({ ...s, profile_eff: eff(s) })), profiles: structuredClone(profiles), active_profile: activeProfile, view_all: viewAll } as TreeData;
+      return { folders: structuredClone(fol), servers: structuredClone(srv).map((s) => ({ ...s, profile_eff: eff(s) })), profiles: structuredClone(profiles), proxies: structuredClone(proxies), active_profile: activeProfile, view_all: viewAll } as TreeData;
     },
     profileSave: async (id, name) => {
       if (!name.trim()) throw new Error("a profile needs a name");
@@ -95,7 +96,7 @@ export function mockBackend(): Backend {
       }
       const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       if (!slug || profiles.some((p) => p.id === slug)) throw new Error(`there is already a profile called "${name}"`);
-      profiles.push({ id: slug, name: name.trim() });
+      profiles.push({ id: slug, name: name.trim(), proxy: null });
       return slug;
     },
     profileDelete: async (id) => {
@@ -107,6 +108,22 @@ export function mockBackend(): Backend {
     },
     setActiveProfile: async (id) => void (activeProfile = id),
     setViewAll: async (all) => void (viewAll = all),
+    proxySave: async (p) => {
+      if (!p.name.trim()) throw new Error("a proxy needs a name");
+      if (!p.host.trim() || /[\s'"`$;&|]/.test(p.host) || p.host.startsWith("-")) throw new Error("the proxy's host is a name or an address, with no spaces or special characters");
+      if (!p.port) throw new Error("a proxy needs a port");
+      const id = p.id || Math.max(0, ...proxies.map((x) => x.id)) + 1;
+      const at = proxies.findIndex((x) => x.id === id);
+      if (at >= 0) proxies[at] = { ...p, id };
+      else proxies.push({ ...p, id });
+      return id;
+    },
+    proxyDelete: async (id) => {
+      proxies.splice(proxies.findIndex((x) => x.id === id), 1);
+      servers.forEach((s) => s.proxy === id && (s.proxy = null));
+      profiles.forEach((p) => p.proxy === id && (p.proxy = null));
+    },
+    profileSetProxy: async (profile, proxy) => void (profiles.find((p) => p.id === profile)!.proxy = proxy),
     setFolderProfile: async (id, profile) => void (folders.find((f) => f.id === id)!.profile = profile),
     vaultStatus: async () => ({ ...vault }),
     vaultUnlock: async (master) => {
@@ -247,7 +264,7 @@ export function mockBackend(): Backend {
       const s = servers.find((x) => x.id === serverId);
       if (!s) throw new Error("this server no longer exists");
       let id = Math.max(0, ...forwards.map((f) => f.id)) + 1;
-      s.forwards = forwards.map((f): Forward => ({ ...f, id: f.id || id++ }));
+      s.forwards = forwards.map((f): Forward => ({ ...f, name: f.name.trim(), id: f.id || id++ }));
       for (const k of [...tunnelState.keys()]) if (k.startsWith(`${serverId}:`) && !s.forwards.some((f) => k === `${serverId}:${f.id}`)) tunnelState.delete(k);
     },
     tunnelStart: async (serverId, forwardId, useVault = true) => {

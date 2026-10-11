@@ -282,3 +282,14 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .profile-bar { display: flex; align-items: center; gap: 4px; }
 .profile-bar .select { flex: 1; min-width: 0; }
 .prow { grid-template-columns: 1fr auto; }
+
+/* production machines are red: in the tab and in the terminal */
+.tab.prod { box-shadow: inset 0 -2px 0 var(--red); }
+.tab.prod .num { color: var(--red); }
+.pane.prod .frame { box-shadow: inset 0 0 0 1px var(--red); }
+.pane.prod .title .t { color: var(--red); }
+/* tunnels in the list */
+.row.tunnel .tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; margin: 0 4px; }
+.row.tunnel.up .tdot { background: #82e682; }
+.row.tunnel.failed .tdot { background: var(--red); }
+.row.tunnel.failed small { color: var(--red); }

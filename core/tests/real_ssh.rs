@@ -86,6 +86,9 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             has_sudo: false,
             forwards: vec![],
             profile: None,
+            notes: String::new(),
+            env_kind: None,
+            proxy: None,
         },
         None,
         None,
@@ -96,7 +99,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
 }
 
 fn fwd(kind: ForwardKind, bind: u16, host: &str, port: u16) -> Forward {
-    Forward { id: 0, kind, bind_port: bind, host: host.into(), port }
+    Forward { id: 0, name: String::new(), auto: false, kind, bind_port: bind, host: host.into(), port }
 }
 
 /// A server that says one thing to whoever connects.
@@ -298,4 +301,63 @@ fn a_copy_to_nowhere_fails_with_the_reason() {
     let t = wait_transfer(&mut e, t);
     assert_eq!(t.state, "failed");
     assert!(t.message.to_lowercase().contains("refused") || t.message.to_lowercase().contains("connect"), "{}", t.message);
+}
+
+/// A real HTTP proxy (`ncat` in listening mode), so the connection really leaves through it.
+fn start_http_proxy() -> Option<(Child, u16)> {
+    let ncat = which("ncat")?;
+    let port = free_port();
+    let child = Command::new(ncat).args(["-l", "-k", "127.0.0.1", &port.to_string(), "--proxy-type", "http"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Some((child, port));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+#[test]
+fn a_connection_leaves_through_the_proxy_of_its_server() {
+    let sshd = need_sshd!("proxy");
+    let Some((mut proxy, proxy_port)) = start_http_proxy() else { return eprintln!("skipped: no ncat here") };
+    let target = greeter("hello-through-the-proxy");
+    let bind = free_port();
+    let (mut e, id) = engine_for(&sshd, vec![fwd(ForwardKind::Local, bind, "127.0.0.1", target)]);
+    let px = e.proxy_save(oso_core::store::Proxy { id: 0, name: "test".into(), kind: oso_core::store::ProxyKind::Http, host: "127.0.0.1".into(), port: proxy_port, profile: None }).unwrap();
+    let mut s = e.store.server(id).unwrap().clone();
+    s.proxy = Some(px);
+    e.save_server(s, None, None).unwrap();
+    let fid = e.store.server(id).unwrap().forwards[0].id;
+    e.tunnel_start(id, fid, true).unwrap();
+    let t = wait_tunnel(&mut e, "up");
+    assert_eq!(t.state, "up", "ssh got to sshd through the proxy: {t:?}");
+    assert_eq!(read_from(bind), "hello-through-the-proxy");
+    e.tunnel_stop(id, fid);
+    // with the proxy gone the same server cannot be reached: it really was going through it
+    let _ = proxy.kill();
+    let _ = proxy.wait();
+    std::thread::sleep(Duration::from_millis(300));
+    e.tunnel_start(id, fid, true).unwrap();
+    let t = wait_tunnel(&mut e, "failed");
+    assert_eq!(t.state, "failed", "{t:?}");
+}
+
+#[test]
+fn an_automatic_tunnel_is_open_in_every_terminal_of_the_server() {
+    let sshd = need_sshd!("auto");
+    let target = greeter("hello-from-an-auto-tunnel");
+    let bind = free_port();
+    let mut f = fwd(ForwardKind::Local, bind, "127.0.0.1", target);
+    f.auto = true;
+    let (e, id) = engine_for(&sshd, vec![f]);
+    let argv = oso_core::connect::ssh_argv(&e.store, e.store.server(id).unwrap());
+    // run the terminal's own ssh command, with the test's options, without a shell on the other side
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..argv.len() - 1]).args(&e.ssh_extra).args(["-o", "BatchMode=yes", "-N"]).arg(argv.last().unwrap()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    assert_eq!(read_from(bind), "hello-from-an-auto-tunnel");
+    let _ = child.kill();
+    let _ = child.wait();
 }

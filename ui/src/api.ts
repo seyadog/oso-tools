@@ -14,6 +14,11 @@ export interface Server {
   has_secret: boolean;
   has_sudo: boolean;
   forwards: Forward[];
+  /** Free text about the machine. */
+  notes: string;
+  env_kind: "production" | "staging" | "dev" | null;
+  /** Id of the saved proxy its connection leaves through. */
+  proxy: number | null;
   /** Its own profile (null: its folder's, else every profile). */
   profile: string | null;
   /** Where it ended up: its own or its folder's (only in what `tree` returns). */
@@ -22,6 +27,9 @@ export interface Server {
 export interface Forward {
   /** 0 for one that is not saved yet. */
   id: number;
+  name: string;
+  /** Also opened by every terminal of the server. */
+  auto: boolean;
   kind: "local" | "remote" | "dynamic";
   bind_port: number;
   host: string;
@@ -37,11 +45,23 @@ export interface Folder {
 export interface Profile {
   id: string;
   name: string;
+  /** Id of the proxy its local terminals go out through. */
+  proxy: number | null;
+}
+export interface Proxy {
+  /** 0 for one that is not saved yet. */
+  id: number;
+  name: string;
+  kind: "socks5" | "http";
+  host: string;
+  port: number;
+  profile: string | null;
 }
 export interface TreeData {
   folders: Folder[];
   servers: Server[];
   profiles: Profile[];
+  proxies: Proxy[];
   active_profile: string;
   /** The sidebar shows the hosts of every profile. */
   view_all: boolean;
@@ -121,6 +141,9 @@ export interface Backend {
   setActiveProfile(id: string): Promise<void>;
   setViewAll(all: boolean): Promise<void>;
   setFolderProfile(id: number, profile: string | null): Promise<void>;
+  proxySave(p: Proxy): Promise<number>;
+  proxyDelete(id: number): Promise<void>;
+  profileSetProxy(profile: string, proxy: number | null): Promise<void>;
   secretList(): Promise<SecretMeta[]>;
   /** `value` null keeps the saved one of an existing secret. */
   secretSave(meta: SecretMeta, value: string | null): Promise<number>;

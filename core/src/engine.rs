@@ -6,7 +6,7 @@ use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
-use crate::store::{Auth, DEFAULT_PROFILE, Forward, ForwardKind, NodeId, Profile, Server, Store, slug};
+use crate::store::{Auth, DEFAULT_PROFILE, Forward, ForwardKind, NodeId, Profile, Proxy, Server, Store, slug};
 use crate::vault::{Kind, SecretMeta, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -158,6 +158,11 @@ impl Engine {
         if server_id != LOCAL && self.store.server(server_id).is_none() {
             return Err(OpenError::NoSuchServer);
         }
+        if server_id != LOCAL {
+            if let Some(why) = connect::proxy_problem(&self.store, server_id) {
+                return Err(OpenError::Other(why));
+            }
+        }
         if use_vault && server_id != LOCAL && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
             return Err(OpenError::VaultLocked);
         }
@@ -183,6 +188,14 @@ impl Engine {
                 env.push((name, value.to_string()));
             }
             plan.opts.sudo_fill = self.vault.get(LOCAL, Kind::Sudo);
+        }
+        // a profile with a proxy sends this terminal's programs through it (and only this terminal's)
+        let proxy = self.store.profiles.iter().find(|p| p.id == profile).and_then(|p| p.proxy).and_then(|id| self.store.proxy(id));
+        if let Some(p) = proxy.filter(|p| p.problem().is_none()) {
+            for (k, v) in connect::proxy_env(p) {
+                env.retain(|(name, _)| *name != k);
+                env.push((k, v));
+            }
         }
         plan.opts.env = Some(env);
         plan.opts.agent = self.agent_ok();
@@ -421,7 +434,7 @@ impl Engine {
                 v
             })
             .collect();
-        serde_json::json!({ "folders": folders, "servers": servers, "profiles": self.store.profiles, "active_profile": self.active_profile, "view_all": self.view_all })
+        serde_json::json!({ "folders": folders, "servers": servers, "profiles": self.store.profiles, "proxies": self.store.proxies, "active_profile": self.active_profile, "view_all": self.view_all })
     }
 
     // ---------------------------------------------------------------- profiles
@@ -462,7 +475,7 @@ impl Engine {
             if self.store.profiles.iter().any(|p| p.id == id) {
                 bail!("there is already a profile called {name:?}");
             }
-            self.store.profiles.push(Profile { id: id.clone(), name: name.to_string() });
+            self.store.profiles.push(Profile { id: id.clone(), name: name.to_string(), ..Default::default() });
             self.store.save()?;
             return Ok(id);
         }
@@ -503,6 +516,58 @@ impl Engine {
         Ok(())
     }
 
+    // ---------------------------------------------------------------- proxies
+
+    /// Adds (`id == 0`) or changes a saved proxy. Returns its id.
+    pub fn proxy_save(&mut self, mut p: Proxy) -> Result<u64> {
+        p.name = p.name.trim().to_string();
+        p.host = p.host.trim().to_string();
+        if p.name.is_empty() {
+            bail!("a proxy needs a name");
+        }
+        if let Some(why) = p.problem() {
+            bail!("{why}");
+        }
+        if p.profile.as_ref().is_some_and(|x| !self.store.profiles.iter().any(|y| &y.id == x)) {
+            bail!("there is no such profile");
+        }
+        let id = if p.id == 0 {
+            let id = self.store.proxies.iter().map(|x| x.id).max().unwrap_or(0) + 1;
+            p.id = id;
+            self.store.proxies.push(p);
+            id
+        } else {
+            let slot = self.store.proxies.iter_mut().find(|x| x.id == p.id).context("this proxy no longer exists")?;
+            let id = p.id;
+            *slot = p;
+            id
+        };
+        self.store.save()?;
+        Ok(id)
+    }
+
+    /// Deletes a proxy; whatever used it goes direct.
+    pub fn proxy_delete(&mut self, id: u64) -> Result<()> {
+        self.store.proxies.retain(|p| p.id != id);
+        for s in self.store.servers.iter_mut().filter(|s| s.proxy == Some(id)) {
+            s.proxy = None;
+        }
+        for p in self.store.profiles.iter_mut().filter(|p| p.proxy == Some(id)) {
+            p.proxy = None;
+        }
+        self.store.save()
+    }
+
+    /// The proxy local terminals of a profile go out through (`None`: none).
+    pub fn profile_set_proxy(&mut self, profile: &str, proxy: Option<u64>) -> Result<()> {
+        if proxy.is_some_and(|p| self.store.proxy(p).is_none()) {
+            bail!("this proxy no longer exists");
+        }
+        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
+        p.proxy = proxy;
+        self.store.save()
+    }
+
     /// Puts a folder (and what is in it) in a profile, or in none.
     pub fn set_folder_profile(&mut self, id: u64, profile: Option<String>) -> Result<()> {
         if profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
@@ -519,6 +584,9 @@ impl Engine {
     pub fn save_server(&mut self, mut s: Server, login: Option<&str>, sudo: Option<&str>) -> Result<u64> {
         if s.profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
             bail!("there is no such profile");
+        }
+        if s.proxy.is_some_and(|p| self.store.proxy(p).is_none()) {
+            bail!("this proxy no longer exists");
         }
         let touches_vault = login.is_some() || sudo.is_some();
         if touches_vault && !self.vault.is_unlocked() {
@@ -624,13 +692,16 @@ impl Engine {
                 bail!("a tunnel needs the name (or IPv4 address) and the port it leads to");
             }
             f.host = f.host.trim().to_string();
+            f.name = f.name.trim().chars().take(60).collect();
             if f.id == 0 {
                 f.id = next;
                 next += 1;
             }
         }
         // a tunnel that was removed or changed is switched off
-        let gone: Vec<u64> = s.forwards.iter().filter(|old| !forwards.contains(old)).map(|f| f.id).collect();
+        // (the name and the automatic flag do not change what is running)
+        let same_tunnel = |a: &Forward, b: &Forward| a.id == b.id && a.kind == b.kind && a.bind_port == b.bind_port && a.host == b.host && a.port == b.port;
+        let gone: Vec<u64> = s.forwards.iter().filter(|old| !forwards.iter().any(|n| same_tunnel(n, old))).map(|f| f.id).collect();
         for id in gone {
             self.tunnel_stop(server_id, id);
         }
@@ -643,6 +714,9 @@ impl Engine {
     pub fn tunnel_start(&mut self, server_id: u64, forward_id: u64, use_vault: bool) -> std::result::Result<(), OpenError> {
         let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
         let fwd = server.forwards.iter().find(|f| f.id == forward_id).ok_or(OpenError::NoSuchServer)?.clone();
+        if let Some(why) = connect::proxy_problem(&self.store, server_id) {
+            return Err(OpenError::Other(why));
+        }
         if use_vault && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
             return Err(OpenError::VaultLocked);
         }
@@ -702,6 +776,9 @@ impl Engine {
     /// home folder) or one path from it (`local[0]` is the folder here). Returns an id for `transfers()`.
     pub fn transfer_start(&mut self, server_id: u64, upload: bool, local: Vec<String>, remote: &str, use_vault: bool) -> std::result::Result<u64, OpenError> {
         let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
+        if let Some(why) = connect::proxy_problem(&self.store, server_id) {
+            return Err(OpenError::Other(why));
+        }
         if use_vault && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
             return Err(OpenError::VaultLocked);
         }
@@ -846,6 +923,9 @@ mod tests {
             has_sudo: false,
             forwards: vec![],
             profile: None,
+            notes: String::new(),
+            env_kind: None,
+            proxy: None,
         }
     }
 
@@ -1116,5 +1196,69 @@ mod tests {
         let answered = text.split("tok=").skip(1).any(|t| t.len() > 64 && t[..64].chars().all(|c| c.is_ascii_hexdigit()) && t[64..].starts_with('.'));
         assert!(answered, "{text:?}");
         e.close(s.sid);
+    }
+
+    fn socks_proxy(name: &str) -> Proxy {
+        Proxy { id: 0, name: name.into(), kind: crate::store::ProxyKind::Socks5, host: "proxy.corp".into(), port: 1080, profile: None }
+    }
+
+    #[test]
+    fn proxies_are_saved_checked_and_forgotten_by_what_used_them() {
+        let (mut e, _log) = engine("proxies");
+        assert!(e.proxy_save(Proxy { host: "bad host".into(), ..socks_proxy("x") }).is_err());
+        assert!(e.proxy_save(socks_proxy(" ")).is_err());
+        let id = e.proxy_save(socks_proxy("corp")).unwrap();
+        let again = Store::load_from(e.store_path()).unwrap();
+        assert_eq!(again.proxies.len(), 1, "saved in proxies.json");
+        let s = e.save_server(Server { proxy: Some(id), auth: Auth::Agent, ..server("a") }, None, None).unwrap();
+        e.profile_set_proxy("default", Some(id)).unwrap();
+        assert!(e.save_server(Server { proxy: Some(99), ..server("b") }, None, None).is_err());
+        assert!(e.profile_set_proxy("default", Some(99)).is_err());
+        e.proxy_delete(id).unwrap();
+        assert_eq!(e.store.server(s).unwrap().proxy, None);
+        assert_eq!(e.store.profiles[0].proxy, None);
+    }
+
+    #[test]
+    fn a_server_behind_a_missing_helper_or_proxy_says_why_instead_of_connecting() {
+        let (mut e, _log) = engine("proxy-open");
+        let id = e.proxy_save(socks_proxy("corp")).unwrap();
+        let s = e.save_server(Server { proxy: Some(id), auth: Auth::Agent, ..server("a") }, None, None).unwrap();
+        e.store.proxies.clear(); // the proxy vanished behind our back
+        let err = e.open(s, 24, 80, true).err();
+        assert!(matches!(&err, Some(OpenError::Other(m)) if m.contains("no longer exists")), "{err:?}");
+    }
+
+    #[test]
+    fn a_local_terminal_of_a_proxied_profile_uses_the_proxy_and_the_others_do_not() {
+        let (mut e, log) = engine("local-proxy");
+        let id = e.proxy_save(socks_proxy("corp")).unwrap();
+        let work = e.profile_save("", "Work").unwrap();
+        e.profile_set_proxy(&work, Some(id)).unwrap();
+        e.set_active_profile(&work).unwrap();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        e.write(s.sid, b"echo p=$ALL_PROXY n=$no_proxy .\r");
+        assert!(wait_for(&log, s.sid, "p=socks5h://proxy.corp:1080 n=localhost,127.0.0.1,::1 ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        e.set_active_profile("default").unwrap();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        e.write(s.sid, b"echo [$HTTPS_PROXY] .\r");
+        assert!(wait_for(&log, s.sid, "[] ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+    }
+
+    #[test]
+    fn renaming_a_tunnel_does_not_switch_it_off() {
+        let (mut e, _log) = engine("tunnel-name");
+        let id = e.save_server(Server { auth: Auth::Agent, ..server("a") }, None, None).unwrap();
+        let f = Forward { id: 0, name: "  postgres ".into(), auto: false, kind: ForwardKind::Local, bind_port: 5433, host: "db".into(), port: 5432 };
+        e.set_forwards(id, vec![f]).unwrap();
+        let saved = e.store.server(id).unwrap().forwards[0].clone();
+        assert_eq!(saved.name, "postgres");
+        e.tunnels.insert((id, saved.id), Tunnel { job: None, up: true, failed: None });
+        e.set_forwards(id, vec![Forward { name: "renamed".into(), auto: true, ..saved.clone() }]).unwrap();
+        assert!(e.tunnels.contains_key(&(id, saved.id)), "only name and auto changed");
+        e.set_forwards(id, vec![Forward { bind_port: 5434, ..saved }]).unwrap();
+        assert!(e.tunnels.is_empty(), "a different port is a different tunnel");
     }
 }

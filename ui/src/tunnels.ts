@@ -17,6 +17,11 @@ export function describe(f: Forward): string {
   return `on the server :${f.bind_port} → ${f.host}:${f.port} here`;
 }
 
+/** What a tunnel is called in lists: its name, else the line that describes it. */
+export function label(f: Forward): string {
+  return f.name.trim() || describe(f);
+}
+
 export function isPort(text: string): boolean {
   if (!/^\d{1,5}$/.test(text.trim())) return false;
   const n = Number(text);

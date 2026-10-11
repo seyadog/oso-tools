@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, VaultLockedError, VaultStatus, b64 } from "./api";
+import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
@@ -12,7 +12,8 @@ import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
 import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
-import { tunnelsDialog } from "./tunnels_ui";
+import { describe as describeTunnel } from "./tunnels";
+import { switchOn, tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
@@ -30,7 +31,7 @@ interface Drag {
 
 export class App {
   ws = new Workspace();
-  tree: TreeData = { folders: [], servers: [], profiles: [], active_profile: "default", view_all: false };
+  tree: TreeData = { folders: [], servers: [], profiles: [], proxies: [], active_profile: "default", view_all: false };
   vault: VaultStatus = { exists: false, unlocked: false };
   panes = new Map<Id, Pane>();
   private early = new Map<Id, SessionEvent[]>();
@@ -52,6 +53,9 @@ export class App {
   private watches = new Map<Id, Watch>();
   private alerts = new Set<Id>();
   private transfers!: Transfers;
+  /** Which servers are production, kept for those the profile filter hides while their terminal is open. */
+  private prod = new Map<number, boolean>();
+  private tunnelStatus = new Map<string, TunnelStatus>();
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
@@ -259,7 +263,14 @@ export class App {
 
   async refreshTree() {
     this.tree = await this.be.tree();
+    for (const s of this.tree.servers) this.prod.set(s.id, s.env_kind === "production");
     this.renderSidebar();
+    if (this.ws.tabs.size) this.render();
+  }
+
+  /** Is this a production machine? (Its tab and terminal are drawn in red.) */
+  private isProd(serverId: number): boolean {
+    return this.prod.get(serverId) === true;
   }
 
   // ------------------------------------------------------------ sessions
@@ -397,11 +408,16 @@ export class App {
 
   private async pollTunnels() {
     try {
-      const up = (await this.be.tunnels()).filter((t) => t.state !== "failed").length;
+      const all = await this.be.tunnels();
+      const up = all.filter((t) => t.state !== "failed").length;
       if (up !== this.tunnelsUp) {
         this.tunnelsUp = up;
         this.renderFoot();
       }
+      const next = new Map(all.map((t) => [`${t.server_id}:${t.forward_id}`, t]));
+      const changed = JSON.stringify([...next]) !== JSON.stringify([...this.tunnelStatus]);
+      this.tunnelStatus = next;
+      if (changed) this.renderSidebar();
     } catch {
       /* the next one will do */
     }
@@ -671,6 +687,7 @@ export class App {
       pane.root.classList.toggle("active", tab.sid === s.active);
       if (tab.sid === s.active) this.alerts.delete(tab.sid);
       pane.root.classList.toggle("dead", tab.dead);
+      pane.root.classList.toggle("prod", this.isProd(tab.serverId));
       const bc = ws.broadcasting && !tab.dead;
       pane.root.classList.toggle("broadcast", bc);
       pane.badge.style.display = bc ? "" : "none";
@@ -745,7 +762,7 @@ export class App {
       count.append(icon("grid", 12), String(ids.length));
       const tab = el(
         "div",
-        { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}${t.dead && this.retry.has(g.active) ? " retrying" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
+        { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}${t.dead && this.retry.has(g.active) ? " retrying" : ""}${this.isProd(t.serverId) ? " prod" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
         el("span", { class: "num" }, String(i + 1)),
         el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
         el("span", {}, t.title),
@@ -923,10 +940,12 @@ export class App {
 
   renderSidebar() {
     clear(this.profileEl);
-    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree()));
+    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree()));
     clear(this.treeEl);
-    if (!this.filter) this.renderGroups();
-    else if (this.groups.length) {
+    if (!this.filter) {
+      this.renderGroups();
+      this.renderTunnels();
+    } else if (this.groups.length) {
       const q = this.filter;
       for (const g of this.groups.filter((g) => g.name.toLowerCase().includes(q))) {
         const row = el("div", { class: "row group" }, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `group · ${g.panes.length} terminals`)));
@@ -1175,6 +1194,42 @@ export class App {
   }
 
   /** The Groups section at the top of the left list. */
+  /** The saved tunnels of every host shown, each with a switch (name → port, how it is doing). */
+  private renderTunnels() {
+    const all = this.tree.servers.flatMap((s) => s.forwards.map((f) => ({ s, f })));
+    if (!all.length) return;
+    const open = localStorage.getItem("oso.tunnels") !== "closed";
+    const on = (id: string) => this.tunnelStatus.get(id)?.state === "up";
+    const head = el("div", { class: "sec", title: "Port forwards kept through your hosts" });
+    const chev = el("span", { class: "chev" });
+    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
+    const n = all.filter(({ s, f }) => on(`${s.id}:${f.id}`)).length;
+    head.append(chev, "Tunnels", el("span", { class: "n" }, n ? `${n} on` : String(all.length)));
+    head.onclick = () => {
+      localStorage.setItem("oso.tunnels", open ? "closed" : "open");
+      this.renderSidebar();
+    };
+    this.treeEl.append(head);
+    if (!open) return;
+    for (const { s, f } of all) {
+      const id = `${s.id}:${f.id}`;
+      const st = this.tunnelStatus.get(id);
+      const running = !!st && st.state !== "failed";
+      const row = el("div", { class: `row tunnel${st?.state === "up" ? " up" : ""}${st?.state === "failed" ? " failed" : ""}`, "data-tunnel": id, title: st?.state === "failed" ? st.message : describeTunnel(f) });
+      const dot = el("span", { class: "tdot" });
+      const sw = this.ibtn(running ? "close" : "play", running ? "Switch off" : "Switch on", () => {});
+      sw.style.cssText = "width:24px;height:24px";
+      sw.onclick = async (e) => {
+        e.stopPropagation();
+        if (running) await this.be.tunnelStop(s.id, f.id);
+        else await switchOn(this.tunnelCtx(), s.id, f.id);
+        await this.pollTunnels();
+      };
+      row.append(dot, el("span", { class: "txt" }, el("b", {}, f.name.trim() || describeTunnel(f)), el("small", {}, st?.state === "failed" ? st.message : `${f.name.trim() ? describeTunnel(f) + " · " : ""}${s.name}`)), sw);
+      this.treeEl.append(row);
+    }
+  }
+
   private renderGroups() {
     const open = localStorage.getItem("oso.groups") !== "closed";
     const head = el("div", { class: "sec", title: "Tabs you saved: open all their terminals again with a double click" });
@@ -1413,7 +1468,7 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1425,6 +1480,14 @@ export class App {
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
       const jump = makeSelect([["", "Direct"], ...this.tree.servers.filter((x) => x.id !== s.id).map((x): [string, string] => [String(x.id), x.name])], s.jump == null ? "" : String(s.jump), { "data-name": "jump" });
       const profile = makeSelect(profileOptions(this.tree.profiles, "Its folder's, or every profile"), s.profile ?? "", { "data-name": "profile" });
+      const envKind = makeSelect([["", "Not said"], ["production", "Production"], ["staging", "Staging"], ["dev", "Development"]], s.env_kind ?? "", { "data-name": "env-kind" });
+      const proxy = makeSelect([["", "Direct"], ...this.tree.proxies.map((p): [string, string] => [String(p.id), p.name])], s.proxy == null ? "" : String(s.proxy), { "data-name": "proxy" });
+      const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false", placeholder: "nginx + API node, logs in /var/log/acme" }, s.notes);
+      const tunnelsBtn = el("button", { class: "btn", type: "button", "data-act": "server-tunnels" }, s.forwards.length ? `Tunnels (${s.forwards.length})…` : "Tunnels…");
+      tunnelsBtn.onclick = () => {
+        close();
+        this.openTunnels();
+      };
       const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
@@ -1440,7 +1503,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1450,7 +1513,7 @@ export class App {
         if (!host.value.trim()) return void (err.textContent = "The host is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
-        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null };
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim() };
         const loginSecret = auth.value === "agent" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {

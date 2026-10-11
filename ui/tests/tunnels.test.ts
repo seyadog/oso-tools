@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Forward } from "../src/api";
 import { describe as say, isPort, problem, sameTunnel } from "../src/tunnels";
 
-const f = (kind: Forward["kind"], bind: number, host = "db.internal", port = 5432): Forward => ({ id: 1, kind, bind_port: bind, host, port });
+const f = (kind: Forward["kind"], bind: number, host = "db.internal", port = 5432): Forward => ({ id: 1, name: "", auto: false, kind, bind_port: bind, host, port });
 
 describe("tunnels in words", () => {
   it("describes each kind", () => {

@@ -48,10 +48,17 @@ pub enum ForwardKind {
     Dynamic,
 }
 
-/// A saved port forward of a server. Whether it is switched on is not saved: it is on while oso keeps it open.
+/// A saved port forward of a server (a "tunnel"). Whether it is switched on is not saved: it is on while oso keeps
+/// it open, unless `auto` says it is also opened by every terminal of the server.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Forward {
     pub id: u64,
+    /// What it is for ("postgres of acme"); the sidebar lists tunnels by it.
+    #[serde(default)]
+    pub name: String,
+    /// Added as `-L` / `-R` / `-D` to every `ssh` terminal of the server.
+    #[serde(default)]
+    pub auto: bool,
     pub kind: ForwardKind,
     /// The port that is opened (on this computer for local and dynamic, on the server for remote).
     pub bind_port: u16,
@@ -89,6 +96,64 @@ pub struct Server {
     /// The profile it belongs to (`None`: its folder's, and failing that every profile).
     #[serde(default)]
     pub profile: Option<String>,
+    /// Free text about the machine ("nginx + API node, logs in /var/log/acme"): shown to agents that ask what it is.
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub env_kind: Option<EnvKind>,
+    /// The saved proxy this server (or, if it is the first hop, everything behind it) is reached through.
+    #[serde(default)]
+    pub proxy: Option<u64>,
+}
+
+/// What a machine is used for. Production is shown in red and an agent always has to ask before touching it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvKind {
+    Production,
+    Staging,
+    Dev,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyKind {
+    Socks5,
+    Http,
+}
+
+/// A proxy saved in `proxies.json`: for the first hop of an `ssh` connection, or as the default of a profile's local terminals.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Proxy {
+    /// 0 for one that is not saved yet.
+    pub id: u64,
+    pub name: String,
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    /// `None`: every profile.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+impl Proxy {
+    /// What is wrong with it, in words, or `None`. The host ends up inside a command line.
+    pub fn problem(&self) -> Option<&'static str> {
+        let h = self.host.trim();
+        if h.is_empty() || h.starts_with('-') || h.chars().any(|c| c.is_whitespace() || c.is_control() || "'\"`$;&|<>()\\".contains(c)) {
+            return Some("the proxy's host is a name or an address, with no spaces or special characters");
+        }
+        if self.port == 0 {
+            return Some("a proxy needs a port");
+        }
+        None
+    }
+
+    /// `socks5h://host:port` or `http://host:port`, as programs read it from `ALL_PROXY` and friends.
+    pub fn url(&self) -> String {
+        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
+        format!("{}://{host}:{}", if self.kind == ProxyKind::Socks5 { "socks5h" } else { "http" }, self.port)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -109,17 +174,20 @@ pub struct Folder {
 pub const DEFAULT_PROFILE: &str = "default";
 
 /// A profile groups servers, secrets and accounts ("work", "personal"): switching it switches them together.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Profile {
     /// Short name used as the key everywhere (`work`); never changes.
     pub id: String,
     /// What the window shows.
     pub name: String,
+    /// The proxy local terminals of this profile go out through (their `HTTP_PROXY` and friends; nothing else changes).
+    #[serde(default)]
+    pub proxy: Option<u64>,
 }
 
 impl Profile {
     pub fn default_one() -> Profile {
-        Profile { id: DEFAULT_PROFILE.into(), name: "default".into() }
+        Profile { id: DEFAULT_PROFILE.into(), name: "default".into(), ..Default::default() }
     }
 }
 
@@ -153,6 +221,9 @@ pub struct Store {
     /// Saved in `profiles.json`, next to this file; always has at least the default one.
     #[serde(skip)]
     pub profiles: Vec<Profile>,
+    /// Saved in `proxies.json`, next to this file.
+    #[serde(skip)]
+    pub proxies: Vec<Proxy>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -185,6 +256,10 @@ impl Store {
             .ok()
             .and_then(|t| serde_json::from_str::<Vec<Profile>>(&t).ok())
             .unwrap_or_default();
+        store.proxies = std::fs::read_to_string(path.with_file_name("proxies.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Vec<Proxy>>(&t).ok())
+            .unwrap_or_default();
         if !store.profiles.iter().any(|p| p.id == DEFAULT_PROFILE) {
             store.profiles.insert(0, Profile::default_one());
         }
@@ -207,7 +282,17 @@ impl Store {
             std::fs::write(&tmp, serde_json::to_string_pretty(&self.profiles)?)?;
             std::fs::rename(&tmp, &pfile)?;
         }
+        let xfile = self.path.with_file_name("proxies.json");
+        if !self.proxies.is_empty() || xfile.exists() {
+            let tmp = xfile.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&self.proxies)?)?;
+            std::fs::rename(&tmp, &xfile)?;
+        }
         Ok(())
+    }
+
+    pub fn proxy(&self, id: u64) -> Option<&Proxy> {
+        self.proxies.iter().find(|p| p.id == id)
     }
 
     // ------------------------------------------------------------ profiles
@@ -493,6 +578,9 @@ mod tests {
             has_sudo: false,
             forwards: vec![],
             profile: None,
+            notes: String::new(),
+            env_kind: None,
+            proxy: None,
         }
     }
 
@@ -611,7 +699,7 @@ mod tests {
         assert_eq!(s.profiles, vec![Profile::default_one()]);
         s.save().unwrap();
         assert!(!dir.join("profiles.json").exists(), "nothing is written for the implicit profile");
-        s.profiles.push(Profile { id: "work".into(), name: "Work".into() });
+        s.profiles.push(Profile { id: "work".into(), name: "Work".into(), ..Default::default() });
         s.save().unwrap();
         let again = Store::load_from(path).unwrap();
         assert_eq!(again.profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["default", "work"]);

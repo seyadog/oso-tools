@@ -90,13 +90,13 @@ export function tunnelsDialog(ctx: Ctx, onClose: () => void = () => {}) {
               }
               tunnelsDialog(ctx, onClose);
             };
-            const label = st?.state === "up" ? "on" : st?.state === "starting" ? "connecting…" : "";
+            const state = st?.state === "up" ? "on" : st?.state === "starting" ? "connecting…" : "";
             list.append(
               el(
                 "div",
                 { class: `t-row${st?.state === "up" ? " up" : ""}${st?.state === "failed" ? " failed" : ""}` },
                 sw,
-                el("div", { class: "txt" }, el("b", {}, describe(f)), st?.state === "failed" ? el("small", { class: "err" }, st.message) : el("small", {}, label)),
+                el("div", { class: "txt" }, el("b", {}, f.name.trim() || describe(f)), st?.state === "failed" ? el("small", { class: "err" }, st.message) : el("small", {}, [f.name.trim() ? describe(f) : "", f.auto ? "with every terminal" : "", state].filter(Boolean).join(" · "))),
                 edit,
                 del,
               ),
@@ -151,6 +151,9 @@ export function tunnelForm(ctx: Ctx, serverId: number | null, forward: Forward |
       const bind = el("input", { value: forward ? String(forward.bind_port) : "", inputmode: "numeric", name: "bind", autocomplete: "off" });
       const host = el("input", { value: forward?.host ?? "", name: "host", autocomplete: "off", spellcheck: "false", placeholder: "db.internal" });
       const port = el("input", { value: forward?.port ? String(forward.port) : "", inputmode: "numeric", name: "port", autocomplete: "off" });
+      const name = el("input", { value: forward?.name ?? "", name: "tunnel-name", autocomplete: "off", spellcheck: "false", placeholder: "postgres of acme (optional)" });
+      const auto = el("input", { type: "checkbox", id: "tunnel-auto", name: "auto" }) as HTMLInputElement;
+      auto.checked = forward?.auto ?? false;
       const bindLabel = el("label", {}, "");
       const hostRow = el("div", { class: "grid2" }, field("Host it leads to", host), field("Its port", port));
       const sync = () => {
@@ -162,7 +165,7 @@ export function tunnelForm(ctx: Ctx, serverId: number | null, forward: Forward |
       kind.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, forward ? "Edit tunnel" : "New tunnel"), field("Through the server", server), field("What it does", kind), el("div", {}, bindLabel, bind), hostRow, err);
+      const form = el("form", {}, el("h2", {}, forward ? "Edit tunnel" : "New tunnel"), field("Through the server", server), field("Name", name), field("What it does", kind), el("div", {}, bindLabel, bind), hostRow, el("div", { class: "hint" }, auto, el("label", { for: "tunnel-auto", style: "display:inline;margin-left:6px" }, "Open it with every terminal of this server")), err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -174,7 +177,7 @@ export function tunnelForm(ctx: Ctx, serverId: number | null, forward: Forward |
         if (bad) return void (err.textContent = bad);
         const sid = Number(server.value);
         const target = ctx.servers().find((s) => s.id === sid)!;
-        const next: Forward = { id: forward?.id ?? 0, kind: k, bind_port: Number(bind.value), host: k === "dynamic" ? "" : host.value.trim(), port: k === "dynamic" ? 0 : Number(port.value) };
+        const next: Forward = { id: forward?.id ?? 0, name: name.value.trim(), auto: auto.checked, kind: k, bind_port: Number(bind.value), host: k === "dynamic" ? "" : host.value.trim(), port: k === "dynamic" ? 0 : Number(port.value) };
         if (target.forwards.some((x) => x.id !== next.id && sameTunnel(x, next))) return void (err.textContent = "That tunnel already exists");
         if (k !== "remote" && ctx.servers().some((s) => s.forwards.some((x) => x.id !== next.id && x.kind !== "remote" && x.bind_port === next.bind_port))) {
           return void (err.textContent = `Port ${next.bind_port} is already used by another tunnel: two of them could not be on at once`);

@@ -371,6 +371,68 @@ await page.evaluate(async () => {
 });
 await settle(200);
 
+// notes, kind of machine, proxy, named tunnels
+await page.click('.profile-bar button[data-act="profiles"]');
+await settle(150);
+await page.click('[data-act="proxies"]');
+await settle(150);
+await page.click('[data-act="new-proxy"]');
+await settle(150);
+await page.fill('input[name="proxy-name"]', "office");
+await page.fill('input[name="proxy-host"]', "proxy.example.com");
+await page.fill('input[name="proxy-port"]', "3128");
+await page.keyboard.press("Enter");
+await settle(300);
+check("a proxy can be added", (await page.textContent(".plist")).includes("office") && (await page.textContent(".plist")).includes("proxy.example.com:3128"));
+await page.click('[data-act="new-proxy"]');
+await settle(150);
+await page.fill('input[name="proxy-name"]', "bad");
+await page.fill('input[name="proxy-host"]', "bad host");
+await page.keyboard.press("Enter");
+await settle(200);
+check("a proxy with a bad host is refused in words", (await page.textContent("#modal-bg .err")).includes("no spaces"));
+await page.keyboard.press("Escape");
+await settle(250);
+await page.keyboard.press("Escape");
+await settle(150);
+await clearAll();
+await page.click('.row[data-kind="server"]:has-text("staging")');
+await page.evaluate(() => window.oso.editSelected());
+await settle(250);
+await page.fill('textarea[name="notes"]', "nginx + API node");
+await page.click('.select[data-name="env-kind"] .sel-btn');
+await page.click('.select[data-name="env-kind"] .sel-item[data-value="production"]');
+await page.click('.select[data-name="proxy"] .sel-btn');
+await page.click('.select[data-name="proxy"] .sel-item:has-text("office")');
+await page.click("#modal-bg button.primary");
+await settle(300);
+const stg = await page.evaluate(async () => (await window.oso.be.tree()).servers.find((x) => x.name === "staging"));
+check("notes, kind and proxy are saved with the server", stg.notes === "nginx + API node" && stg.env_kind === "production" && stg.proxy !== null);
+await page.dblclick('.row[data-kind="server"] >> text=staging');
+await settle(400);
+check("a production machine's tab is red", (await page.$(".tab.prod")) !== null && (await page.$(".pane.prod")) !== null);
+await shot("9c-production");
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  const st = (await be.tree()).servers.find((x) => x.name === "staging");
+  await be.setForwards(st.id, [{ id: 0, name: "postgres of acme", auto: false, kind: "local", bind_port: 5433, host: "db.internal", port: 5432 }]);
+  await window.oso.refreshTree();
+});
+await settle(300);
+check("saved tunnels are listed on the left by name", (await page.textContent('.row.tunnel')).includes("postgres of acme"));
+await page.click('.row.tunnel button[title="Switch on"]');
+await settle(1500);
+check("and can be switched on from there", (await page.$('.row.tunnel.up')) !== null || (await page.$('.row.tunnel button[title="Switch off"]')) !== null);
+await page.click('.row.tunnel button[title="Switch off"]');
+await settle(300);
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  const st = (await be.tree()).servers.find((x) => x.name === "staging");
+  await be.setForwards(st.id, []);
+  await window.oso.refreshTree();
+});
+await clearAll();
+
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

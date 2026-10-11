@@ -6,7 +6,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use oso_core::daemon::Stream;
 use oso_core::engine::{Emit, Engine, OpenError, SessionInfo, TransferStatus, TunnelStatus, VaultStatus};
-use oso_core::store::{Forward, NodeId, Server, Store};
+use oso_core::store::{Forward, NodeId, Proxy, Server, Store};
 use oso_core::vault::{SecretMeta, Vault};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -127,6 +127,21 @@ fn set_view_all(state: State<AppState>, all: bool) -> Res<()> {
 #[tauri::command]
 fn set_folder_profile(state: State<AppState>, id: u64, profile: Option<String>) -> Res<()> {
     engine!(state).set_folder_profile(id, profile).map_err(err)
+}
+
+#[tauri::command]
+fn proxy_save(state: State<AppState>, proxy: Proxy) -> Res<u64> {
+    engine!(state).proxy_save(proxy).map_err(err)
+}
+
+#[tauri::command]
+fn proxy_delete(state: State<AppState>, id: u64) -> Res<()> {
+    engine!(state).proxy_delete(id).map_err(err)
+}
+
+#[tauri::command]
+fn profile_set_proxy(state: State<AppState>, profile: String, proxy: Option<u64>) -> Res<()> {
+    engine!(state).profile_set_proxy(&profile, proxy).map_err(err)
 }
 
 #[tauri::command]
@@ -376,6 +391,9 @@ fn main() {
             set_active_profile,
             set_view_all,
             set_folder_profile,
+            proxy_save,
+            proxy_delete,
+            profile_set_proxy,
             secret_list,
             secret_save,
             secret_delete,
