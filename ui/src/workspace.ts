@@ -2,7 +2,7 @@
 // (a mosaic); every terminal is born as a tab and drag and drop joins them or sets them apart. This is the whole
 // state of the window and every way to change it, with no DOM in it, so it is tested on its own.
 
-import { Id, Rect, Side, Tree, autoSide, contains, dock, dwindle, layout, leaf, leaves, neighbour, remove, setPm, swap } from "./tree";
+import { Id, Rect, Side, Tree, autoSide, contains, dock, dwindle, layout, leaf, leaves, mapLeaves, neighbour, remove, setPm, swap } from "./tree";
 
 /** There is one row of tabs, like a browser's. (Older versions had nine screens; their tabs are merged on load.) */
 export const SCREENS = 1;
@@ -28,6 +28,8 @@ export interface Group {
   tree: Tree;
   /** The terminal of this tab that has (or last had) the keyboard. */
   active: Id;
+  /** What is typed in one terminal of this tab goes to all of them. */
+  broadcast?: boolean;
 }
 
 export class Screen {
@@ -63,7 +65,7 @@ export class Screen {
 export interface Saved {
   current: number;
   screens: {
-    groups?: { tree: Tree; active: Id }[];
+    groups?: { tree: Tree; active: Id; broadcast?: boolean }[];
     cur?: number;
     /** Older layouts: a mode, the terminals and (mosaic) one tree for all of them. */
     mode?: Mode;
@@ -132,6 +134,51 @@ export class Workspace {
     this.changed();
   }
 
+  /**
+   * A whole tab at once (a saved group being opened): `shape` is the arrangement with the terminals numbered
+   * 0, 1, 2… in the order of `tabs`.
+   */
+  addGroup(tabs: (Omit<Tab, "screen" | "dead"> & Partial<Pick<Tab, "dead">>)[], shape: Tree, broadcast = false) {
+    if (tabs.length === 0) return;
+    const s = this.screen;
+    for (const t of tabs) this.tabs.set(t.sid, { ...t, screen: this.current, dead: t.dead ?? false });
+    const tree = mapLeaves(shape, (i) => tabs[i]?.sid ?? tabs[0].sid);
+    const ids = leaves(tree);
+    // a shape that does not match the terminals (an old file edited by hand) falls back to an automatic layout
+    const ok = ids.length === tabs.length && new Set(ids).size === ids.length;
+    s.groups.push({ tree: ok ? tree : dwindle(tabs.map((t) => t.sid), this.size)!, active: tabs[0].sid, broadcast: broadcast && tabs.length > 1 });
+    s.cur = s.groups.length - 1;
+    this.pending = null;
+    this.changed();
+  }
+
+  /** The arrangement of the tab on show with its terminals numbered 0, 1, 2… (to save it as a group). */
+  shape(): { shape: Tree; sids: Id[] } | null {
+    const g = this.screen.group;
+    if (!g) return null;
+    const sids = leaves(g.tree);
+    return { shape: mapLeaves(g.tree, (id) => sids.indexOf(id)), sids };
+  }
+
+  /** Whether what is typed goes to every terminal of the tab on show. */
+  get broadcasting(): boolean {
+    const g = this.screen.group;
+    return !!g?.broadcast && leaves(g.tree).length > 1;
+  }
+
+  /** The terminals that get what is typed in `sid`: all of its tab if that tab is in broadcast, else nobody. */
+  broadcastTeam(sid: Id): Id[] | null {
+    const g = this.screen.groups[this.screen.indexOf(sid)];
+    return g?.broadcast && leaves(g.tree).length > 1 ? leaves(g.tree) : null;
+  }
+
+  setBroadcast(on: boolean) {
+    const g = this.screen.group;
+    if (!g) return;
+    g.broadcast = on && leaves(g.tree).length > 1;
+    this.changed();
+  }
+
   /** Takes a terminal out of its tab (the tab goes if it was the only one). It stays registered. */
   private detach(sid: Id) {
     const tab = this.tabs.get(sid);
@@ -143,6 +190,7 @@ export class Workspace {
     const rest = remove(g.tree, sid);
     if (rest) {
       g.tree = rest;
+      if (leaves(rest).length < 2) g.broadcast = false;
       if (g.active === sid) g.active = leaves(rest).at(-1)!;
       return;
     }
@@ -347,7 +395,7 @@ export class Workspace {
   save(): Saved {
     return {
       current: this.current,
-      screens: this.screens.map((s) => ({ groups: s.groups.map((g) => ({ tree: g.tree, active: g.active })), cur: s.cur })),
+      screens: this.screens.map((s) => ({ groups: s.groups.map((g) => ({ tree: g.tree, active: g.active, broadcast: g.broadcast })), cur: s.cur })),
     };
   }
 
@@ -362,19 +410,19 @@ export class Workspace {
     live.forEach((t) => this.tabs.set(t.sid, { ...t, screen: 0, dead: false }));
     const placed = new Set<Id>();
     // every saved screen's tabs go, in order, into the one row
-    const take = (tree: Tree | null | undefined, active: Id | null | undefined) => {
+    const take = (tree: Tree | null | undefined, active: Id | null | undefined, broadcast?: boolean) => {
       const keep = new Set([...alive].filter((id) => !placed.has(id)));
       const pruned = pruneTree(tree, keep);
       if (!pruned) return;
       const ids = leaves(pruned);
       ids.forEach((id) => placed.add(id));
-      this.screens[0].groups.push({ tree: pruned, active: active != null && ids.includes(active) ? active : ids.at(-1)! });
+      this.screens[0].groups.push({ tree: pruned, active: active != null && ids.includes(active) ? active : ids.at(-1)!, broadcast: !!broadcast && ids.length > 1 });
     };
     let cur = 0;
     saved?.screens?.forEach((ss, i) => {
       const start = this.screens[0].groups.length;
       if (ss.groups) {
-        ss.groups.forEach((g) => take(g.tree, g.active));
+        ss.groups.forEach((g) => take(g.tree, g.active, g.broadcast));
         if (i === (saved.current ?? 0)) cur = start + Math.max(0, ss.cur ?? 0);
       } else {
         if (ss.mode === "mosaic" && ss.tree) take(ss.tree, ss.active);

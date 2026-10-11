@@ -45,6 +45,11 @@ export function remove(t: Tree, id: Id): Tree | null {
   return a ?? b;
 }
 
+/** The same arrangement with every terminal renamed by `f` (a saved layout uses 0, 1, 2… for its terminals). */
+export function mapLeaves(t: Tree, f: (id: Id) => Id): Tree {
+  return t.kind === "leaf" ? leaf(f(t.id)) : { ...t, a: mapLeaves(t.a, f), b: mapLeaves(t.b, f) };
+}
+
 /** Puts `to` where `from` is. */
 export function replace(t: Tree, from: Id, to: Id): Tree {
   if (t.kind === "leaf") return t.id === from ? leaf(to) : t;

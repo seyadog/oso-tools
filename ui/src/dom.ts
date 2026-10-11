@@ -209,3 +209,34 @@ export function makeSelect(options: [string, string][], value: string, attrs: Re
   paint();
   return root;
 }
+
+/** A small menu at the pointer (right click): `items` run when picked; anything else closes it. */
+export function contextMenu(x: number, y: number, items: { label: string; run: () => void; danger?: boolean }[]) {
+  document.querySelector(".ctx-menu")?.remove();
+  const menu = el("div", { class: "ctx-menu", role: "menu" });
+  const close = () => {
+    menu.remove();
+    window.removeEventListener("pointerdown", away, true);
+    window.removeEventListener("keydown", key, true);
+  };
+  const away = (e: Event) => {
+    if (!menu.contains(e.target as Node)) close();
+  };
+  const key = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  for (const it of items) {
+    const b = el("button", { class: `ctx-item${it.danger ? " danger" : ""}`, type: "button", role: "menuitem" }, it.label);
+    b.onclick = () => {
+      close();
+      it.run();
+    };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 4))}px`;
+  window.addEventListener("pointerdown", away, true);
+  window.addEventListener("keydown", key, true);
+}

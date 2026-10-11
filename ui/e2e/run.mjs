@@ -312,6 +312,87 @@ check("and removed again", (await page.$$('.vrow:has-text("web-1") .pw')).length
 await page.keyboard.press("Escape");
 await settle(150);
 
+// 13b. groups: a tab saved with its servers and arrangement, opened again in one go
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Alt+v");
+await settle(500);
+await page.evaluate(async () => { window.oso.ws.prepareSplit("bottom"); await window.oso.openServer(4); });
+await settle(500);
+s = await state();
+check("a tab with three terminals to save", s.tabs === 1 && s.terms === 3);
+const layoutBefore = await panes();
+await page.click('.tools button[title="Save this tab as a group"]');
+await settle(200);
+await page.fill("#modal-bg input", "ops");
+await page.keyboard.press("Enter");
+await settle(300);
+check("the tab is saved as a group, listed on the left", (await page.$$('.row.group:has-text("ops")')).length === 1 && (await page.$$eval(".row.group small", (e) => e[0].textContent)).includes("3 terminals"));
+check("groups.json is written", JSON.parse((await page.evaluate(() => window.oso.be.readConfig("groups.json"))) ?? "[]").length === 1);
+await page.evaluate(() => { window.oso.groups[0].panes[0].command = "echo from-group"; });
+await clearAll();
+check("with every tab closed, the group is still there", (await page.$$(".row.group")).length === 1 && (await state()).tabs === 0);
+await page.dblclick('.row.group:has-text("ops")');
+await settle(1800);
+s = await state();
+const layoutAfter = await panes();
+check("double-clicking the group opens its three terminals as one tab", s.tabs === 1 && s.terms === 3 && layoutAfter.length === 3);
+check("each terminal is where it was", JSON.stringify(layoutBefore.map((p) => [p.x, p.y, p.w, p.h])) === JSON.stringify(layoutAfter.map((p) => [p.x, p.y, p.w, p.h])), JSON.stringify([layoutBefore, layoutAfter]));
+const firstSid = await page.evaluate(() => window.oso.ws.tabsHere()[0].sid);
+check("the command saved for a terminal is typed when it shows its prompt", (await termText(firstSid)).includes("from-group"));
+await shot("13b-group");
+
+// broadcast belongs to the tab
+check("broadcast is off in a group saved without it", !(await page.evaluate(() => window.oso.ws.broadcasting)));
+await page.keyboard.press("Alt+b");
+await settle(200);
+check("Alt+B turns broadcast on for this tab, with a mark on the tab", (await page.evaluate(() => window.oso.ws.broadcasting)) && (await page.$$(".tab .bcm")).length === 1 && (await page.$$(".pane.show.broadcast")).length === 3);
+await page.keyboard.type("echo to-everyone");
+await page.keyboard.press("Enter");
+await settle(500);
+const seen = await page.evaluate(async () => { const out = []; for (const t of window.oso.ws.tabsHere()) { const b = window.oso.panes.get(t.sid).term.buffer.active; let s = ""; for (let i = 0; i < b.length; i++) s += b.getLine(i).translateToString(true) + "\n"; out.push(s.includes("to-everyone")); } return out; });
+check("what is typed reaches the three terminals", seen.length === 3 && seen.every(Boolean), JSON.stringify(seen));
+await page.keyboard.press("Control+n");
+await settle(400);
+check("another tab is not in broadcast", !(await page.evaluate(() => window.oso.ws.broadcasting)) && (await page.$$(".pane.show.broadcast")).length === 0);
+await page.keyboard.press("Alt+1");
+await settle(200);
+check("back on the first tab it still is", await page.evaluate(() => window.oso.ws.broadcasting));
+await page.keyboard.press("Alt+b");
+await settle(200);
+check("Alt+B again turns it off", !(await page.evaluate(() => window.oso.ws.broadcasting)));
+
+// the menu of a tab, and editing / deleting a group
+await page.click(".tab.on", { button: "right" });
+await settle(150);
+check("right-clicking a tab offers to save it as a group", (await page.$$eval(".ctx-item", (e) => e.map((x) => x.textContent))).includes("Save as group…"));
+await page.keyboard.press("Escape");
+await page.hover('.row.group:has-text("ops")');
+await page.click('.row.group:has-text("ops") button[title="Edit"]');
+await settle(200);
+check("the group opens in an editor with a field for each terminal", (await page.$$("#modal-bg .group-pane")).length === 3);
+await page.fill("#modal-bg input >> nth=0", "operations");
+await page.check("#gbc");
+await page.click("#modal-bg button.primary");
+await settle(300);
+check("renaming and broadcast are saved", (await page.$$('.row.group:has-text("operations")')).length === 1 && (await page.evaluate(() => window.oso.groups[0].broadcast)));
+await clearAll();
+await page.dblclick('.row.group:has-text("operations")');
+await settle(1500);
+check("a group saved with broadcast opens in broadcast", await page.evaluate(() => window.oso.ws.broadcasting));
+await page.hover('.row.group:has-text("operations")');
+await page.click('.row.group:has-text("operations") button[title="Delete"]');
+await settle(200);
+await page.click("#modal-bg button.primary");
+await settle(300);
+check("deleting a group removes it and leaves the open terminals alone", (await page.$$(".row.group")).length === 0 && (await state()).terms === 3);
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
 // 14. the main key: one setting changes every shortcut at once
 await page.keyboard.press("Control+,");
 await settle(250);

@@ -56,7 +56,7 @@ fn open_err(e: OpenError) -> String {
 /// Only the files the window itself keeps may be read or written through the window.
 fn config_path(name: &str) -> Res<std::path::PathBuf> {
     match name {
-        "workspace.json" | "hotkeys.json" | "snippets.json" | "selftest.flag" | "selftest.out" => Ok(Store::config_dir().join(name)),
+        "workspace.json" | "hotkeys.json" | "snippets.json" | "groups.json" | "selftest.flag" | "selftest.out" => Ok(Store::config_dir().join(name)),
         _ => Err("not allowed".into()),
     }
 }

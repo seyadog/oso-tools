@@ -54,6 +54,8 @@ export class Pane {
   private opened = false;
   private resizeObs: ResizeObserver;
   private lastSize = "";
+  /** When output last arrived (ms since the epoch), 0 if none yet. */
+  lastOutputAt = 0;
 
   constructor(
     public sid: number,
@@ -153,13 +155,21 @@ export class Pane {
 
   /** The screen as the background server holds it: scroll-back first, then the exact screen. */
   snapshot(replay: string, screen: string) {
+    this.lastOutputAt = Date.now();
     this.term.reset();
     if (replay) this.term.write(b64.decode(replay));
     if (screen) this.term.write(b64.decode(screen));
   }
 
   output(data: string) {
+    this.lastOutputAt = Date.now();
     this.term.write(b64.decode(data));
+  }
+
+  /** The line the cursor is on (what a prompt looks like when the shell is waiting). */
+  cursorLine(): string {
+    const b = this.term.buffer.active;
+    return b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? "";
   }
 
   focus() {

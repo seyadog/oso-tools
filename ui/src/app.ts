@@ -1,7 +1,8 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
 import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, VaultLockedError, VaultStatus, b64 } from "./api";
-import { clear, confirmBox, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
+import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
+import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
 import { Pane } from "./pane";
@@ -28,7 +29,7 @@ export class App {
   private early = new Map<Id, SessionEvent[]>();
   private bindings = buildBindings(null).bindings;
   userKeys: Record<string, unknown> | null = null;
-  broadcast = new Set<number>();
+  groups: SavedGroup[] = [];
   focusArea: "terminal" | "sidebar" = "terminal";
   selected: { kind: "folder" | "server"; id: number } | null = null;
   filter = "";
@@ -68,6 +69,7 @@ export class App {
     this.be.onSession((e) => this.onSession(e));
     await this.loadKeys();
     this.snippets = (await this.readJson<{ name: string; command: string }[]>("snippets.json")) ?? [];
+    this.groups = parseGroups(await this.be.readConfig("groups.json").catch(() => null));
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
 
@@ -310,8 +312,9 @@ export class App {
       if (data === "\r") void this.reconnect(sid);
       return;
     }
-    if (this.broadcast.has(tab.screen) && this.ws.screens[tab.screen].mode === "mosaic") {
-      for (const t of this.ws.tabsHere()) if (!t.dead) void this.be.write(t.sid, data);
+    const team = this.ws.broadcastTeam(sid);
+    if (team) {
+      for (const id of team) if (!this.ws.tabs.get(id)?.dead) void this.be.write(id, data);
       return;
     }
     void this.be.write(sid, data);
@@ -399,7 +402,7 @@ export class App {
       pane.root.classList.toggle("mosaic", mosaic);
       pane.root.classList.toggle("active", tab.sid === s.active);
       pane.root.classList.toggle("dead", tab.dead);
-      const bc = this.broadcast.has(ws.current) && mosaic && !tab.dead;
+      const bc = ws.broadcasting && !tab.dead;
       pane.root.classList.toggle("broadcast", bc);
       pane.badge.style.display = bc ? "" : "none";
       pane.setTitle(tab.title);
@@ -440,7 +443,8 @@ export class App {
       el("div", { class: "g-head" }, logo, el("div", {}, el("h1", {}, "oso"), el("div", { class: "lead" }, `Nothing is open. Open a host from the list on the left, or press ${this.keyText("search")}.`))),
       el("div", { class: "g-grid" },
         el("section", {}, el("h3", {}, "Open"), row([k("double-click")], "a host in the list: opens a new terminal (as many times as you want)"), row([ka("search")], "search a host by name and open it"), row([ka("tab.new")], "another terminal of the same host"), row([ka("sudo.fill")], "types the saved sudo password")),
-        el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of the screen")),
+        el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of this tab, on or off")),
+        el("section", {}, el("h3", {}, "Groups"), row([ka("group.save")], "save this tab (its servers and arrangement) as a group"), row(["Groups on the left"], "double-click one: all its terminals open together, even typing the command you chose in each"), row(["right-click a tab"], "save it as a group, rename it or close it")),
         el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
         el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
       ),
@@ -458,7 +462,6 @@ export class App {
 
   private renderTopbar() {
     const ws = this.ws;
-    const mosaic = ws.screen.mode === "mosaic";
 
     // one tab per group: a lone terminal, or several tiled together
     clear(this.tabsEl);
@@ -477,7 +480,21 @@ export class App {
         el("span", {}, t.title),
       );
       if (ids.length > 1) tab.append(count);
+      if (g.broadcast && ids.length > 1) {
+        const m = el("span", { class: "bcm", title: "Typing goes to every terminal of this tab" });
+        m.append(icon("broadcast", 13));
+        tab.append(m);
+      }
       tab.append(x);
+      tab.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        ws.focus(g.active);
+        contextMenu(e.clientX, e.clientY, [
+          { label: "Save as group…", run: () => void this.saveAsGroup() },
+          { label: "Rename", run: () => void this.renameTab(g.active) },
+          { label: ids.length > 1 ? `Close tab (${ids.length} terminals)` : "Close", run: () => void this.closeTab(ids), danger: true },
+        ]);
+      });
       x.onclick = (e) => {
         e.stopPropagation();
         void this.closeTab(ids);
@@ -495,11 +512,12 @@ export class App {
 
     // tools
     clear(this.toolsEl);
-    const bc = this.broadcast.has(ws.current) && mosaic;
+    const bc = ws.broadcasting;
     this.toolsEl.append(
       this.ibtn("split-right", `New terminal to the right  (${this.keyText("split.right")})`, () => this.run("split.right")),
       this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
-      this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this screen"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
+      this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this tab"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
+      this.ibtn("save", "Save this tab as a group", () => void this.saveAsGroup()),
       this.ibtn("snippet", "Snippets: saved commands", () => this.snippetsDialog()),
       el("span", { class: "sep" }),
       this.ibtn("plus", `Open a host  (${this.keyText("search")})`, () => void this.hostPicker()),
@@ -625,6 +643,15 @@ export class App {
 
   renderSidebar() {
     clear(this.treeEl);
+    if (!this.filter) this.renderGroups();
+    else if (this.groups.length) {
+      const q = this.filter;
+      for (const g of this.groups.filter((g) => g.name.toLowerCase().includes(q))) {
+        const row = el("div", { class: "row group" }, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `group · ${g.panes.length} terminals`)));
+        row.ondblclick = () => void this.openGroup(g);
+        this.treeEl.append(row);
+      }
+    }
     const rows = this.rows();
     if (rows.length === 0) {
       this.treeEl.append(el("div", { class: "empty" }, this.filter ? "No host matches." : "No hosts yet. Add one with the + above."));
@@ -740,6 +767,177 @@ export class App {
     });
   }
 
+  // ------------------------------------------------------------ groups
+
+  private saveGroups() {
+    void this.be.writeConfig("groups.json", JSON.stringify(this.groups, null, 2));
+  }
+
+  /** The tab on show, kept as a group: its servers, its arrangement and whether it is in broadcast. */
+  async saveAsGroup() {
+    const cur = this.ws.shape();
+    if (!cur) return toast("Open a terminal first, then save its tab");
+    const panes = cur.sids.map((sid) => {
+      const t = this.ws.tabs.get(sid)!;
+      return { server: t.serverId, name: this.tree.servers.find((s) => s.id === t.serverId)?.name ?? t.title, command: "" };
+    });
+    const first = this.ws.tabs.get(cur.sids[0])?.title ?? "Group";
+    const name = await promptBox("Save this tab as a group", panes.length > 1 ? `${first} + ${panes.length - 1}` : first, "text", `${panes.length} terminal${panes.length > 1 ? "s" : ""}, as they are arranged now. You will find it on the left, under Groups.`);
+    if (!name?.trim()) return;
+    this.groups.push({ id: nextGroupId(this.groups), name: name.trim(), broadcast: this.ws.broadcasting, shape: cur.shape, panes });
+    this.saveGroups();
+    localStorage.setItem("oso.groups", "open");
+    this.renderSidebar();
+    toast(`Saved as “${name.trim()}”. Double-click it under Groups to open it again.`);
+  }
+
+  /** Opens every terminal of a saved group together, as one tab, arranged as it was saved. */
+  async openGroup(g: SavedGroup) {
+    const gone = new Set<number>();
+    g.panes.forEach((p, i) => {
+      if (p.server !== LOCAL && !this.tree.servers.some((s) => s.id === p.server)) gone.add(i);
+    });
+    const use = gone.size ? withoutPanes(g, gone) : { shape: g.shape, panes: g.panes };
+    if (!use) return toast(`The servers of “${g.name}” no longer exist`);
+    if (gone.size) toast(`${gone.size} server${gone.size > 1 ? "s" : ""} of this group no longer exist${gone.size > 1 ? "" : "s"}: ${[...gone].map((i) => g.panes[i].name).join(", ")}`, 6000);
+    this.measure();
+    const opened: SessionInfo[] = [];
+    let useVault = true;
+    for (let i = 0; i < use.panes.length; i++) {
+      try {
+        opened.push(await this.be.open(use.panes[i].server, this.guessRows(), this.guessCols(), useVault));
+      } catch (e) {
+        if (e instanceof VaultLockedError) {
+          const c = await this.unlockDialog(true);
+          if (c === "cancel") {
+            for (const o of opened) void this.be.close(o.sid).catch(() => {});
+            return;
+          }
+          if (c === "without") useVault = false;
+          i--;
+          continue;
+        }
+        toast(`Could not open ${use.panes[i].name || "Local"}: ${(e as Error).message}`);
+        opened.push(null as unknown as SessionInfo);
+      }
+    }
+    // a terminal that failed to open leaves its place: the rest close up
+    const failed = new Set(opened.map((o, i) => (o ? -1 : i)).filter((i) => i >= 0));
+    const fit = failed.size ? withoutPanes(use, failed) : use;
+    const live = opened.filter(Boolean);
+    if (!fit || !live.length) return;
+    this.ws.addGroup(
+      live.map((o) => ({ sid: o.sid, title: o.title, serverId: o.server_id })),
+      fit.shape,
+      g.broadcast,
+    );
+    this.focusArea = "terminal";
+    live.forEach((o, i) => {
+      this.ensurePane(o.sid);
+      const buffered = this.early.get(o.sid);
+      this.early.delete(o.sid);
+      buffered?.forEach((e) => this.onSession(e));
+      const command = fit.panes[i].command.trim();
+      if (command) void this.typeWhenReady(o.sid, command);
+    });
+  }
+
+  /** Types a command in a terminal once it shows a prompt (never at a password question). Gives up after 30 s. */
+  private async typeWhenReady(sid: Id, command: string) {
+    const until = Date.now() + 30000;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 300));
+      const pane = this.panes.get(sid);
+      const tab = this.ws.tabs.get(sid);
+      if (!pane || !tab || tab.dead) return;
+      if (pane.lastOutputAt && Date.now() - pane.lastOutputAt >= 600 && looksReady(pane.cursorLine())) {
+        await this.be.write(sid, `${command}\r`);
+        return;
+      }
+    }
+    toast(`The command “${command}” was not typed: the terminal never showed a prompt`, 6000);
+  }
+
+  private async editGroup(g: SavedGroup) {
+    openModal((close) => {
+      const name = el("input", { value: g.name, autocomplete: "off" });
+      const bc = el("input", { type: "checkbox", id: "gbc" }) as HTMLInputElement;
+      bc.checked = g.broadcast;
+      const cmds = g.panes.map((p) => el("input", { value: p.command, autocomplete: "off", spellcheck: "false", placeholder: "command to type when it opens (optional)" }) as HTMLInputElement);
+      const rows = g.panes.map((p, i) => el("div", { class: "group-pane" }, el("span", { class: "who", title: p.name }, el("span", { class: "dot", style: `background:${serverColor(p.server)}` }), `${i + 1}  ${p.name || "Local"}`), cmds[i]));
+      const form = el("form", {}, el("h2", {}, "Edit group"), field("Name", name), el("div", { class: "hint", style: "margin:10px 0 0" }, "Terminals, in the order they were saved:"), ...rows);
+      if (g.panes.length > 1) form.append(el("label", { class: "group-check" }, bc, "Type in every terminal at once (broadcast) when it opens"));
+      const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
+      const no = el("button", { class: "btn", type: "button" }, "Cancel");
+      no.onclick = close;
+      form.append(el("div", { class: "actions" }, no, ok));
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        g.name = name.value.trim() || g.name;
+        g.broadcast = bc.checked && g.panes.length > 1;
+        g.panes.forEach((p, i) => (p.command = cmds[i].value));
+        this.saveGroups();
+        close();
+        this.renderSidebar();
+      };
+      return form;
+    });
+  }
+
+  private async deleteGroup(g: SavedGroup) {
+    if (!(await confirmBox(`Delete the group “${g.name}”?`, "Only the saved group goes; terminals that are open stay open.", "Delete"))) return;
+    this.groups = this.groups.filter((x) => x.id !== g.id);
+    this.saveGroups();
+    this.renderSidebar();
+  }
+
+  /** The Groups section at the top of the left list. */
+  private renderGroups() {
+    const open = localStorage.getItem("oso.groups") !== "closed";
+    const head = el("div", { class: "sec", title: "Tabs you saved: open all their terminals again with a double click" });
+    const chev = el("span", { class: "chev" });
+    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
+    head.append(chev, "Groups", el("span", { class: "n" }, this.groups.length ? String(this.groups.length) : ""));
+    head.onclick = () => {
+      localStorage.setItem("oso.groups", open ? "closed" : "open");
+      this.renderSidebar();
+    };
+    this.treeEl.append(head);
+    if (!open) return;
+    if (!this.groups.length) this.treeEl.append(el("div", { class: "hint-row" }, `Arrange some terminals in a tab, then click the save icon on the top bar (or right-click the tab) to keep them as a group.`));
+    for (const g of this.groups) {
+      const row = el("div", { class: "row group", "data-group": String(g.id), title: g.panes.map((p) => p.name || "Local").join(", ") });
+      const gi = el("span", { class: "gi" });
+      gi.append(icon("grid", 15));
+      const tail = el("span", { class: "tail", title: "Opens in broadcast" });
+      if (g.broadcast) tail.append(icon("broadcast", 14));
+      const acts = el("span", { class: "acts" });
+      const stop = (f: () => void) => (e: Event) => {
+        e.stopPropagation();
+        f();
+      };
+      const play = this.ibtn("play", "Open", () => {});
+      const edit = this.ibtn("edit", "Edit", () => {});
+      const del = this.ibtn("trash", "Delete", () => {});
+      [play, edit, del].forEach((b) => (b.style.cssText = "width:24px;height:24px"));
+      play.onclick = stop(() => void this.openGroup(g));
+      edit.onclick = stop(() => void this.editGroup(g));
+      del.onclick = stop(() => void this.deleteGroup(g));
+      acts.append(play, edit, del);
+      row.append(gi, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `${g.panes.length} terminal${g.panes.length > 1 ? "s" : ""} · ${summary(g)}`)), tail, acts);
+      row.ondblclick = () => void this.openGroup(g);
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        contextMenu(e.clientX, e.clientY, [
+          { label: "Open", run: () => void this.openGroup(g) },
+          { label: "Edit…", run: () => void this.editGroup(g) },
+          { label: "Delete", run: () => void this.deleteGroup(g), danger: true },
+        ]);
+      });
+      this.treeEl.append(row);
+    }
+  }
+
   // ------------------------------------------------------------ snippets
 
   private saveSnippets() {
@@ -812,7 +1010,7 @@ export class App {
   private runSnippet(command: string) {
     const t = this.ws.activeTab();
     if (!t || t.dead) return toast("Open a terminal first");
-    const targets = this.broadcast.has(this.ws.current) && this.ws.screen.mode === "mosaic" ? this.ws.tabsHere().filter((x) => !x.dead) : [t];
+    const targets = this.ws.broadcasting ? this.ws.tabsHere().filter((x) => !x.dead) : [t];
     targets.forEach((x) => void this.be.write(x.sid, `${command}\r`));
     this.focusActive();
   }
@@ -1159,18 +1357,20 @@ export class App {
     }
   }
 
+  /** Mod+B: what is typed in this tab goes to all of its terminals (and back). Needs two or more. */
   toggleBroadcast() {
-    const n = this.ws.current;
-    if (this.broadcast.has(n)) this.broadcast.delete(n);
-    else {
-      if (this.ws.screen.mode !== "mosaic") {
-        if (this.ws.screen.groups.length < 2) return toast("Broadcast needs two or more terminals on this screen");
-        this.ws.toggleMode();
-      }
-      this.broadcast.add(n);
-      toast("BROADCAST: what you type goes to every terminal of this screen");
+    const ws = this.ws;
+    if (ws.broadcasting) {
+      ws.setBroadcast(false);
+      return toast("Broadcast off");
     }
-    this.render();
+    if (!ws.screen.group) return;
+    if (ws.screen.mode !== "mosaic") {
+      if (ws.screen.groups.length < 2) return toast("Broadcast needs two or more terminals");
+      ws.toggleMode();
+    }
+    ws.setBroadcast(true);
+    toast("BROADCAST: what you type goes to every terminal of this tab");
   }
 
   // ------------------------------------------------------------ keyboard
@@ -1214,6 +1414,8 @@ export class App {
         return void (ws.screen.active != null && this.renameTab(ws.screen.active));
       case "broadcast.toggle":
         return this.toggleBroadcast();
+      case "group.save":
+        return void this.saveAsGroup();
       case "search":
         return void this.hostPicker();
       case "sudo.fill":

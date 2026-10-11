@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { leaves } from "../src/tree";
+import { Tree, leaf, leaves } from "../src/tree";
 import { Workspace } from "../src/workspace";
 
 let ws: Workspace;
@@ -238,5 +238,63 @@ describe("saving", () => {
     ]);
     expect(ws.screen.groups.map((g) => leaves(g.tree))).toEqual([[2], [1]]);
     expect(ws.screen.mode).toBe("tabs");
+  });
+});
+
+describe("groups and per-tab broadcast", () => {
+  const mk = (sid: number) => ({ sid, title: `t${sid}`, serverId: sid });
+  const split = (a: number, b: number): Tree => ({ kind: "split", side: true, pm: 500, a: leaf(a), b: leaf(b) });
+
+  it("opens a saved shape as one tab, with its terminals where the shape says", () => {
+    const ws = new Workspace();
+    ws.addGroup([mk(11), mk(12), mk(13)], { kind: "split", side: true, pm: 400, a: leaf(0), b: { kind: "split", side: false, pm: 500, a: leaf(1), b: leaf(2) } }, true);
+    expect(ws.screen.groups.length).toBe(1);
+    expect(leaves(ws.screen.group!.tree)).toEqual([11, 12, 13]);
+    expect(ws.broadcasting).toBe(true);
+    expect(ws.screen.mode).toBe("mosaic");
+  });
+
+  it("keeps the shape through shape() and addGroup", () => {
+    const ws = new Workspace();
+    ws.addGroup([mk(5), mk(6)], split(1, 0));
+    const { shape, sids } = ws.shape()!;
+    expect(sids).toEqual([6, 5]);
+    expect(leaves(shape)).toEqual([0, 1]);
+    const other = new Workspace();
+    other.addGroup([mk(21), mk(22)], shape);
+    expect(leaves(other.screen.group!.tree)).toEqual([21, 22]);
+  });
+
+  it("falls back to an automatic layout when the shape does not fit", () => {
+    const ws = new Workspace();
+    ws.addGroup([mk(1), mk(2), mk(3)], split(0, 1));
+    expect(new Set(leaves(ws.screen.group!.tree))).toEqual(new Set([1, 2, 3]));
+  });
+
+  it("broadcast belongs to one tab and needs two terminals", () => {
+    const ws = new Workspace();
+    ws.addTab(mk(1));
+    ws.setBroadcast(true);
+    expect(ws.broadcasting).toBe(false);
+    ws.addGroup([mk(2), mk(3)], split(0, 1));
+    ws.setBroadcast(true);
+    expect(ws.broadcastTeam(2)).toEqual([2, 3]);
+    expect(ws.broadcastTeam(1)).toBeNull();
+    ws.goTab(1);
+    expect(ws.broadcasting).toBe(false);
+    ws.goTab(2);
+    expect(ws.broadcasting).toBe(true);
+  });
+
+  it("broadcast ends when the tab is left with one terminal, and is saved and restored", () => {
+    const ws = new Workspace();
+    ws.addGroup([mk(2), mk(3)], split(0, 1), true);
+    const saved = JSON.parse(JSON.stringify(ws.save()));
+    const again = new Workspace();
+    again.restore(saved, [2, 3].map((sid) => ({ ...mk(sid), screen: 0 })));
+    expect(again.broadcasting).toBe(true);
+    again.closeTab(3);
+    expect(again.broadcasting).toBe(false);
+    expect(again.screen.group!.broadcast).toBe(false);
   });
 });
