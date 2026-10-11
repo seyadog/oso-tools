@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <g id="shape">
+      <!-- arm hanging down -->
+      <path d="M318 318 L324 424" stroke-width="54" stroke-linecap="round" fill="none"/>
+      <!-- leg up -->
+      <path d="M112 300 L104 178" stroke-width="58" stroke-linecap="round" fill="none"/>
+      <!-- body -->
+      <ellipse cx="236" cy="296" rx="168" ry="86" transform="rotate(-2 236 296)"/>
+      <!-- head, ear and snout -->
+      <circle cx="388" cy="262" r="72"/>
+      <circle cx="356" cy="198" r="28"/>
+      <ellipse cx="438" cy="292" rx="42" ry="32"/>
+    </g>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#1d1d20"/>
+  <g transform="translate(0 6)">
+    <!-- outline, then fur on top, so overlapping parts blend -->
+    <use href="#shape" fill="#4a2e1d" stroke="#4a2e1d" stroke-width="14" stroke-linejoin="round"/>
+    <use href="#shape" fill="#8a5a3a" stroke="#8a5a3a" stroke-width="0"/>
+    <!-- same width as the arm/leg strokes, painted as fur -->
+    <path d="M318 318 L324 424" stroke="#8a5a3a" stroke-width="54" stroke-linecap="round" fill="none"/>
+    <path d="M112 300 L104 178" stroke="#8a5a3a" stroke-width="58" stroke-linecap="round" fill="none"/>
+    <!-- belly -->
+    <ellipse cx="232" cy="262" rx="110" ry="46" fill="#d2a679" transform="rotate(-2 232 262)"/>
+    <!-- paw pads -->
+    <circle cx="104" cy="182" r="19" fill="#d2a679"/>
+    <circle cx="324" cy="422" r="18" fill="#d2a679"/>
+    <!-- inner ear and snout -->
+    <circle cx="356" cy="198" r="13" fill="#d2a679"/>
+    <ellipse cx="438" cy="292" rx="30" ry="22" fill="#d2a679"/>
+    <ellipse cx="458" cy="280" rx="12" ry="9" fill="#2a1a10"/>
+    <!-- sleeping eye and mouth -->
+    <path d="M384 248 q14 14 28 0" stroke="#2a1a10" stroke-width="7" fill="none" stroke-linecap="round"/>
+    <path d="M440 304 q10 7 22 0" stroke="#2a1a10" stroke-width="5" fill="none" stroke-linecap="round"/>
+  </g>
+  <!-- z z -->
+  <g fill="none" stroke="#a096ff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M404 110 h30 l-30 34 h30"/>
+    <path d="M448 62 h20 l-20 23 h20"/>
+  </g>
+</svg>
