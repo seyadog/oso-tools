@@ -1,49 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
     <g id="fur">
-      <!-- front leg hanging down -->
-      <path d="M300 330 C288 380 292 430 304 458 C316 484 360 482 366 450 C372 410 368 365 360 326 Z"/>
-      <!-- hind leg up -->
-      <path d="M62 320 C40 262 44 188 70 142 C86 114 134 112 148 142 C162 176 154 236 154 282 Z"/>
-      <!-- body, belly up -->
-      <path d="M52 336 C40 272 104 214 196 204 C286 194 352 226 374 274 C388 306 382 350 350 370 C300 392 160 396 100 380 C70 372 56 356 52 336 Z"/>
+      <!-- body, a long soft loaf -->
+      <path d="M30 392 C14 300 56 196 150 168 C236 142 322 176 356 252 C372 296 372 350 366 396 C300 412 100 414 30 392 Z"/>
+      <!-- hind foot -->
+      <ellipse cx="74" cy="392" rx="50" ry="30"/>
       <!-- head -->
-      <g transform="translate(404 262) rotate(-22)">
-        <circle cx="-30" cy="-54" r="22"/>
-        <circle cx="20" cy="-62" r="20"/>
-        <ellipse cx="60" cy="52" rx="48" ry="22" transform="rotate(24 60 52)"/>
-        <circle cx="0" cy="0" r="62"/>
-        <ellipse cx="66" cy="2" rx="52" ry="30"/>
-      </g>
+      <circle cx="340" cy="212" r="38"/>
+      <circle cx="446" cy="218" r="34"/>
+      <circle cx="394" cy="326" r="100"/>
+      <!-- front paw -->
+      <ellipse cx="296" cy="392" rx="52" ry="26"/>
     </g>
   </defs>
-  <g transform="translate(8 22) scale(.88)">
+  <g transform="translate(5 -36) scale(.94) translate(6 18)">
+    <ellipse cx="260" cy="424" rx="230" ry="16" fill="#000" opacity=".18"/>
     <use href="#fur" fill="#3f2616" stroke="#3f2616" stroke-width="18" stroke-linejoin="round"/>
-    <use href="#fur" fill="#7a4f32"/>
-    <!-- shading under the belly and the raised leg -->
-    <path d="M60 352 C110 392 250 396 340 372 C300 400 160 408 96 388 C74 380 62 366 60 352 Z" fill="#5f3b25"/>
+    <use href="#fur" fill="#8a5a3a"/>
     <!-- belly -->
-    <path d="M104 296 C112 250 188 230 252 234 C314 238 350 266 340 304 C330 338 244 350 176 344 C128 340 100 322 104 296 Z" fill="#c99a6a"/>
-    <path d="M150 276 C180 256 240 252 290 268" stroke="#b78655" stroke-width="7" fill="none" stroke-linecap="round" opacity=".7"/>
-    <!-- sole of the raised foot, with toes -->
-    <ellipse cx="102" cy="168" rx="26" ry="32" fill="#c99a6a"/>
-    <circle cx="80" cy="128" r="9" fill="#c99a6a"/><circle cx="101" cy="120" r="9" fill="#c99a6a"/><circle cx="122" cy="124" r="9" fill="#c99a6a"/>
-    <!-- hanging paw with claws -->
-    <ellipse cx="333" cy="452" rx="26" ry="20" fill="#c99a6a"/>
-    <path d="M314 476 l-4 14 M332 480 l0 15 M350 476 l4 14" stroke="#efe3cf" stroke-width="7" stroke-linecap="round"/>
-    <!-- head details -->
-    <g transform="translate(404 262) rotate(-22)">
-      <circle cx="-30" cy="-54" r="11" fill="#c99a6a"/>
-      <circle cx="20" cy="-62" r="10" fill="#c99a6a"/>
-      <!-- open mouth -->
-      <ellipse cx="62" cy="26" rx="46" ry="24" fill="#3a1a1a" transform="rotate(16 62 26)"/>
-      <ellipse cx="60" cy="40" rx="28" ry="10" fill="#d9707a" transform="rotate(20 60 40)"/>
-      <path d="M34 12 l6 14 l7 -13 Z M64 10 l6 14 l7 -13 Z" fill="#f4ecdf"/>
-      <!-- muzzle -->
-      <ellipse cx="68" cy="-4" rx="50" ry="25" fill="#c99a6a"/>
-      <ellipse cx="112" cy="-12" rx="15" ry="11" fill="#241410"/>
-      <!-- closed eye -->
-      <path d="M12 -20 q14 12 30 0" stroke="#241410" stroke-width="7" fill="none" stroke-linecap="round"/>
-    </g>
+    <path d="M96 340 C100 280 170 250 232 258 C296 266 330 304 316 348 C304 384 150 394 108 372 C98 366 95 354 96 340 Z" fill="#d2a679"/>
+    <!-- hind sole and front paw pads -->
+    <ellipse cx="60" cy="392" rx="22" ry="16" fill="#d2a679"/>
+    <ellipse cx="300" cy="396" rx="26" ry="13" fill="#d2a679"/>
+    <path d="M276 388 v8 M298 386 v10 M320 388 v8" stroke="#8a5a3a" stroke-width="4" stroke-linecap="round"/>
+    <!-- ears -->
+    <circle cx="340" cy="214" r="19" fill="#d2a679"/>
+    <circle cx="446" cy="220" r="17" fill="#d2a679"/>
+    <!-- muzzle, nose, open mouth -->
+    <ellipse cx="418" cy="360" rx="56" ry="44" fill="#d2a679"/>
+    <ellipse cx="428" cy="392" rx="23" ry="15" fill="#3a1a1a"/>
+    <ellipse cx="426" cy="399" rx="13" ry="7" fill="#d9707a"/>
+    <ellipse cx="440" cy="336" rx="19" ry="13" fill="#241410"/>
+    <!-- closed eyes, a little cheek -->
+    <path d="M338 306 q16 14 34 0" stroke="#241410" stroke-width="8" fill="none" stroke-linecap="round"/>
+    <path d="M410 300 q16 14 34 0" stroke="#241410" stroke-width="8" fill="none" stroke-linecap="round"/>
+    <ellipse cx="338" cy="346" rx="16" ry="9" fill="#d98f7a" opacity=".5"/>
   </g>
 </svg>
