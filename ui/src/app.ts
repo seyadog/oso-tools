@@ -1,0 +1,1422 @@
+// The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
+
+import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, VaultLockedError, VaultStatus, b64 } from "./api";
+import { clear, confirmBox, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
+import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
+import { icon, logoMark, serverColor } from "./icons";
+import { Pane } from "./pane";
+import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { Place, Workspace } from "./workspace";
+
+const LOCAL = 0;
+
+interface Drag {
+  sid: Id;
+  fromBar: boolean;
+  startX: number;
+  startY: number;
+  active: boolean;
+  target: { sid: Id | null; side: Side | null } | null;
+  toBar: boolean;
+}
+
+export class App {
+  ws = new Workspace();
+  tree: TreeData = { folders: [], servers: [] };
+  vault: VaultStatus = { exists: false, unlocked: false };
+  panes = new Map<Id, Pane>();
+  private early = new Map<Id, SessionEvent[]>();
+  private bindings = buildBindings(null).bindings;
+  userKeys: Record<string, unknown> | null = null;
+  broadcast = new Set<number>();
+  focusArea: "terminal" | "sidebar" = "terminal";
+  selected: { kind: "folder" | "server"; id: number } | null = null;
+  filter = "";
+  private drag: Drag | null = null;
+  /** True for an instant after a drag ended, so the click that follows it does nothing. */
+  private justDragged = false;
+  private saveTimer = 0;
+
+  snippets: { name: string; command: string }[] = [];
+
+  // elements
+  private side = el("div", { id: "side" });
+  private main = el("div", { id: "main" });
+  private topbar = el("div", { id: "topbar" });
+  private stage = el("div", { id: "stage" });
+  private hint = el("div", { id: "dock-hint" });
+  private tabsEl = el("div", { class: "tabs" });
+  private toolsEl = el("div", { class: "tools" });
+  private treeEl = el("div", { class: "tree", tabindex: "0" });
+  private footEl = el("div", { class: "side-foot" });
+  private search = el("input", { type: "search", placeholder: "Search hosts", autocomplete: "off", spellcheck: "false" });
+  private dividers: HTMLElement[] = [];
+
+  constructor(
+    private be: Backend,
+    private root: HTMLElement,
+  ) {}
+
+  // ------------------------------------------------------------ start
+
+  async start() {
+    this.root.append(this.side, this.main);
+    this.topbar.append(this.tabsEl, this.toolsEl);
+    this.main.append(this.topbar, this.stage);
+    this.stage.append(this.hint);
+    this.buildSidebar();
+    this.be.onSession((e) => this.onSession(e));
+    await this.loadKeys();
+    this.snippets = (await this.readJson<{ name: string; command: string }[]>("snippets.json")) ?? [];
+    await this.refreshTree();
+    this.vault = await this.be.vaultStatus();
+
+    window.addEventListener("keydown", (e) => this.onKey(e), true);
+    window.addEventListener("resize", () => this.layout());
+    new ResizeObserver(() => this.layout()).observe(this.stage);
+    this.ws.onChange(() => {
+      this.render();
+      this.scheduleSave();
+    });
+
+    // What was left running, and where it was.
+    const live = await this.be.restore(this.guessRows(), this.guessCols()).catch(() => [] as SessionInfo[]);
+    this.measure();
+    const saved = await this.readJson<ReturnType<Workspace["save"]>>("workspace.json");
+    this.ws.restore(
+      saved,
+      live.map((s) => ({ sid: s.sid, title: s.title, serverId: s.server_id, screen: Number(s.meta.screen ?? 0) })),
+    );
+    this.render();
+    this.toastKeyProblems();
+    if (await this.be.readConfig("selftest.flag")) void this.selfTest();
+  }
+
+  /** A check of the whole path (window, engine, background server, a real shell): when selftest.flag is in the
+   *  config folder, the window opens a terminal, types into it and writes what it saw to selftest.out. */
+  private async selfTest() {
+    const report: string[] = [];
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const text = (sid: number) => {
+      const b = this.panes.get(sid)!.term.buffer.active;
+      let s = "";
+      for (let i = 0; i < b.length; i++) s += (b.getLine(i)?.translateToString(true) ?? "") + "\n";
+      return s;
+    };
+    try {
+      const want = ((await this.be.readConfig("selftest.flag")) ?? "").trim();
+      if (want === "settings") {
+        this.settingsDialog();
+        await wait(500);
+        document.querySelector('[data-role="modifier"] .sel-btn')?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+        await wait(300);
+        report.push(`popup visible: ${getComputedStyle(document.querySelector('[data-role="modifier"] .sel-pop')!).display}`);
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
+      if (want === "mosaic") {
+        await this.openServer(LOCAL);
+        this.ws.prepareSplit("right");
+        await this.openServer(LOCAL);
+        this.ws.prepareSplit("bottom");
+        await this.openServer(LOCAL);
+        const first = this.ws.screen.active!;
+        await openTabAlone(this);
+        this.ws.focus(first);
+        await wait(1500);
+        report.push(`tabs ${this.ws.screen.groups.length}, mode ${this.ws.screen.mode}, numbers ${[...document.querySelectorAll(".pane.show .title .num")].map((n) => n.textContent).join(",")}`);
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
+      const named = this.tree.servers.find((s) => s.name === want);
+      if (named) {
+        await this.openServer(named.id);
+        await wait(7000);
+        const a = this.ws.screen.active;
+        report.push(`server ${want}: ${a != null ? text(a).trim().split("\n").slice(-4).join("\n") : "no terminal"}`);
+        if (a != null) {
+          const p = this.panes.get(a)!;
+          const t = p.term;
+          const b = t.buffer.active;
+          const r = (p.root.querySelector(".xterm") as HTMLElement).getBoundingClientRect();
+          const rows = p.root.querySelector(".xterm-rows") as HTMLElement | null;
+          report.push(`term ${t.cols}x${t.rows} baseY=${b.baseY} viewportY=${b.viewportY} cursor=${b.cursorX},${b.cursorY} length=${b.length}`);
+          report.push(`xterm box ${Math.round(r.width)}x${Math.round(r.height)}; rows element: ${rows ? "yes " + rows.children.length + " rows, first text: " + JSON.stringify((rows.children[0] as HTMLElement | undefined)?.innerText?.slice(0, 40)) : "none"}`);
+          report.push(`renderer: ${p.root.querySelector("canvas") ? "canvas" : "dom"}; screen: ${p.root.querySelector(".xterm-screen") ? "yes" : "no"}`);
+          report.push(`font: ${getComputedStyle(p.root.querySelector(".xterm-rows") ?? p.root).fontFamily} ${getComputedStyle(p.root.querySelector(".xterm-rows") ?? p.root).fontSize} color ${getComputedStyle(p.root.querySelector(".xterm-rows") ?? p.root).color}`);
+          for (let i = 0; i < Math.min(t.rows, 6); i++) report.push(`row ${i}: ${JSON.stringify(b.getLine(b.viewportY + i)?.translateToString(true).slice(0, 60))}`);
+        }
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
+      await this.openServer(LOCAL);
+      const sid = this.ws.screen.active;
+      report.push(`opened: ${sid != null}`);
+      await wait(1000);
+      await this.be.write(sid!, "echo oso-selftest-$((6*7))\r");
+      await wait(1500);
+      report.push(`output ok: ${text(sid!).includes("oso-selftest-42")}`);
+      const t = this.panes.get(sid!)!.term;
+      report.push(`size: ${t.cols}x${t.rows}`);
+      this.ws.prepareSplit("right");
+      await this.newTerminal();
+      await wait(1000);
+      report.push(`mosaic panes: ${document.querySelectorAll(".pane.show.mosaic").length}`);
+    } catch (e) {
+      report.push(`error: ${String(e)}`);
+    }
+    await this.be.writeConfig("selftest.out", report.join("\n"));
+  }
+
+  private async readJson<T>(name: string): Promise<T | null> {
+    try {
+      const t = await this.be.readConfig(name);
+      return t ? (JSON.parse(t) as T) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The shortcut of an action as it is set now ("Alt+M", or "Super+M" if the main key was changed). */
+  keyText(action: string): string {
+    return comboText(this.userKeys, action).split(" / ")[0];
+  }
+
+  private async loadKeys() {
+    this.userKeys = await this.readJson<Record<string, unknown>>("hotkeys.json");
+    this.bindings = buildBindings(this.userKeys).bindings;
+  }
+  private toastKeyProblems() {
+    const { problems } = buildBindings(this.userKeys);
+    if (problems.length) toast(`hotkeys.json: ${problems[0]}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ""}`, 8000);
+  }
+
+  private scheduleSave() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      void this.be.writeConfig("workspace.json", JSON.stringify(this.ws.save()));
+      this.ws.tabs.forEach((t) => {
+        const order = this.ws.screens[t.screen].order.indexOf(t.sid);
+        void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order });
+      });
+    }, 300);
+  }
+
+  async refreshTree() {
+    this.tree = await this.be.tree();
+    this.renderSidebar();
+  }
+
+  // ------------------------------------------------------------ sessions
+
+  private guessCols() {
+    return Math.max(20, Math.floor(this.ws.size.w / 8.4));
+  }
+  private guessRows() {
+    return Math.max(5, Math.floor(this.ws.size.h / 18));
+  }
+
+  private measure() {
+    const r = this.stage.getBoundingClientRect();
+    this.ws.size = { x: 0, y: 0, w: Math.max(100, r.width), h: Math.max(100, r.height) };
+  }
+
+  /** Opens a session for a server (or this computer) as a new terminal on this screen. */
+  async openServer(serverId: number, useVault = true, place?: Place): Promise<void> {
+    this.measure();
+    try {
+      const info = await this.be.open(serverId, this.guessRows(), this.guessCols(), useVault);
+      this.addSession(info, place);
+    } catch (e) {
+      if (e instanceof VaultLockedError) {
+        const choice = await this.unlockDialog(true);
+        if (choice === "unlocked") return this.openServer(serverId, true, place);
+        if (choice === "without") return this.openServer(serverId, false, place);
+        return;
+      }
+      toast(`Could not open: ${(e as Error).message}`);
+    }
+  }
+
+  private addSession(info: SessionInfo, place?: Place) {
+    this.ws.addTab({ sid: info.sid, title: info.title, serverId: info.server_id }, place);
+    this.focusArea = "terminal";
+    this.ensurePane(info.sid);
+    const buffered = this.early.get(info.sid);
+    this.early.delete(info.sid);
+    buffered?.forEach((e) => this.onSession(e));
+  }
+
+  private ensurePane(sid: Id): Pane | undefined {
+    const tab = this.ws.tabs.get(sid);
+    if (!tab) return undefined;
+    let p = this.panes.get(sid);
+    if (!p) {
+      p = new Pane(sid, {
+        onData: (s, d) => this.onTerminalData(s, d),
+        onBinary: (s, d) => void this.be.writeBytes(s, b64.encode(Uint8Array.from(d, (c) => c.charCodeAt(0)))),
+        onResize: (s, rows, cols) => void this.be.resize(s, rows, cols),
+        onClose: (s) => void this.closeSession(s),
+        onFocus: (s) => this.focusSession(s),
+        onTitlePointerDown: (e, s) => this.startDrag(e, s, false),
+      });
+      p.attach(this.stage);
+      this.panes.set(sid, p);
+    }
+    p.setTitle(tab.title);
+    return p;
+  }
+
+  private onSession(e: SessionEvent) {
+    const tab = this.ws.tabs.get(e.sid);
+    const pane = this.panes.get(e.sid);
+    if (!tab || !pane) {
+      // Output can arrive just before the window knows the session.
+      const q = this.early.get(e.sid) ?? [];
+      q.push(e);
+      this.early.set(e.sid, q.slice(-200));
+      return;
+    }
+    switch (e.kind) {
+      case "snapshot":
+        pane.snapshot(e.replay, e.screen);
+        if (e.exit != null) this.sessionEnded(e.sid, e.exit);
+        break;
+      case "output":
+        pane.output(e.data);
+        break;
+      case "exit":
+        this.sessionEnded(e.sid, e.code);
+        break;
+      case "lost":
+        this.sessionEnded(e.sid, 255);
+        break;
+      case "sudo":
+        if (e.on && this.ws.tabs.get(e.sid)) toast("sudo is asking for a password — Ctrl+Shift+P types the saved one");
+        break;
+    }
+  }
+
+  /** A clean exit closes the terminal, like a browser tab; a failure stays to show the error. */
+  private sessionEnded(sid: Id, code: number) {
+    if (code === 0) return void this.closeSession(sid, false);
+    this.ws.setDead(sid, true);
+  }
+
+  private onTerminalData(sid: Id, data: string) {
+    const tab = this.ws.tabs.get(sid);
+    if (!tab) return;
+    if (tab.dead) {
+      if (data === "\r") void this.reconnect(sid);
+      return;
+    }
+    if (this.broadcast.has(tab.screen) && this.ws.screens[tab.screen].mode === "mosaic") {
+      for (const t of this.ws.tabsHere()) if (!t.dead) void this.be.write(t.sid, data);
+      return;
+    }
+    void this.be.write(sid, data);
+  }
+
+  async reconnect(sid: Id, useVault = true): Promise<void> {
+    const pane = this.panes.get(sid);
+    try {
+      const info = await this.be.reconnect(sid, pane?.term.rows ?? 24, pane?.term.cols ?? 80, useVault);
+      this.ws.rekey(sid, info.sid);
+      if (pane) {
+        this.panes.delete(sid);
+        pane.sid = info.sid;
+        this.panes.set(info.sid, pane);
+        pane.term.reset();
+      }
+      const buffered = this.early.get(info.sid);
+      this.early.delete(info.sid);
+      buffered?.forEach((e) => this.onSession(e));
+    } catch (e) {
+      if (e instanceof VaultLockedError) {
+        const c = await this.unlockDialog(true);
+        if (c === "unlocked") return this.reconnect(sid, true);
+        if (c === "without") return this.reconnect(sid, false);
+        return;
+      }
+      toast(`Could not reconnect: ${(e as Error).message}`);
+    }
+  }
+
+  /** The × of a tab: closes all its terminals (asks first if there are several). */
+  private async closeTab(ids: Id[]) {
+    if (ids.length > 1 && !(await confirmBox("Close this tab?", `It holds ${ids.length} terminals; all of them will be closed.`, "Close all"))) return;
+    for (const id of ids) await this.closeSession(id);
+  }
+
+  async closeSession(sid: Id, kill = true) {
+    const pane = this.panes.get(sid);
+    this.ws.closeTab(sid);
+    pane?.dispose();
+    this.panes.delete(sid);
+    if (kill) await this.be.close(sid).catch(() => {});
+    this.focusActive();
+  }
+
+  focusSession(sid: Id) {
+    this.focusArea = "terminal";
+    if (this.ws.screen.active !== sid || this.ws.tabs.get(sid)?.screen !== this.ws.current) this.ws.focus(sid);
+    else this.focusActive();
+  }
+
+  private focusActive() {
+    if (modalOpen() || this.focusArea !== "terminal") return;
+    const a = this.ws.screen.active;
+    if (a != null) this.panes.get(a)?.focus();
+  }
+
+  // ------------------------------------------------------------ rendering
+
+  render() {
+    this.renderTopbar();
+    this.layout();
+    this.renderSidebar();
+    this.renderFoot();
+    requestAnimationFrame(() => this.focusActive());
+  }
+
+  /** Puts every terminal where the workspace says. */
+  layout() {
+    this.measure();
+    const ws = this.ws;
+    const s = ws.screen;
+    const mosaic = s.mode === "mosaic";
+    const { boxes, splits } = ws.boxes();
+    const place = new Map<Id, Rect>();
+    boxes.forEach((b) => place.set(b.id, b.rect));
+    const here = s.group ? leaves(s.group.tree) : [];
+
+    for (const tab of ws.tabs.values()) {
+      const pane = this.ensurePane(tab.sid);
+      if (!pane) continue;
+      const rect = tab.screen === ws.current ? place.get(tab.sid) : undefined;
+      pane.root.classList.toggle("show", !!rect);
+      if (!rect) continue;
+      pane.root.classList.toggle("mosaic", mosaic);
+      pane.root.classList.toggle("active", tab.sid === s.active);
+      pane.root.classList.toggle("dead", tab.dead);
+      const bc = this.broadcast.has(ws.current) && mosaic && !tab.dead;
+      pane.root.classList.toggle("broadcast", bc);
+      pane.badge.style.display = bc ? "" : "none";
+      pane.setTitle(tab.title);
+      pane.setNumber(here.indexOf(tab.sid) + 1);
+      pane.setColor(serverColor(tab.serverId));
+      Object.assign(pane.root.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px` });
+      pane.forceRefit();
+    }
+
+    // the lines between terminals, to drag
+    this.dividers.forEach((d) => d.remove());
+    this.dividers = [];
+    if (mosaic) {
+      for (const sp of splits) {
+        const d = el("div", { class: `divider ${sp.side ? "v" : "h"}` });
+        if (sp.side) Object.assign(d.style, { left: `${sp.at}px`, top: `${sp.whole.y}px`, height: `${sp.whole.h}px` });
+        else Object.assign(d.style, { top: `${sp.at}px`, left: `${sp.whole.x}px`, width: `${sp.whole.w}px` });
+        d.addEventListener("pointerdown", (e) => this.startResize(e, d, sp.path, sp.side, sp.whole));
+        this.stage.append(d);
+        this.dividers.push(d);
+      }
+    }
+
+    // nothing open on this screen: your hosts, to open with a click
+    this.stage.querySelector(".home")?.remove();
+    if (s.groups.length === 0) this.stage.append(this.homeView());
+  }
+
+  /** What an empty screen shows: how it works (and the logo, to be replaced later). */
+  private homeView(): HTMLElement {
+    const k = (t: string) => el("kbd", {}, t);
+    const ka = (action: string) => k(this.keyText(action) || "—");
+    const row = (keys: (Node | string)[], what: string) => el("div", { class: "g-row" }, el("span", { class: "g-keys" }, ...keys), el("span", {}, what));
+    const home = el("div", { class: "home" });
+    const logo = el("div", { class: "logo", title: "oso" });
+    logo.append(logoMark());
+    home.append(
+      el("div", { class: "g-head" }, logo, el("div", {}, el("h1", {}, "oso"), el("div", { class: "lead" }, `Nothing is open. Open a host from the list on the left, or press ${this.keyText("search")}.`))),
+      el("div", { class: "g-grid" },
+        el("section", {}, el("h3", {}, "Open"), row([k("double-click")], "a host in the list: opens a new terminal (as many times as you want)"), row([ka("search")], "search a host by name and open it"), row([ka("tab.new")], "another terminal of the same host"), row([ka("sudo.fill")], "types the saved sudo password")),
+        el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of the screen")),
+        el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
+        el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
+      ),
+      el("div", { class: "tip" }, "Passwords are kept in the vault (bottom left): unlock it to read, copy or change them. The main key of every shortcut can be changed in Settings."),
+    );
+    return home;
+  }
+
+  private ibtn(name: string, title: string, onclick: () => void, on = false, extra = ""): HTMLButtonElement {
+    const b = el("button", { class: `ib${on ? " on" : ""} ${extra}`.trim(), type: "button", title, "aria-label": title }) as HTMLButtonElement;
+    b.append(icon(name, 17));
+    b.onclick = onclick;
+    return b;
+  }
+
+  private renderTopbar() {
+    const ws = this.ws;
+    const mosaic = ws.screen.mode === "mosaic";
+
+    // one tab per group: a lone terminal, or several tiled together
+    clear(this.tabsEl);
+    ws.screen.groups.forEach((g, i) => {
+      const ids = leaves(g.tree);
+      const t = ws.tabs.get(g.active)!;
+      const x = el("button", { class: "x", type: "button", title: ids.length > 1 ? `Close this tab and its ${ids.length} terminals` : `Close (${this.keyText("tab.close")})` });
+      x.append(icon("close", 13));
+      const count = el("span", { class: "count", title: `${ids.length} terminals together` });
+      count.append(icon("grid", 12), String(ids.length));
+      const tab = el(
+        "div",
+        { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
+        el("span", { class: "num" }, String(i + 1)),
+        el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
+        el("span", {}, t.title),
+      );
+      if (ids.length > 1) tab.append(count);
+      tab.append(x);
+      x.onclick = (e) => {
+        e.stopPropagation();
+        void this.closeTab(ids);
+      };
+      tab.addEventListener("pointerdown", (e) => {
+        if ((e.target as HTMLElement).closest(".x")) return;
+        this.startDrag(e, g.active, true);
+      });
+      tab.onclick = () => {
+        if (!this.justDragged) ws.focus(g.active);
+      };
+      tab.ondblclick = () => void this.renameTab(g.active);
+      this.tabsEl.append(tab);
+    });
+
+    // tools
+    clear(this.toolsEl);
+    const bc = this.broadcast.has(ws.current) && mosaic;
+    this.toolsEl.append(
+      this.ibtn("split-right", `New terminal to the right  (${this.keyText("split.right")})`, () => this.run("split.right")),
+      this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
+      this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this screen"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
+      this.ibtn("snippet", "Snippets: saved commands", () => this.snippetsDialog()),
+      el("span", { class: "sep" }),
+      this.ibtn("plus", `Open a host  (${this.keyText("search")})`, () => void this.hostPicker()),
+    );
+  }
+
+  // ------------------------------------------------------------ sidebar
+
+  private buildSidebar() {
+    const head = el("div", { class: "side-head" }, el("span", { class: "name" }, "Hosts"));
+    head.append(this.ibtn("plus", "New host", () => void this.serverForm(null)), this.ibtn("folder-plus", "New folder", () => void this.newFolder()));
+    const searchWrap = el("div", { class: "search" });
+    searchWrap.append(icon("search", 15), this.search);
+    this.search.onfocus = () => (this.focusArea = "sidebar");
+    this.search.oninput = () => {
+      this.filter = this.search.value.trim().toLowerCase();
+      this.renderSidebar();
+    };
+    const leaveSearch = () => {
+      this.search.value = "";
+      this.filter = "";
+      this.renderSidebar();
+      this.search.blur();
+      this.focusArea = "terminal";
+      this.focusActive();
+    };
+    this.search.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        const first = this.visibleServers()[0];
+        if (first) void this.openOrFocus(first.id);
+        leaveSearch();
+      } else if (e.key === "Escape") leaveSearch();
+    };
+    this.treeEl.addEventListener("pointerdown", () => (this.focusArea = "sidebar"));
+    this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
+    this.side.append(head, searchWrap, this.treeEl, this.footEl);
+  }
+
+  private renderFoot() {
+    clear(this.footEl);
+    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: "Passwords in the vault" });
+    v.append(icon(this.vault.unlocked ? "unlock" : "lock", 16), this.vault.unlocked ? "Vault · unlocked" : this.vault.exists ? "Vault · locked" : "Create the vault");
+    v.onclick = () => void this.vaultDialog();
+    this.footEl.append(v, this.ibtn("terminal", "Local terminal", () => void this.openServer(LOCAL)), this.ibtn("settings", `Settings  (${this.keyText("settings")})`, () => this.settingsDialog()));
+  }
+
+  private visibleServers(): Server[] {
+    const q = this.filter;
+    return this.tree.servers.filter((s) => !q || `${s.name} ${s.host} ${s.user}`.toLowerCase().includes(q));
+  }
+
+  private openServerIds(): Set<number> {
+    return new Set([...this.ws.tabs.values()].filter((t) => !t.dead).map((t) => t.serverId));
+  }
+
+  /** The rows of the tree, flattened: folders open or closed, servers inside. */
+  private rows(): { kind: "folder" | "server"; id: number; depth: number }[] {
+    const out: { kind: "folder" | "server"; id: number; depth: number }[] = [];
+    if (this.filter) {
+      this.visibleServers().forEach((s) => out.push({ kind: "server", id: s.id, depth: 0 }));
+      return out;
+    }
+    const walk = (parent: number | null, depth: number) => {
+      for (const f of this.tree.folders.filter((f) => f.parent === parent)) {
+        out.push({ kind: "folder", id: f.id, depth });
+        if (f.expanded) walk(f.id, depth + 1);
+      }
+      for (const s of this.tree.servers.filter((s) => s.parent === parent)) out.push({ kind: "server", id: s.id, depth });
+    };
+    walk(null, 0);
+    return out;
+  }
+
+  private treeKey(e: KeyboardEvent) {
+    const rows = this.rows();
+    const at = rows.findIndex((r) => this.selected?.kind === r.kind && this.selected.id === r.id);
+    const go = (i: number) => {
+      const r = rows[Math.max(0, Math.min(rows.length - 1, i))];
+      if (r) {
+        this.selected = { kind: r.kind, id: r.id };
+        this.renderSidebar();
+        this.treeEl.querySelector(".row.sel")?.scrollIntoView({ block: "nearest" });
+      }
+    };
+    const cur = rows[at];
+    switch (e.key) {
+      case "ArrowDown":
+        go(at + 1);
+        break;
+      case "ArrowUp":
+        go(at < 0 ? 0 : at - 1);
+        break;
+      case "ArrowRight":
+      case "ArrowLeft":
+        if (cur?.kind === "folder") {
+          const f = this.tree.folders.find((f) => f.id === cur.id)!;
+          if (f.expanded === (e.key === "ArrowLeft")) void this.be.setFolderOpen(f.id, !f.expanded).then(() => this.refreshTree());
+        }
+        break;
+      case "Enter":
+        if (cur?.kind === "server") void this.openOrFocus(cur.id);
+        else if (cur) {
+          const f = this.tree.folders.find((f) => f.id === cur.id)!;
+          void this.be.setFolderOpen(f.id, !f.expanded).then(() => this.refreshTree());
+        }
+        break;
+      case "Delete":
+        void this.deleteSelected();
+        break;
+      case "F2":
+      case "e":
+        if (e.key === "e" && (e.ctrlKey || e.altKey)) return;
+        this.editSelected();
+        break;
+      case "/":
+        this.search.focus();
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  }
+
+  renderSidebar() {
+    clear(this.treeEl);
+    const rows = this.rows();
+    if (rows.length === 0) {
+      this.treeEl.append(el("div", { class: "empty" }, this.filter ? "No host matches." : "No hosts yet. Add one with the + above."));
+      return;
+    }
+    const open = this.openServerIds();
+    for (const r of rows) {
+      const sel = this.selected?.kind === r.kind && this.selected.id === r.id;
+      const row = el("div", { class: `row${sel ? " sel" : ""}${r.kind === "folder" ? " folder" : ""}`, style: `padding-left:${8 + r.depth * 16}px`, "data-kind": r.kind, "data-id": String(r.id) });
+      if (r.kind === "folder") {
+        const f = this.tree.folders.find((f) => f.id === r.id)!;
+        const chev = el("span", { class: "chev" });
+        chev.append(icon(f.expanded ? "chevron-down" : "chevron-right", 14));
+        row.append(chev, el("span", { class: "txt" }, el("b", {}, f.name)));
+        row.onclick = () => {
+          this.selected = r;
+          void this.be.setFolderOpen(f.id, !f.expanded).then(() => this.refreshTree());
+        };
+      } else {
+        const s = this.tree.servers.find((s) => s.id === r.id)!;
+        const tail = el("span", { class: "tail" });
+        if (s.has_secret) tail.append(icon("key", 14));
+        const go = this.ibtn("play", "Open", () => void this.openServer(s.id), false, "go");
+        go.style.cssText = "width:24px;height:24px";
+        go.onclick = (e) => {
+          e.stopPropagation();
+          void this.openServer(s.id);
+        };
+        row.append(
+          el("span", { class: "dot", style: `background:${serverColor(s.id)}` }),
+          el("span", { class: "txt", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name), el("small", {}, `${s.user ? s.user + "@" : ""}${s.host}`)),
+        );
+        if (open.has(s.id)) row.append(el("span", { class: "live", title: "Open" }));
+        row.append(tail, go);
+        row.onclick = () => {
+          this.selected = r;
+          this.renderSidebar();
+        };
+        row.ondblclick = () => void this.openOrFocus(s.id);
+      }
+      // drag a server onto the stage to open it there, or a server / folder onto a folder to move it
+      row.addEventListener("pointerdown", (e) => {
+        if ((e.target as HTMLElement).closest("button")) return;
+        this.startHostDrag(e, r.kind, r.id, row);
+      });
+      this.treeEl.append(row);
+    }
+  }
+
+  /** Double click / Enter on a server. */
+  async openOrFocus(serverId: number) {
+    // Always a new terminal: the same host can be open as many times as you want.
+    await this.openServer(serverId);
+  }
+
+  /** Ctrl+N and the + button: another terminal for the same server as the active one. */
+  async newTerminal() {
+    const t = this.ws.activeTab();
+    if (t) return this.openServer(t.serverId);
+    // nothing open on this screen yet: choose the host
+    await this.hostPicker();
+  }
+
+  /** Alt+K and the + button: type a few letters of a host and open it. */
+  async hostPicker() {
+    const pending = this.ws.pending;
+    return new Promise<void>((resolve) => {
+      openModal(
+        (close) => {
+          const input = el("input", { type: "search", placeholder: "Open a host…", autocomplete: "off", spellcheck: "false" });
+          const list = el("div", { class: "picker-list" });
+          let at = 0;
+          let shown: { id: number; name: string; sub: string }[] = [];
+          const draw = () => {
+            const q = input.value.trim().toLowerCase();
+            const all = [{ id: LOCAL, name: "Local terminal", sub: "this computer" }, ...this.tree.servers.map((s) => ({ id: s.id, name: s.name, sub: `${s.user ? s.user + "@" : ""}${s.host}` }))];
+            shown = all.filter((x) => !q || `${x.name} ${x.sub}`.toLowerCase().includes(q));
+            at = Math.min(at, Math.max(0, shown.length - 1));
+            clear(list);
+            shown.forEach((x, i) => {
+              const row = el("div", { class: `row${i === at ? " sel" : ""}` }, el("span", { class: "dot", style: `background:${serverColor(x.id)}` }), el("span", { class: "txt" }, el("b", {}, x.name), el("small", {}, x.sub)));
+              row.onclick = () => choose(x.id);
+              list.append(row);
+            });
+            if (!shown.length) list.append(el("div", { class: "empty" }, "No host matches."));
+            list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+          };
+          const choose = (id: number) => {
+            close();
+            this.ws.pending = pending;
+            void this.openServer(id);
+          };
+          input.oninput = () => {
+            at = 0;
+            draw();
+          };
+          input.onkeydown = (e) => {
+            if (e.key === "ArrowDown") at = Math.min(shown.length - 1, at + 1);
+            else if (e.key === "ArrowUp") at = Math.max(0, at - 1);
+            else if (e.key === "Enter") {
+              e.preventDefault();
+              if (shown[at]) choose(shown[at].id);
+              return;
+            } else return;
+            e.preventDefault();
+            draw();
+          };
+          draw();
+          return el("div", {}, el("h2", {}, "Open a host"), input, list);
+        },
+        resolve,
+      );
+    });
+  }
+
+  // ------------------------------------------------------------ snippets
+
+  private saveSnippets() {
+    void this.be.writeConfig("snippets.json", JSON.stringify(this.snippets, null, 2));
+  }
+
+  /** Saved commands: click one to type it (and Enter) in the active terminal, or in every terminal with broadcast on. */
+  snippetsDialog() {
+    openModal((close) => {
+      const list = el("div");
+      const draw = () => {
+        clear(list);
+        if (!this.snippets.length) list.append(el("div", { class: "empty" }, "No snippets yet. A snippet is a command you run often: add one."));
+        this.snippets.forEach((s, i) => {
+          const run = this.ibtn("play", "Run in the active terminal", () => {
+            close();
+            this.runSnippet(s.command);
+          });
+          const edit = this.ibtn("edit", "Edit", () => void this.snippetForm(i).then(draw));
+          const del = this.ibtn("trash", "Delete", () => {
+            this.snippets.splice(i, 1);
+            this.saveSnippets();
+            draw();
+          });
+          list.append(el("div", { class: "snip" }, run, el("div", { class: "txt" }, el("b", {}, s.name), el("code", {}, s.command)), edit, del));
+        });
+      };
+      draw();
+      const add = el("button", { class: "btn", type: "button" }, "New snippet");
+      add.onclick = () => void this.snippetForm(null).then(draw);
+      const done = el("button", { class: "btn primary", type: "button" }, "Done");
+      done.onclick = close;
+      return el("div", {}, el("h2", {}, "Snippets"), list, el("div", { class: "actions" }, add, done));
+    });
+  }
+
+  private snippetForm(index: number | null): Promise<void> {
+    const cur = index == null ? { name: "", command: "" } : this.snippets[index];
+    return new Promise((resolve) => {
+      // a second dialog on top of the list: the list is shown again when this one closes
+      openModal(
+        (close) => {
+          const name = el("input", { value: cur.name, autocomplete: "off" });
+          const cmd = el("input", { value: cur.command, autocomplete: "off", spellcheck: "false", placeholder: "sudo systemctl restart nginx" });
+          const err = el("div", { class: "err" });
+          const form = el("form", {}, el("h2", {}, index == null ? "New snippet" : "Edit snippet"), field("Name", name), field("Command", cmd), err);
+          const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
+          const no = el("button", { class: "btn", type: "button" }, "Cancel");
+          no.onclick = close;
+          form.append(el("div", { class: "actions" }, no, ok));
+          form.onsubmit = (e) => {
+            e.preventDefault();
+            if (!cmd.value.trim()) return void (err.textContent = "Write the command");
+            const s = { name: name.value.trim() || cmd.value.trim().slice(0, 30), command: cmd.value };
+            if (index == null) this.snippets.push(s);
+            else this.snippets[index] = s;
+            this.saveSnippets();
+            close();
+          };
+          return form;
+        },
+        () => {
+          resolve();
+          queueMicrotask(() => this.snippetsDialog());
+        },
+      );
+    });
+  }
+
+  private runSnippet(command: string) {
+    const t = this.ws.activeTab();
+    if (!t || t.dead) return toast("Open a terminal first");
+    const targets = this.broadcast.has(this.ws.current) && this.ws.screen.mode === "mosaic" ? this.ws.tabsHere().filter((x) => !x.dead) : [t];
+    targets.forEach((x) => void this.be.write(x.sid, `${command}\r`));
+    this.focusActive();
+  }
+
+  // ------------------------------------------------------------ dialogs
+
+  async unlockDialog(offerWithout: boolean): Promise<"unlocked" | "without" | "cancel"> {
+    this.vault = await this.be.vaultStatus();
+    if (this.vault.unlocked) return "unlocked";
+    return new Promise((resolve) => {
+      let result: "unlocked" | "without" | "cancel" = "cancel";
+      openModal(
+        (close) => {
+          const creating = !this.vault.exists;
+          const pw = el("input", { type: "password", autocomplete: "off" });
+          const confirm = el("input", { type: "password", autocomplete: "off" });
+          const err = el("div", { class: "err" });
+          const form = el("form", {}, el("h2", {}, creating ? "Create the vault" : "Unlock the vault"), el("div", { class: "hint" }, creating ? "Passwords are kept encrypted under this master password. Choose it carefully: it cannot be recovered." : "Enter the master password to use the saved passwords."), field("Master password", pw));
+          if (creating) form.append(field("Repeat it", confirm));
+          form.append(err);
+          const ok = el("button", { class: "btn primary", type: "submit" }, creating ? "Create" : "Unlock");
+          const no = el("button", { class: "btn", type: "button" }, "Cancel");
+          no.onclick = close;
+          const actions = el("div", { class: "actions" });
+          if (offerWithout) {
+            const w = el("button", { class: "btn", type: "button" }, "Connect without it");
+            w.onclick = () => {
+              result = "without";
+              close();
+            };
+            actions.append(w);
+          }
+          actions.append(no, ok);
+          form.append(actions);
+          form.onsubmit = async (e) => {
+            e.preventDefault();
+            if (creating && pw.value !== confirm.value) return void (err.textContent = "The two passwords are not the same");
+            if (!pw.value) return void (err.textContent = "Type the master password");
+            try {
+              await this.be.vaultUnlock(pw.value);
+              this.vault = await this.be.vaultStatus();
+              result = "unlocked";
+              close();
+            } catch (x) {
+              err.textContent = (x as Error).message;
+              pw.select();
+            }
+          };
+          return form;
+        },
+        () => {
+          this.renderFoot();
+          resolve(result);
+        },
+      );
+    });
+  }
+
+  /** The vault as a password manager: every host with its saved passwords, to read, copy, change or remove. */
+  async vaultDialog() {
+    if ((await this.unlockDialog(false)) !== "unlocked") return;
+    let clipTimer = 0;
+    const copy = (text: string) => {
+      void navigator.clipboard?.writeText(text);
+      clearTimeout(clipTimer);
+      clipTimer = window.setTimeout(() => void navigator.clipboard?.writeText("").catch(() => {}), 30000);
+      toast("Copied. The clipboard is cleared in 30 seconds.");
+    };
+    openModal((close) => {
+      const list = el("div", { class: "vault-list" });
+      const filter = el("input", { type: "search", placeholder: "Search hosts", autocomplete: "off", spellcheck: "false" });
+      const shown = new Map<string, string>();
+      const draw = () => {
+        clear(list);
+        const q = filter.value.trim().toLowerCase();
+        const servers = this.tree.servers.filter((s) => !q || `${s.name} ${s.host} ${s.user}`.toLowerCase().includes(q));
+        if (!servers.length) list.append(el("div", { class: "empty" }, "No host matches."));
+        for (const s of servers) {
+          const cell = (label: string, sudo: boolean, has: boolean) => {
+            const key = `${s.id}:${sudo}`;
+            const box = el("div", { class: "secret" }, el("span", { class: "lbl" }, label));
+            if (!has) {
+              const add = el("button", { class: "link", type: "button" }, "add");
+              add.onclick = () => void edit(sudo);
+              box.append(el("span", { class: "none" }, "—"), add);
+              return box;
+            }
+            const text = el("span", { class: "pw" }, shown.get(key) ?? "••••••••••");
+            const eye = this.ibtn(shown.has(key) ? "eye-off" : "eye", shown.has(key) ? "Hide" : "Show", async () => {
+              if (shown.has(key)) shown.delete(key);
+              else shown.set(key, (await this.be.vaultReveal(s.id, sudo).catch(() => null)) ?? "");
+              draw();
+            });
+            const cp = this.ibtn("copy", "Copy", async () => {
+              const v = await this.be.vaultReveal(s.id, sudo).catch(() => null);
+              if (v) copy(v);
+            });
+            const ed = this.ibtn("edit", "Change", () => void edit(sudo));
+            const rm = this.ibtn("trash", "Remove", async () => {
+              if (await confirmBox("Remove this password?", `${label} of ${s.name} will be deleted from the vault.`, "Remove")) {
+                await this.be.vaultSet(s.id, sudo, null);
+                shown.delete(key);
+                await this.refreshTree();
+              }
+              await this.vaultDialog();
+            });
+            box.append(text, eye, cp, ed, rm);
+            return box;
+          };
+          const edit = async (sudo: boolean) => {
+            const v = await promptBox(`${sudo ? "sudo password" : s.auth === "key" ? "Key passphrase" : "Password"} of ${s.name}`, "", "password");
+            if (v == null) return;
+            await this.be.vaultSet(s.id, sudo, v || null);
+            shown.delete(`${s.id}:${sudo}`);
+            await this.refreshTree();
+            await this.vaultDialog();
+          };
+          list.append(el("div", { class: "vrow" }, el("div", { class: "who" }, el("span", { class: "dot", style: `background:${serverColor(s.id)}` }), el("span", { class: "txt" }, el("b", {}, s.name), el("small", {}, `${s.user ? s.user + "@" : ""}${s.host}`))), cell(s.auth === "key" ? "Passphrase" : "Password", false, s.has_secret), cell("sudo", true, s.has_sudo)));
+        }
+      };
+      filter.oninput = draw;
+      draw();
+      const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
+      lock.onclick = () => {
+        close();
+        void this.lockVault();
+      };
+      const change = el("button", { class: "btn", type: "button" }, "Change master password");
+      change.onclick = async () => {
+        const pw = await promptBox("New master password", "", "password", "Everything in the vault is encrypted again under it.");
+        if (!pw) return;
+        try {
+          await this.be.vaultChangeMaster(pw);
+          toast("Master password changed");
+        } catch (e) {
+          toast((e as Error).message);
+        }
+        await this.vaultDialog();
+      };
+      const done = el("button", { class: "btn primary", type: "button" }, "Done");
+      done.onclick = close;
+      return el("div", { class: "wide" }, el("h2", {}, "Vault"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Passwords saved for your hosts. They never leave this computer unencrypted."), filter, list, el("div", { class: "actions" }, lock, change, done));
+    });
+  }
+
+  async lockVault() {
+    await this.be.vaultLock();
+    this.vault = await this.be.vaultStatus();
+    this.renderFoot();
+    toast("Vault locked");
+  }
+
+  async newFolder() {
+    const name = await promptBox("New folder", "");
+    if (!name?.trim()) return;
+    const parent = this.selected?.kind === "folder" ? this.selected.id : null;
+    await this.be.addFolder(name.trim(), parent);
+    await this.refreshTree();
+  }
+
+  editSelected() {
+    const s = this.selected;
+    if (!s) return toast("Select a server first");
+    if (s.kind === "server") void this.serverForm(this.tree.servers.find((x) => x.id === s.id) ?? null);
+    else void this.renameFolder(this.tree.folders.find((f) => f.id === s.id)!);
+  }
+
+  private async renameFolder(f: Folder) {
+    const name = await promptBox("Rename folder", f.name);
+    if (name?.trim()) {
+      await this.be.renameFolder(f.id, name.trim());
+      await this.refreshTree();
+    }
+  }
+
+  async deleteSelected() {
+    const s = this.selected;
+    if (!s) return toast("Select a server or a folder first");
+    const name = s.kind === "server" ? this.tree.servers.find((x) => x.id === s.id)?.name : this.tree.folders.find((f) => f.id === s.id)?.name;
+    const ok = await confirmBox(`Delete “${name}”?`, s.kind === "folder" ? "The folder and every server inside it will be deleted, with their saved passwords." : "The server and its saved passwords will be deleted.", "Delete");
+    if (!ok) return;
+    await this.be.deleteNode(s.kind, s.id);
+    this.selected = null;
+    await this.refreshTree();
+  }
+
+  /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
+  async serverForm(existing: Server | null) {
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false };
+    openModal((close) => {
+      const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
+      const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
+      const port = el("input", { value: String(s.port), name: "port", inputmode: "numeric" });
+      const user = el("input", { value: s.user, name: "user", autocomplete: "off", spellcheck: "false" });
+      const auth = makeSelect([["agent", "SSH agent"], ["key", "Private key"], ["password", "Password"]], s.auth, { "data-name": "auth" });
+      const key = el("input", { value: s.key_path, name: "key", placeholder: "~/.ssh/id_ed25519", spellcheck: "false" });
+      const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
+      const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
+      const jump = makeSelect([["", "Direct"], ...this.tree.servers.filter((x) => x.id !== s.id).map((x): [string, string] => [String(x.id), x.name])], s.jump == null ? "" : String(s.jump), { "data-name": "jump" });
+      const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
+      const clearLogin = el("input", { type: "checkbox", id: "clr" });
+      const keyRow = field("Key file", key);
+      const loginLabel = el("label", {}, "");
+      const loginRow = el("div", {}, loginLabel, login);
+      const rmRow = el("div", { class: "hint" }, clearLogin, " remove the saved password");
+      const sync = () => {
+        keyRow.style.display = auth.value === "key" ? "" : "none";
+        loginRow.style.display = auth.value === "agent" ? "none" : "";
+        loginLabel.textContent = auth.value === "key" ? "Key passphrase (kept in the vault)" : "Password (kept in the vault)";
+        rmRow.style.display = auth.value !== "agent" && s.has_secret ? "" : "none";
+      };
+      auth.onchange = sync;
+      sync();
+      const err = el("div", { class: "err" });
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), err);
+      const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
+      const no = el("button", { class: "btn", type: "button" }, "Cancel");
+      no.onclick = close;
+      form.append(el("div", { class: "actions" }, no, ok));
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        if (!host.value.trim()) return void (err.textContent = "The host is required");
+        const portN = Number(port.value);
+        if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null };
+        const loginSecret = auth.value === "agent" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
+        const sudoSecret = sudo.value || null;
+        if ((loginSecret || sudoSecret) && !this.vault.unlocked) {
+          const r = await this.unlockDialog(false);
+          if (r !== "unlocked") return void (err.textContent = "Unlock the vault to save a password");
+        }
+        try {
+          const id = await this.be.saveServer(next, loginSecret, sudoSecret);
+          this.selected = { kind: "server", id };
+          close();
+          await this.refreshTree();
+        } catch (x) {
+          err.textContent = (x as Error).message;
+        }
+      };
+      return form;
+    });
+  }
+
+  async renameTab(sid: Id) {
+    const t = this.ws.tabs.get(sid);
+    if (!t) return;
+    const name = await promptBox("Rename terminal", t.title);
+    if (name?.trim()) this.ws.setTitle(sid, name.trim());
+  }
+
+  settingsDialog() {
+    const edits: Record<string, unknown> = { ...(this.userKeys ?? {}) };
+    delete edits.modifier;
+    let mod = modifierOf(this.userKeys);
+    openModal((close) => {
+      const list = el("div", { class: "keylist" });
+      const inputs = new Map<string, HTMLInputElement>();
+      const warn = el("div", { class: "err" });
+      const note = el("div", { class: "hint" });
+      const draw = () => {
+        clear(list);
+        inputs.clear();
+        note.textContent =
+          mod === "Ctrl"
+            ? "Ctrl is also what terminal programs use (Ctrl+C, Ctrl+M, Ctrl+H…): some shortcuts will clash with them."
+            : mod === "Super"
+              ? "Super is not used by terminal programs, but your desktop may keep some Super shortcuts for itself."
+              : "";
+        for (const action of Object.keys(DEFAULTS)) {
+          const cur = action in edits ? edits[action] : DEFAULTS[action];
+          const text = cur == null ? "" : (Array.isArray(cur) ? cur : [cur]).map((x) => resolveMod(String(x), mod)).join(" / ");
+          const input = el("input", { value: text, readonly: true, placeholder: "none", "data-action": action });
+          inputs.set(action, input);
+          input.onfocus = () => input.classList.add("capture");
+          input.onblur = () => input.classList.remove("capture");
+          input.onkeydown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.key === "Backspace" || e.key === "Delete") edits[action] = null;
+            else if (["Alt", "Control", "Shift", "Meta"].includes(e.key)) return;
+            else {
+              const combo = comboFromEvent(e);
+              if (!combo) return;
+              edits[action] = combo;
+            }
+            draw();
+            inputs.get(action)?.focus();
+          };
+          const reset = el("button", { class: "ib", type: "button", title: "Back to the default" });
+          reset.append(icon("close", 14));
+          reset.onclick = () => {
+            delete edits[action];
+            draw();
+          };
+          list.append(el("div", { class: "keyrow" }, el("span", {}, LABELS[action] ?? action), input, reset));
+        }
+      };
+      const modSel = makeSelect(MODIFIERS.map((m): [string, string] => [m, m === "Alt" ? "Alt (default)" : m]), mod, { "data-role": "modifier" });
+      modSel.onchange = () => {
+        mod = modSel.value;
+        draw();
+      };
+      draw();
+      const save = el("button", { class: "btn primary", type: "button" }, "Save");
+      const cancel = el("button", { class: "btn", type: "button" }, "Cancel");
+      cancel.onclick = close;
+      save.onclick = async () => {
+        const clean: Record<string, unknown> = { modifier: mod };
+        for (const [a, v] of Object.entries(edits)) if (JSON.stringify(v) !== JSON.stringify(DEFAULTS[a])) clean[a] = v;
+        const { problems } = buildBindings(clean);
+        if (problems.length) return void (warn.textContent = problems[0]);
+        await this.be.writeConfig("hotkeys.json", JSON.stringify(clean, null, 2));
+        this.userKeys = clean;
+        this.bindings = buildBindings(clean).bindings;
+        close();
+        this.render();
+        toast("Hotkeys saved");
+      };
+      return el(
+        "div",
+        { class: "wide" },
+        el("h2", {}, "Settings"),
+        el("h2", { style: "font-size:14px" }, "Hotkeys"),
+        field("Main key: every shortcut that starts with it changes at once", modSel),
+        note,
+        el("div", { class: "hint", style: "margin:10px 0 6px" }, "Click a shortcut and press the new keys; the cross puts it back. Saved in hotkeys.json, which you can also edit by hand."),
+        list,
+        warn,
+        el("div", { class: "actions" }, cancel, save),
+      );
+    });
+  }
+
+  /** Alt+P: types the sudo password saved for this terminal's server. */
+  async fillSudo(): Promise<void> {
+    const t = this.ws.activeTab();
+    if (!t || t.dead) return;
+    try {
+      await this.be.fillSudo(t.sid, t.serverId);
+    } catch (e) {
+      if (!this.vault.unlocked && (await this.unlockDialog(false)) === "unlocked") return this.fillSudo();
+      toast((e as Error).message);
+    }
+  }
+
+  toggleBroadcast() {
+    const n = this.ws.current;
+    if (this.broadcast.has(n)) this.broadcast.delete(n);
+    else {
+      if (this.ws.screen.mode !== "mosaic") {
+        if (this.ws.screen.groups.length < 2) return toast("Broadcast needs two or more terminals on this screen");
+        this.ws.toggleMode();
+      }
+      this.broadcast.add(n);
+      toast("BROADCAST: what you type goes to every terminal of this screen");
+    }
+    this.render();
+  }
+
+  // ------------------------------------------------------------ keyboard
+
+  private onKey(e: KeyboardEvent) {
+    if (modalOpen()) return;
+    if (e.isComposing) return;
+    const tgt = e.target as HTMLElement | null;
+    const typing = tgt && (tgt.tagName === "INPUT" || tgt.tagName === "SELECT") && !e.altKey && !e.ctrlKey && !e.metaKey;
+    if (typing) return;
+    const action = matchAction(this.bindings, e);
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.run(action);
+  }
+
+  run(action: string) {
+    const ws = this.ws;
+    const [kind, arg] = action.split(".");
+    if (kind === "tab" && /^[1-9]$/.test(arg)) return ws.goTab(Number(arg));
+    const dir = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[arg] as [number, number] | undefined;
+    switch (action) {
+      case "tab.prev":
+        return ws.step(-1);
+      case "tab.next":
+        return ws.step(1);
+      case "mode.toggle":
+        return ws.toggleMode();
+      case "split.right":
+        ws.prepareSplit("right");
+        return void this.newTerminal();
+      case "split.down":
+        ws.prepareSplit("bottom");
+        return void this.newTerminal();
+      case "tab.new":
+        return void this.newTerminal();
+      case "tab.close":
+        return void (ws.screen.active != null && this.closeSession(ws.screen.active));
+      case "tab.rename":
+        return void (ws.screen.active != null && this.renameTab(ws.screen.active));
+      case "broadcast.toggle":
+        return this.toggleBroadcast();
+      case "search":
+        return void this.hostPicker();
+      case "sudo.fill":
+        return void this.fillSudo();
+      case "sidebar.toggle":
+        if (this.focusArea === "terminal") {
+          this.focusArea = "sidebar";
+          (document.activeElement as HTMLElement | null)?.blur();
+        } else {
+          this.focusArea = "terminal";
+          this.focusActive();
+        }
+        return;
+      case "settings":
+        return this.settingsDialog();
+    }
+    if (kind === "focus" && dir) {
+      if (!ws.moveFocus(dir[0], dir[1]) && dir[0]) ws.step(dir[0]);
+      return;
+    }
+    if (kind === "move" && dir) {
+      if (ws.screen.mode !== "mosaic") return toast(`Moving terminals needs a mosaic (${this.keyText("mode.toggle")} joins every tab into one)`);
+      if (!ws.moveActive(dir[0], dir[1])) toast("Already at that edge");
+    }
+  }
+
+  // ------------------------------------------------------------ dragging
+
+  private startResize(e: PointerEvent, handle: HTMLElement, path: boolean[], side: boolean, whole: Rect) {
+    e.preventDefault();
+    handle.classList.add("drag");
+    const rect = this.stage.getBoundingClientRect();
+    const move = (m: PointerEvent) => {
+      const pos = side ? m.clientX - rect.left - whole.x : m.clientY - rect.top - whole.y;
+      const len = side ? whole.w : whole.h;
+      this.ws.resize(path, (pos / len) * 1000);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  /** A host (or folder) of the left list picked up: dropped on the stage it opens there, on a folder it moves in. */
+  private startHostDrag(e: PointerEvent, kind: "server" | "folder", id: number, row: HTMLElement) {
+    if (e.button !== 0) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    let ghost: HTMLElement | null = null;
+    let target: { sid: Id | null; side: Side | null } | null = null;
+    let folder: HTMLElement | null = null;
+    let toTop = false;
+    const label = row.querySelector("b")?.textContent ?? "";
+    const reset = () => {
+      this.treeEl.querySelectorAll(".drop-target").forEach((x) => x.classList.remove("drop-target"));
+      this.hint.style.display = "none";
+    };
+    const move = (m: PointerEvent) => {
+      if (!ghost && Math.hypot(m.clientX - sx, m.clientY - sy) < 6) return;
+      if (!ghost) {
+        ghost = el("div", { class: "drag-ghost" }, kind === "server" ? el("span", { class: "dot", style: `background:${serverColor(id)}` }) : "", label);
+        document.body.append(ghost);
+        document.body.style.cursor = "grabbing";
+      }
+      ghost.style.left = `${m.clientX + 12}px`;
+      ghost.style.top = `${m.clientY + 12}px`;
+      reset();
+      target = null;
+      folder = null;
+      toTop = false;
+      const over = document.elementFromPoint(m.clientX, m.clientY) as HTMLElement | null;
+      const fr = over?.closest(".row.folder") as HTMLElement | null;
+      if (fr && Number(fr.dataset.id) !== id) {
+        folder = fr;
+        fr.classList.add("drop-target");
+      } else if (over?.closest("#tree") && !over.closest(".row")) {
+        toTop = true;
+      } else if (kind === "server" && !over?.closest("#side")) {
+        target = this.dropTarget(m.clientX, m.clientY, null);
+        if (!target && this.ws.screen.order.length === 0 && over?.closest("#stage")) this.showHint({ x: 0, y: 0, w: this.stage.clientWidth, h: this.stage.clientHeight });
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.cursor = "";
+      const wasDragging = !!ghost;
+      ghost?.remove();
+      const drop = { target, folder, toTop };
+      reset();
+      if (!wasDragging) return;
+      // the click that follows the drop must not open or select anything
+      const swallow = (c: Event) => c.stopPropagation();
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+      if (drop.folder) void this.be.moveInto(kind, id, Number(drop.folder.dataset.id)).then(() => this.refreshTree());
+      else if (drop.toTop) void this.be.moveInto(kind, id, null).then(() => this.refreshTree());
+      else if (kind === "server") {
+        const t = drop.target;
+        const place: Place | undefined = t?.sid != null ? { target: t.sid, side: t.side ?? this.autoSideFor(t.sid) } : undefined;
+        void this.openServer(id, true, place);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  private autoSideFor(sid: Id): Side {
+    const b = this.ws.boxes().boxes.find((x) => x.id === sid);
+    return b ? autoSide(b.rect) : "right";
+  }
+
+  /** A tab (from the bar) or a terminal (by its title) picked up to be placed somewhere else. */
+  private startDrag(e: PointerEvent, sid: Id, fromBar: boolean) {
+    if (e.button !== 0) return;
+    this.drag = { sid, fromBar, startX: e.clientX, startY: e.clientY, active: false, target: null, toBar: false };
+    const move = (m: PointerEvent) => this.dragMove(m);
+    const up = (u: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      this.dragEnd(u);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  private dragMove(m: PointerEvent) {
+    const d = this.drag;
+    if (!d) return;
+    if (!d.active && Math.hypot(m.clientX - d.startX, m.clientY - d.startY) < 6) return;
+    d.active = true;
+    document.body.style.cursor = "grabbing";
+    d.target = null;
+    d.toBar = false;
+    this.tabsEl.classList.remove("drop");
+    this.hint.style.display = "none";
+    const group = this.ws.screen.group;
+    const inMosaic = !d.fromBar && !!group && leaves(group.tree).length > 1 && leaves(group.tree).includes(d.sid);
+    const overBar = inMosaic && !!(document.elementFromPoint(m.clientX, m.clientY) as HTMLElement | null)?.closest(".tabs");
+    if (overBar) {
+      d.toBar = true;
+      this.tabsEl.classList.add("drop");
+    }
+    if (!overBar) {
+      d.target = this.dropTarget(m.clientX, m.clientY, d.sid);
+    }
+  }
+
+  /** Where something dragged over the stage would dock (beside the terminal under it); shows the hint. */
+  private dropTarget(cx: number, cy: number, sid: Id | null): { sid: Id | null; side: Side | null } | null {
+    const sr = this.stage.getBoundingClientRect();
+    const x = cx - sr.left;
+    const y = cy - sr.top;
+    this.hint.style.display = "none";
+    if (x < 0 || y < 0 || x > sr.width || y > sr.height) return null;
+    const box = this.ws.boxes().boxes.find((b) => x >= b.rect.x && x < b.rect.x + b.rect.w && y >= b.rect.y && y < b.rect.y + b.rect.h);
+    if (!box || box.id === sid) return null;
+    const side = dockSide(box.rect, x, y);
+    this.showHint(dockZone(box.rect, side));
+    return { sid: box.id, side };
+  }
+
+  private showHint(r: Rect) {
+    Object.assign(this.hint.style, { display: "block", left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+  }
+
+  private dragEnd(_u: PointerEvent) {
+    const d = this.drag;
+    this.drag = null;
+    document.body.style.cursor = "";
+    this.hint.style.display = "none";
+    this.tabsEl.classList.remove("drop");
+    if (!d?.active) return;
+    this.justDragged = true;
+    setTimeout(() => (this.justDragged = false), 0);
+    if (d.toBar) return this.ws.dropIntoBar(d.sid);
+    if (d.target?.sid == null) return;
+    const same = this.ws.screen.indexOf(d.sid) === this.ws.screen.indexOf(d.target.sid);
+    if (same) this.ws.dropOn(d.sid, d.target.sid, d.target.side);
+    else this.ws.dropGroup(d.sid, d.target.sid, d.target.side);
+  }
+}
+
+/** "Alt+Shift+2" from a key press, by key position. `null` for a key that cannot be a shortcut alone. */
+export function comboFromEvent(e: KeyboardEvent): string | null {
+  const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super"].filter(Boolean) as string[];
+  let key = "";
+  if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
+  else if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
+  else if (/^F\d{1,2}$/.test(e.code)) key = e.code;
+  else {
+    const named: Record<string, string> = { ArrowLeft: "Left", ArrowRight: "Right", ArrowUp: "Up", ArrowDown: "Down", Comma: ",", Period: ".", Slash: "/", Backslash: "\\", Minus: "-", Equal: "=", Semicolon: ";", Quote: "'", BracketLeft: "[", BracketRight: "]", Backquote: "`", Enter: "Enter", Tab: "Tab", Space: "Space", Escape: "Escape", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown" };
+    key = named[e.code] ?? "";
+  }
+  if (!key) return null;
+  const text = [...mods, key].join("+");
+  return parseCombo(text) ? text : null;
+}
+
+
+/** Self-test only: a terminal that is a tab of its own (no split asked for). */
+async function openTabAlone(app: App) {
+  await app.openServer(LOCAL);
+}
