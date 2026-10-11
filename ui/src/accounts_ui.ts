@@ -3,7 +3,6 @@
 
 import { AccountsView, Backend, ToolAccounts } from "./api";
 import { el, toast } from "./dom";
-import { icon } from "./icons";
 
 /** The choices of a drop-down: leave it alone, or one of the accounts (and the saved one even if the tool no longer lists it). */
 export function accountChoices(tool: ToolAccounts | undefined, saved: string | null): [string, string][] {
@@ -15,21 +14,9 @@ export function accountChoices(tool: ToolAccounts | undefined, saved: string | n
 
 const TITLE = { github: "GitHub", tailscale: "Tailscale" } as const;
 
-/** Adds the section to `parent` (nothing, when neither tool is installed). */
-export function accountsSection(parent: HTMLElement, view: AccountsView, be: Backend, changed: () => Promise<void>) {
+/** The rows of the Accounts section (its title line is drawn by the window, like the other sections). */
+export function accountsRows(parent: HTMLElement, view: AccountsView, be: Backend, changed: () => Promise<void>) {
   const tools = (["github", "tailscale"] as const).filter((t) => view[t].installed);
-  if (!tools.length) return;
-  const open = localStorage.getItem("oso.accounts") !== "closed";
-  const head = el("div", { class: "sec", title: "The accounts of other tools: oso only switches them" });
-  const chev = el("span", { class: "chev" });
-  chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
-  head.append(chev, "Accounts");
-  head.onclick = () => {
-    localStorage.setItem("oso.accounts", open ? "closed" : "open");
-    void changed();
-  };
-  parent.append(head);
-  if (!open) return;
   for (const t of tools) {
     const v = view[t];
     const now = v.accounts.find((a) => a.active);

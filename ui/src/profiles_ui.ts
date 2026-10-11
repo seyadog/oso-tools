@@ -211,26 +211,31 @@ function proxyForm(be: Backend, profiles: () => Profile[], existing: Proxy | nul
   }, again);
 }
 
-/** The strip above the host list: which profile is active, a switch to see every profile's hosts, and the manager. */
-export function profileBar(be: Backend, state: () => { profiles: Profile[]; proxies: Proxy[]; active: string; all: boolean }, changed: () => Promise<void>): HTMLElement {
+/** The top of the left panel: which profile is active (large, always there), "+ New profile" inside its list, a switch
+ *  to see every profile's servers, and the manager. */
+export function profileBar(be: Backend, state: () => { profiles: Profile[]; proxies: Proxy[]; active: string; all: boolean }, changed: () => Promise<void>, onNew: () => void): HTMLElement {
   const { profiles, active, all } = state();
   const current = profiles.find((p) => p.id === active);
   const bar = el("div", { class: `profile-bar${current?.production ? " prod" : ""}` });
-  const sel = makeSelect(profiles.map((p): [string, string] => [p.id, p.name]), active, { "data-name": "active-profile", title: "Active profile" });
+  const label = el("div", { class: "pb-label" }, "Profile");
+  const sel = makeSelect([...profiles.map((p): [string, string] => [p.id, p.name]), ["__new", "+ New profile"]], active, { "data-name": "active-profile", title: "The active profile: its servers, secrets and accounts" });
   sel.onchange = async () => {
+    if (sel.value === "__new") {
+      sel.value = active;
+      return onNew();
+    }
     const problems = await be.setActiveProfile(sel.value);
     if (problems.length) toast(problems.join(" · "), 8000);
     await changed();
   };
-  const eye = el("button", { class: `ib${all ? " on" : ""}`, type: "button", title: all ? "Showing every profile's hosts" : "Show every profile's hosts", "aria-pressed": String(all), "data-act": "view-all" });
+  const eye = el("button", { class: `ib${all ? " on" : ""}`, type: "button", title: all ? "Showing the servers of every profile (click to show only this one)" : "Show the servers of every profile", "aria-pressed": String(all), "data-act": "view-all" });
   eye.append(icon("eye", 15));
   eye.onclick = async () => {
     await be.setViewAll(!all);
     await changed();
   };
-  const more = el("button", { class: "ib", type: "button", title: "Profiles", "data-act": "profiles" });
-  more.append(icon("more", 15));
+  const more = el("button", { class: "sec-btn", type: "button", title: "Rename or delete profiles, proxies, accounts and cloud settings of a profile", "data-act": "profiles" }, "Manage");
   more.onclick = () => profilesDialog(be, () => state().profiles, () => state().proxies, changed);
-  bar.append(sel, eye, more);
+  bar.append(label, el("div", { class: "pb-row" }, sel, eye, more));
   return bar;
 }

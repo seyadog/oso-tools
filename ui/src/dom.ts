@@ -82,6 +82,13 @@ export function field(label: string, input: HTMLElement): HTMLElement {
   return wrap;
 }
 
+/** A field with a short line of help under it (what it is for, in plain words). */
+export function fieldHelp(label: string, input: HTMLElement, help: string): HTMLElement {
+  const wrap = field(label, input);
+  wrap.append(el("div", { class: "help" }, help));
+  return wrap;
+}
+
 export function confirmBox(title: string, text: string, okLabel = "OK"): Promise<boolean> {
   return new Promise((resolve) => {
     let answered = false;

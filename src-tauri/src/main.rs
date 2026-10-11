@@ -197,6 +197,40 @@ fn audit_recent(state: State<AppState>, limit: usize) -> Res<Vec<Value>> {
     Ok(lines[lines.len().saturating_sub(limit.min(500))..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect())
 }
 
+fn agent_of(name: &str) -> Res<oso_core::integration::Agent> {
+    oso_core::integration::Agent::parse(name).ok_or_else(|| "unknown agent".to_string())
+}
+
+fn home_dir() -> Res<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()).ok_or_else(|| "no home folder".to_string())
+}
+
+/// Which AI agents already have `oso mcp` registered (reads their files, changes nothing).
+#[tauri::command]
+fn integration_status() -> Res<Value> {
+    let home = home_dir()?;
+    use oso_core::integration::{Agent, installed};
+    Ok(json!({ "claude": installed(Agent::Claude, &home), "opencode": installed(Agent::Opencode, &home), "codex": installed(Agent::Codex, &home) }))
+}
+
+/// What installing (or removing) would change in the agent's files, line by line. Writes nothing.
+#[tauri::command]
+fn integration_plan(agent: String, install: bool) -> Res<Value> {
+    let (agent, home) = (agent_of(&agent)?, home_dir()?);
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "oso".into());
+    let plan = if install { oso_core::integration::plan_install(agent, &home, &exe) } else { oso_core::integration::plan_uninstall(agent, &home) }.map_err(err)?;
+    Ok(Value::Array(plan.iter().map(|c| json!({ "path": c.path.to_string_lossy(), "changed": c.changed(), "diff": c.diff() })).collect()))
+}
+
+/// Does it, after the window showed the plan and the person pressed the button. A copy of each old file is kept.
+#[tauri::command]
+fn integration_apply(agent: String, install: bool) -> Res<Vec<String>> {
+    let (agent, home) = (agent_of(&agent)?, home_dir()?);
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "oso".into());
+    let plan = if install { oso_core::integration::plan_install(agent, &home, &exe) } else { oso_core::integration::plan_uninstall(agent, &home) }.map_err(err)?;
+    Ok(oso_core::integration::apply(&plan).map_err(err)?.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
 #[tauri::command]
 fn totp_code(state: State<AppState>, id: u64) -> Res<Value> {
     let (code, left) = engine!(state).totp_code(id).map_err(err)?;
@@ -590,6 +624,9 @@ fn main() {
             profile_set_proxy,
             approval_answer,
             audit_recent,
+            integration_status,
+            integration_plan,
+            integration_apply,
             totp_code,
             server_set_totp,
             env_preview,

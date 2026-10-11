@@ -59,11 +59,12 @@ export function mockBackend(): Backend {
   };
 
   // For the tests: make a session end the way a dropped connection does.
-  const knobs = { failNext: 0 };
+  const knobs = { failNext: 0, noTools: false, empty: false };
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
   const deletedEnv: string[] = [];
+  const connected = { claude: false, opencode: false, codex: false };
   let cliHandler: (e: CliEvent) => void = () => {};
   let approvalHandler: (r: ApprovalRequest) => void = () => {};
   const notices: [string, string][] = [];
@@ -103,9 +104,9 @@ export function mockBackend(): Backend {
       };
       const eff = (s: Server) => s.profile ?? folderProfile(s.parent);
       const inProfile = (p: string | null) => viewAll || p === null || p === activeProfile;
-      const srv = servers.filter((s) => inProfile(eff(s)));
+      const srv = knobs.empty ? [] : servers.filter((s) => inProfile(eff(s)));
       const holds = (fid: number) => srv.some((s) => { for (let f = folders.find((x) => x.id === s.parent); f; f = folders.find((x) => x.id === f!.parent)) if (f.id === fid) return true; return false; });
-      const fol = folders.filter((f) => viewAll || folderProfile(f.id) === activeProfile || holds(f.id) || (folderProfile(f.id) === null && !servers.some((s) => s.parent === f.id)));
+      const fol = knobs.empty ? [] : folders.filter((f) => viewAll || folderProfile(f.id) === activeProfile || holds(f.id) || (folderProfile(f.id) === null && !servers.some((s) => s.parent === f.id)));
       return { folders: structuredClone(fol), servers: structuredClone(srv).map((s) => ({ ...s, profile_eff: eff(s) })), profiles: structuredClone(profiles), proxies: structuredClone(proxies), active_profile: activeProfile, view_all: viewAll } as TreeData;
     },
     profileSave: async (id, name) => {
@@ -140,7 +141,7 @@ export function mockBackend(): Backend {
       }
       return problems;
     },
-    accounts: async () => structuredClone(tools),
+    accounts: async () => (knobs.noTools ? ({ github: { installed: false, accounts: [], error: null }, tailscale: { installed: false, accounts: [], error: null } } as AccountsView) : structuredClone(tools)),
     accountUse: async (tool, id) => use(tool, id),
     profileSetAccounts: async (profile, gh, ts) => {
       const p = profiles.find((x) => x.id === profile)!;
@@ -283,6 +284,15 @@ export function mockBackend(): Backend {
       p.production = production;
     },
     onCli: (f) => void (cliHandler = f),
+    integrationStatus: async () => ({ ...connected }),
+    integrationPlan: async (agent, install) => [
+      { path: `/home/me/.${agent}.json`, changed: true, diff: install ? '+ "oso": {\n+   "command": "/home/me/.local/bin/oso-app",\n+   "args": ["mcp"]\n+ }\n' : '- "oso": { … }\n' },
+      { path: `/home/me/.${agent}/AGENTS.md`, changed: true, diff: install ? "+ <!-- oso:begin -->\n+ If the environment variable `OSO=1` is set, call `oso_context` first.\n+ <!-- oso:end -->\n" : "- <!-- oso:begin --> … <!-- oso:end -->\n" },
+    ],
+    integrationApply: async (agent, install) => {
+      (connected as Record<string, boolean>)[agent] = install;
+      return [];
+    },
     onApproval: (f) => void (approvalHandler = f),
     approvalAnswer: async (id, decision) => {
       approvalAnswers.push([id, decision]);
@@ -294,7 +304,7 @@ export function mockBackend(): Backend {
     ] as AuditEntry[],
     secretList: async () => {
       if (!vault.unlocked) throw new Error("the vault is locked");
-      return [...vaultSecrets.values()].map((x) => ({ ...x.meta }));
+      return knobs.empty ? [] : [...vaultSecrets.values()].map((x) => ({ ...x.meta }));
     },
     secretSave: async (meta, value) => {
       if (!vault.unlocked) throw new Error("the vault is locked");

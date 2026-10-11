@@ -1,7 +1,7 @@
 // The Secrets window: every secret of the vault with its type and profile, to read, copy, change or delete.
 
 import { Backend, SecretKind, SecretMeta } from "./api";
-import { clear, confirmBox, el, field, makeSelect, openModal, toast } from "./dom";
+import { clear, confirmBox, el, fieldHelp, makeSelect, openModal, toast } from "./dom";
 import { icon } from "./icons";
 
 export interface Ctx {
@@ -17,6 +17,8 @@ export interface Ctx {
   /** The profile the window is showing. */
   activeProfile(): string;
   lockVault(): Promise<void>;
+  /** Something about the secrets may have changed (the left panel counts them). */
+  changed?(): void;
 }
 
 export const KIND_LABEL: Record<SecretKind, string> = { password: "Password", sudo: "sudo password", ssh_key: "SSH key", api_key: "API key", token: "Token", totp: "One-time codes" };
@@ -55,7 +57,18 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     const draw = () => {
       clear(list);
       const rows = all.filter((m) => matches(m, filter.value.trim(), kinds.value, profiles.value));
-      if (!rows.length) list.append(el("div", { class: "empty" }, all.length ? "No secret matches." : "Nothing here yet. Add a password, an API key, an SSH key or a token."));
+      if (!rows.length) {
+        const none = el("div", { class: "empty-box" }, el("div", {}, all.length ? "No secret matches." : "You have no secrets yet. Add your first API key."));
+        if (!all.length) {
+          const b = el("button", { class: "btn primary", type: "button", "data-act": "empty-new-key" }, "Add an API key");
+          b.onclick = () => {
+            close();
+            secretForm(ctx, null, () => secretsDialog(ctx), { kind: "api_key", agent_visible: true });
+          };
+          none.append(b);
+        }
+        list.append(none);
+      }
       for (const m of rows) {
         const key = m.id;
         const old = isStale(m);
@@ -106,12 +119,12 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     profiles.onchange = draw;
     void load();
 
-    const add = el("button", { class: "btn", type: "button", "data-act": "new-secret" }, "New secret");
+    const add = el("button", { class: "btn primary", type: "button", "data-act": "new-secret" }, "New secret");
     add.onclick = () => {
       close();
       secretForm(ctx, null, () => secretsDialog(ctx));
     };
-    const sudo = el("button", { class: "btn", type: "button", "data-act": "local-sudo", title: "Typed by itself at the password question of sudo in a terminal of this computer" }, "This computer's sudo password");
+    const sudo = el("button", { class: "btn", type: "button", "data-act": "local-sudo", title: "Typed by itself at the password question of sudo in a terminal of this computer" }, "Sudo password");
     sudo.onclick = async () => {
       const { promptBox } = await import("./dom");
       close();
@@ -131,12 +144,12 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       close();
       importChooser(ctx);
     };
-    const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
+    const lock = el("button", { class: "btn", type: "button" }, "Lock vault");
     lock.onclick = () => {
       close();
       void ctx.lockVault();
     };
-    const change = el("button", { class: "btn", type: "button" }, "Change master password");
+    const change = el("button", { class: "btn", type: "button" }, "Master password");
     change.onclick = async () => {
       const { promptBox } = await import("./dom");
       const pw = await promptBox("New master password", "", "password", "Everything in the vault is encrypted again under it.");
@@ -149,10 +162,10 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       }
       secretsDialog(ctx);
     };
-    const done = el("button", { class: "btn primary", type: "button" }, "Done");
+    const done = el("button", { class: "btn", type: "button" }, "Done");
     done.onclick = close;
-    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
-  });
+    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "API keys, passwords, SSH keys, tokens and one-time codes. Everything here is encrypted, names included, and never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
+  }, () => ctx.changed?.());
 }
 
 /** Where secrets can come from. */
@@ -180,8 +193,8 @@ function importChooser(ctx: Ctx) {
 }
 
 /** Add (`null`) or change a secret. On a change, leaving the value empty keeps the saved one. */
-export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => void) {
-  const m: SecretMeta = existing ?? { id: 0, name: "", kind: "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 };
+export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => void, preset: Partial<SecretMeta> = {}) {
+  const m: SecretMeta = existing ?? { id: 0, name: "", kind: "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0, ...preset };
   openModal((close) => {
     const name = el("input", { value: m.name, name: "name", autocomplete: "off", spellcheck: "false", placeholder: "anthropic-work" });
     const kind = makeSelect(KINDS.map((k): [string, string] => [k, KIND_LABEL[k]]), m.kind, { "data-name": "kind" });
@@ -191,21 +204,22 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
     const profile = makeSelect([["", "All profiles"], ...ctx.profiles().map((p): [string, string] => [p.id, p.name])], m.profile ?? "", { "data-name": "profile" });
     const env = el("input", { value: m.env_var ?? "", name: "env", autocomplete: "off", spellcheck: "false", placeholder: "ANTHROPIC_API_KEY (optional)" });
     const agent = el("input", { type: "checkbox", id: "agent-visible", name: "agent" }) as HTMLInputElement;
-    agent.checked = existing ? m.agent_visible : false;
+    agent.checked = existing ? m.agent_visible : m.agent_visible;
     const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false" }, m.notes);
     const valueRow = el("div", {});
     const sync = () => {
       clear(valueRow);
-      valueRow.append(el("label", {}, long() ? "Private key (OpenSSH format)" : kind.value === "totp" ? "Secret (base32) or otpauth:// link" : "Value"), long() ? keyText : value);
+      valueRow.append(el("label", {}, long() ? "Private key (OpenSSH format)" : kind.value === "totp" ? "Secret (base32) or otpauth:// link" : "Value"), long() ? keyText : value, el("div", { class: "help" }, long() ? "Paste the private key, without a passphrase. It stays in the vault." : kind.value === "totp" ? "The text next to the QR code of the service, or the otpauth:// link." : "The secret itself. It is encrypted and not shown again unless you ask."));
     };
     kind.onchange = () => {
       if (!existing) agent.checked = kind.value === "api_key";
       sync();
     };
-    if (!existing) agent.checked = false;
     sync();
     const err = el("div", { class: "err" });
-    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), field("Name", name), field("Type", kind), valueRow, field("Profile", profile), field("Environment variable", env), el("div", { class: "hint" }, agent, el("label", { for: "agent-visible", style: "display:inline;margin-left:6px" }, "Terminals where an AI agent can run may get it in their environment")), field("Notes", notes), err);
+    const visible = el("div", { class: "check" }, agent, el("label", { for: "agent-visible" }, "Visible to AI agents"));
+    visible.append(el("div", { class: "help" }, "If on, the terminals of this profile where an AI tool runs get it in their environment. If off, only you (and tools you approve one by one) can use it."));
+    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), fieldHelp("Name", name, "How you find it in the list. Anything you like."), fieldHelp("Type", kind, "API key, password, SSH key, token, or the seed of one-time codes."), valueRow, fieldHelp("Profile", profile, "Which profile can use it. “All profiles” makes it available everywhere."), fieldHelp("Environment variable", env, "The name a program reads it by, like ANTHROPIC_API_KEY. Leave it empty if programs do not need it."), visible, fieldHelp("Notes", notes, "Anything to remember about it (where it comes from, when it expires). Encrypted too."), err);
     const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
     const no = el("button", { class: "btn", type: "button" }, "Cancel");
     no.onclick = () => {

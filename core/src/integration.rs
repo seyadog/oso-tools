@@ -321,6 +321,16 @@ pub fn apply(changes: &[Change]) -> Result<Vec<PathBuf>> {
     Ok(backups)
 }
 
+/// Is `oso mcp` registered with this agent? (Only reads the agent's files.)
+pub fn installed(agent: Agent, home: &Path) -> bool {
+    let (cfg, _) = files(agent, home);
+    let Ok(Some(text)) = read(&cfg) else { return false };
+    match agent {
+        Agent::Codex => text.contains(TOML_BEGIN) && text.contains("[mcp_servers.oso]"),
+        _ => parse_json(&cfg, &text).ok().is_some_and(|v| v.get(key(agent)).and_then(|m| m.get("oso")).is_some_and(|e| e["args"] == json!(["mcp"]) || e["command"].as_array().is_some_and(|c| c.get(1) == Some(&json!("mcp"))))),
+    }
+}
+
 /// `oso integration <install|uninstall> <claude|opencode|codex> [--home DIR] [--dry-run]`: prints what changes in
 /// each file (a diff) and, unless `--dry-run`, does it, keeping a copy of every file it changes.
 pub fn cli(args: &[String], exe: &str, out: &mut dyn std::io::Write) -> Result<()> {
@@ -532,6 +542,21 @@ mod tests {
         assert!(r.is_ok() && !h.join(".claude.json").exists() || std::fs::read_to_string(h.join(".claude.json")).unwrap().trim() == "{}");
         assert!(run(&["install", "emacs", "--home", &hs]).0.is_err());
         assert!(run(&["install"]).0.is_err() && run(&["frobnicate", "claude"]).0.is_err() && run(&["install", "claude", "--bogus"]).0.is_err());
+    }
+
+    #[test]
+    fn it_can_tell_whether_an_agent_is_connected() {
+        for agent in [Agent::Claude, Agent::Opencode, Agent::Codex] {
+            let h = home(&format!("status-{}", agent.name()));
+            assert!(!installed(agent, &h));
+            run(agent, &h);
+            assert!(installed(agent, &h), "{}", agent.name());
+            apply(&plan_uninstall(agent, &h).unwrap()).unwrap();
+            assert!(!installed(agent, &h));
+        }
+        let h = home("status-other");
+        put(&h.join(".claude.json"), "{ \"mcpServers\": { \"oso\": { \"command\": \"x\", \"args\": [\"serve\"] } } }");
+        assert!(!installed(Agent::Claude, &h), "an entry that is not ours does not count");
     }
 
     #[test]

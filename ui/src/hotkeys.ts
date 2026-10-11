@@ -51,6 +51,9 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "sudo.fill": "Mod+P",
   "sidebar.toggle": "Mod+Q",
   "settings": "Ctrl+,",
+  "help.open": "Mod+/",
+  "secrets.open": "Mod+S",
+  "local.new": "Mod+Shift+L",
 };
 
 /** What each action does, for the settings screen. */
@@ -76,10 +79,13 @@ export const LABELS: Record<string, string> = {
   "watch.toggle": "Tell me when this terminal is done, on or off",
   "files.open": "Copy files to or from this terminal's server",
   "tunnels.open": "Tunnels (port forwards)",
-  "search": "Open a host (quick search)",
+  "search": "Open a server (quick search)",
   "sudo.fill": "Type the saved sudo password",
   "sidebar.toggle": "Servers panel ⇄ terminal",
   "settings": "Settings",
+  "help.open": "Shortcuts and help (also ? when you are not typing)",
+  "secrets.open": "Secrets",
+  "local.new": "New local terminal (in the active profile)",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tab.${i + 1}`, `Go to tab ${i + 1}  (9 goes to the last one)`])),
 };
 

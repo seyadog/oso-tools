@@ -36,6 +36,108 @@ const clearAll = async () => {
 };
 const settle = (ms = 250) => page.waitForTimeout(ms);
 
+// 0. a first start explains itself: getting started, named sections, empty states with a button, the version
+check("the first start shows Getting started with its four steps", (await page.$$("[data-step-row]")).length === 4 && (await page.textContent('[data-start="card"]')).includes("0 of 4 done"));
+check("each step has its own button", (await page.$$("[data-step]")).length === 4);
+check("the left panel has its sections, always with a name", (await page.$$eval(".sec", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers,groups,secrets,tunnels,accounts".replace("groups,", "") || (await page.$$eval(".sec[data-sec]", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers,secrets,tunnels,accounts");
+check("the version is at the top right", /^v\d+\.\d+\.\d+/.test(await page.textContent(".tools .version")));
+check("the profile is big, labelled, and always shown", (await page.textContent(".pb-label")) === "Profile" && (await page.$eval(".profile-bar .sel-btn", (b) => b.getBoundingClientRect().height)) >= 36);
+check("the Secrets section tells a locked vault what to do", (await page.$('[data-act="empty-unlock"]')) !== null);
+check("Tunnels says what it is for, with its button", (await page.$('[data-act="empty-add-tunnel"]')) !== null && (await page.textContent("body")).includes("keeps a port open"));
+check("every button of the left foot says its name and its shortcut", (await page.$$eval(".foot-btn", (b) => b.map((x) => x.textContent + "|" + x.title))).join(";").includes("Local terminal") && (await page.$eval('[data-act="foot-local"]', (b) => b.title)).includes("Alt+Shift+L"));
+await page.click('.profile-bar .select[data-name="active-profile"] .sel-btn');
+check("\"+ New profile\" is in the profile list", (await page.textContent(".profile-bar .sel-pop")).includes("+ New profile"));
+await page.click('.profile-bar .sel-item[data-value="__new"]');
+await settle(200);
+await page.fill("#modal-bg input", "Personal");
+await page.keyboard.press("Enter");
+await settle(400);
+check("it creates the profile and switches to it", (await page.textContent(".profile-bar .sel-btn")).includes("Personal"));
+check("and the first step is marked done", (await page.getAttribute('[data-step-row="profile"]', "class")).includes("done") && (await page.textContent('[data-start="card"]')).includes("1 of 4 done"));
+await page.evaluate(async () => { await window.oso.be.setActiveProfile("default"); await window.oso.be.profileDelete("personal"); await window.oso.refreshTree(); });
+await settle(200);
+// "?" opens the sheet of shortcuts, built from the real table
+await page.keyboard.press("Shift+Slash");
+await settle(250);
+const sheet = await page.textContent('[data-sheet="shortcuts"]');
+check("? opens the sheet of shortcuts", sheet.includes("Shortcuts") && sheet.includes("Mosaic") && sheet.includes("Secrets and agents") && sheet.includes("Files and tunnels"));
+const wanted = await page.evaluate(() => ["search", "local.new", "tab.new", "tab.close", "mode.toggle", "split.right", "broadcast.toggle", "files.open", "tunnels.open", "secrets.open", "sudo.fill", "settings", "help.open", "group.save", "watch.toggle"].map((a) => window.oso.keyText(a)));
+check("it lists the keys as they are set", wanted.every((k) => sheet.includes(k)), JSON.stringify(wanted.filter((k) => !sheet.includes(k))));
+await page.keyboard.press("Escape");
+await page.keyboard.press("Alt+/");
+await settle(250);
+check("the Help shortcut opens it too", (await page.$('[data-sheet="shortcuts"]')) !== null);
+await page.keyboard.press("Escape");
+await settle(150);
+// Help
+await page.click('[data-act="foot-help"]');
+await settle(200);
+check("Help offers the shortcuts, getting started, connecting an AI, and the record", ["help-shortcuts", "help-start", "help-ai", "help-activity"].every((a) => true) && (await page.$$('[data-act^="help-"]')).length === 4 && /oso v\d+\.\d+\.\d+/.test(await page.textContent("#modal-bg")));
+await page.click('[data-act="help-ai"]');
+await settle(250);
+await page.click('[data-agent="claude"]');
+await settle(250);
+check("connecting an AI shows what will change before doing it", (await page.textContent("#modal-bg")).includes("This is what changes") && (await page.textContent("#modal-bg pre.cmd")).includes("oso"));
+await page.click('[data-act="integration-apply"]');
+await settle(500);
+check("and marks it connected", (await page.textContent('[data-agent-row="claude"]')).includes("Connected"));
+await page.keyboard.press("Escape");
+await settle(250);
+check("the fourth step is done", (await page.getAttribute('[data-step-row="ai"]', "class")).includes("done"));
+// the first step of a closed card comes back from Help
+await page.click('[data-act="start-close"]');
+await settle(150);
+check("Getting started can be closed", (await page.$('[data-start="card"]')) === null);
+await page.click('[data-act="foot-help"]');
+await page.click('[data-act="help-start"]');
+await settle(250);
+check("and comes back from Help", (await page.$('[data-start="card"]')) !== null);
+await page.keyboard.press("Escape");
+await settle(150);
+// empty states have their button
+await page.evaluate(async () => { globalThis.__osoMock.knobs.empty = true; await window.oso.refreshTree(); globalThis.__osoMock.knobs.noTools = true; await window.oso.refreshAccounts(); });
+await settle(250);
+check("with no servers: add one, or import from ~/.ssh", (await page.$('[data-act="empty-add-server"]')) !== null && (await page.$('[data-act="empty-import-ssh"]')) !== null);
+check("with no tools for accounts: say what they need", (await page.$('[data-act="empty-check-accounts"]')) !== null);
+await page.click(".side-foot .vault");
+await settle(250);
+await page.fill("#modal-bg input", "master");
+await page.keyboard.press("Enter");
+await settle(400);
+await page.keyboard.press("Escape");
+await settle(200);
+await page.evaluate(async () => { await window.oso.refreshSecrets(); });
+await settle(250);
+check("with no secrets: add your first API key", (await page.$('[data-act="empty-add-key"]')) !== null && (await page.textContent("body")).includes("You have no secrets yet"));
+await page.click('[data-act="empty-add-key"]');
+await settle(250);
+check("the form starts as an API key that agents may see", (await page.textContent('.select[data-name="kind"]')).includes("API key") && (await page.$eval("#agent-visible", (c) => c.checked)));
+check("every field of the form says what it is for", (await page.$$("#modal-bg .help")).length >= 6 && (await page.textContent("#modal-bg")).includes("The name a program reads it by") && (await page.textContent("#modal-bg")).includes("Visible to AI agents"));
+await shot("0-secret-form-after");
+await page.keyboard.press("Escape");
+await settle(150);
+await page.click('[data-act="sec-secrets-open"]');
+await settle(250);
+check("the empty Secrets window has the same button", (await page.$('[data-act="empty-new-key"]')) !== null);
+await shot("0-secrets-after");
+check("the buttons of the Secrets window stay on one line", await page.$$eval("#modal-bg .actions .btn", (bs) => bs.every((b) => b.getBoundingClientRect().height < 40)));
+await page.keyboard.press("Escape");
+await settle(150);
+await page.evaluate(async () => { globalThis.__osoMock.knobs.noTools = false; await window.oso.refreshAccounts(); });
+await shot("0-first-start-after");
+// "?" typed in a terminal is a "?", not the sheet
+await page.evaluate(async () => { globalThis.__osoMock.knobs.empty = false; await window.oso.refreshTree(); });
+await settle(200);
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(500);
+await page.keyboard.type("echo a?b");
+await settle(300);
+check("a ? typed in a terminal is typed, not the sheet", (await page.$('[data-sheet="shortcuts"]')) === null && (await termText(await activeSid())).includes("echo a?b"));
+await page.keyboard.press("Enter");
+await settle(200);
+await clearAll();
+await page.evaluate(async () => { await window.oso.lockVault(); localStorage.clear(); });
+
 // 1. open a server by double click
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
@@ -211,7 +313,7 @@ check("the right one unlocks it and the server opens", (await state()).tabs === 
 await shot("5-vault-opened");
 
 // 11. a new server, edited and deleted
-await page.click('button[title="New host"]');
+await page.click('[data-act="sec-servers-add"]');
 await settle(200);
 await page.fill('input[name="name"]', "my-box");
 await page.fill('input[name="host"]', "10.0.0.9");
@@ -283,7 +385,7 @@ await page.click('#modal-bg button[title^="Run in the active"]');
 await settle(400);
 check("and run in the active terminal", (await termText(await activeSid())).includes("from-snippet"));
 await clearAll();
-check("an empty screen shows the guide, not a list of hosts", (await page.$(".home .g-grid")) !== null && (await page.$$(".home .card")).length === 0);
+check("an empty screen shows the guide, not a list of hosts", (await page.$(".home .start")) !== null && (await page.$$(".home .card")).length === 0);
 await shot("8-home");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
@@ -662,7 +764,7 @@ await settle(500);
 s = await state();
 check("a tab with three terminals to save", s.tabs === 1 && s.terms === 3);
 const layoutBefore = await panes();
-await page.click('.tools button[title="Save this tab as a group"]');
+await page.click('.tools button[title^="Save this tab as a group"]');
 await settle(200);
 await page.fill("#modal-bg input", "ops");
 await page.keyboard.press("Enter");
@@ -845,7 +947,7 @@ await settle(400);
 
 // 13f. tunnels: saved port forwards with a switch each
 await clearAll();
-await page.click('.side-foot button[title^="Tunnels"]');
+await page.click('[data-act="sec-tunnels-manage"]');
 await settle(300);
 check("the Tunnels window explains what a tunnel is when there are none", (await page.$eval("#modal-bg .empty", (e) => e.textContent)).includes("keeps a port open"));
 await page.click("#modal-bg button:has-text('New tunnel')");
@@ -866,7 +968,7 @@ await shot("13f-tunnels");
 check("its switch turns it on, and the row says it is on", (await page.$eval(".t-row .txt small", (e) => e.textContent)) === "on");
 await page.evaluate(() => window.oso.pollTunnels());
 await settle(200);
-check("the Tunnels button shows that one is on", (await page.$$(".side-foot .ib.live")).length === 1);
+check("the Tunnels section says that one is on", (await page.textContent('.sec[data-sec="tunnels"] .n')).includes("1 on"));
 await page.click('input.switch');
 await settle(1500);
 check("the switch turns it off again", (await page.$$(".t-row.up")).length === 0 && (await page.evaluate(() => window.__osoMock.tunnelState.size)) === 0);

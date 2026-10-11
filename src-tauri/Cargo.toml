@@ -1,6 +1,6 @@
 [package]
 name = "oso"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "oso: a graphical SSH workspace with tiling terminals and screens"
 license = "MIT"
@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 oso-core = { path = "../core" }
+directories = "6"
 anyhow = "1"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }

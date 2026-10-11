@@ -293,6 +293,10 @@ export interface Backend {
   cloudOptions(): Promise<CloudOptions>;
   profileSetCloud(profile: string, awsProfile: string | null, kubeconfig: string | null, production: boolean): Promise<void>;
   onCli(f: (e: CliEvent) => void): void;
+  integrationStatus(): Promise<{ claude: boolean; opencode: boolean; codex: boolean }>;
+  /** What connecting (or removing) an agent would change in its files; writes nothing. */
+  integrationPlan(agent: string, install: boolean): Promise<{ path: string; changed: boolean; diff: string }[]>;
+  integrationApply(agent: string, install: boolean): Promise<string[]>;
   onApproval(f: (r: ApprovalRequest) => void): void;
   approvalAnswer(id: number, decision: ApprovalDecision): Promise<boolean>;
   auditRecent(limit: number): Promise<AuditEntry[]>;

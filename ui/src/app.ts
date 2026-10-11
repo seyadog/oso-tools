@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Backend, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
@@ -10,14 +10,18 @@ import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
-import { accountsSection } from "./accounts_ui";
+import { accountsRows } from "./accounts_ui";
+import { connectAiDialog } from "./ai_ui";
+import { shortcutsSheet } from "./shortcuts_ui";
+import { State as StartState, StepId, startCard } from "./start_ui";
+import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
-import { secretsDialog } from "./secrets_ui";
+import { KIND_LABEL, secretForm, secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel } from "./tunnels";
-import { switchOn, tunnelsDialog } from "./tunnels_ui";
+import { switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
@@ -61,6 +65,8 @@ export class App {
   private prod = new Map<number, boolean>();
   private tunnelStatus = new Map<string, TunnelStatus>();
   private accountsView: AccountsView | null = null;
+  /** The secrets (names and types only) while the vault is unlocked: the left panel lists them. */
+  private secretsMeta: SecretMeta[] | null = null;
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
@@ -80,7 +86,7 @@ export class App {
   private treeEl = el("div", { class: "tree", tabindex: "0" });
   private footEl = el("div", { class: "side-foot" });
   private profileEl = el("div", { class: "profile-slot" });
-  private search = el("input", { type: "search", placeholder: "Search hosts", autocomplete: "off", spellcheck: "false" });
+  private search = el("input", { type: "search", placeholder: "Search servers", autocomplete: "off", spellcheck: "false" });
   private dividers: HTMLElement[] = [];
 
   constructor(
@@ -130,6 +136,8 @@ export class App {
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
     void this.refreshAccounts();
+    void this.refreshSecrets();
+    void this.refreshAi();
 
     window.addEventListener("keydown", (e) => this.onKey(e), true);
     window.setInterval(() => this.watchTick(), 1000);
@@ -306,6 +314,7 @@ export class App {
       if (v.exists !== this.vault.exists || v.unlocked !== this.vault.unlocked) {
         this.vault = v;
         this.renderFoot();
+        void this.refreshSecrets();
       }
     } catch {
       /* the next one will do */
@@ -316,6 +325,8 @@ export class App {
     await this.refreshTree();
     await this.refreshVaultMark();
     void this.refreshAccounts();
+    void this.refreshSecrets();
+    void this.refreshAi();
   }
 
   /** Who is logged in to GitHub and Tailscale (asked of the tools themselves; hidden if they are not installed). */
@@ -348,6 +359,7 @@ export class App {
     this.measure();
     try {
       const info = await this.be.open(serverId, this.guessRows(), this.guessCols(), useVault);
+      if (serverId === LOCAL) localStorage.setItem("oso.openedLocal", "1");
       this.addSession(info, place);
     } catch (e) {
       if (e instanceof VaultLockedError) {
@@ -813,27 +825,93 @@ export class App {
     if (s.groups.length === 0) this.stage.append(this.homeView());
   }
 
-  /** What an empty screen shows: how it works (and the logo). */
+  /** What an empty screen shows: where to start (until you close it), and where the shortcuts are. */
   private homeView(): HTMLElement {
-    const k = (t: string) => el("kbd", {}, t);
-    const ka = (action: string) => k(this.keyText(action) || "—");
-    const row = (keys: (Node | string)[], what: string) => el("div", { class: "g-row" }, el("span", { class: "g-keys" }, ...keys), el("span", {}, what));
     const home = el("div", { class: "home" });
     const logo = el("div", { class: "logo", title: "oso" });
     logo.append(logoMark());
-    home.append(
-      el("div", { class: "g-head" }, logo, el("div", {}, el("h1", {}, "oso"), el("div", { class: "lead" }, `Nothing is open. Open a host from the list on the left, or press ${this.keyText("search")}.`))),
-      el("div", { class: "g-grid" },
-        el("section", {}, el("h3", {}, "Open"), row([k("double-click")], "a host in the list: opens a new terminal (as many times as you want)"), row([ka("search")], "search a host by name and open it"), row([ka("tab.new")], "another terminal of the same host"), row([ka("sudo.fill")], "types the saved sudo password")),
-        el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of this tab, on or off")),
-        el("section", {}, el("h3", {}, "Files and tunnels"), row(["drag files onto a terminal"], "uploads them to that terminal's server"), row([ka("files.open")], "copy files up or down, with the path typed"), row([ka("tunnels.open")], "port forwards with a switch each: open a port here that leads to something only the server can reach")),
-        el("section", {}, el("h3", {}, "Groups"), row([ka("watch.toggle")], "after you start a long command: tells you when the terminal is done, even if you are elsewhere"), row([ka("group.save")], "save this tab (its servers and arrangement) as a group"), row(["Groups on the left"], "double-click one: all its terminals open together, even typing the command you chose in each"), row(["right-click a tab"], "save it as a group, rename it or close it")),
-        el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
-        el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
-      ),
-      el("div", { class: "tip" }, "Secrets are kept in the vault (bottom left): unlock it to read, copy or change them. The main key of every shortcut can be changed in Settings."),
-    );
+    home.append(el("div", { class: "g-head" }, logo, el("div", {}, el("h1", {}, "oso"), el("div", { class: "lead" }, `Nothing is open. Open a server from the list on the left (double-click), or press ${this.keyText("search")} to search.`))));
+    if (localStorage.getItem("oso.start") !== "closed") home.append(startCard(this.startState(), (id) => void this.startStep(id), () => {
+      localStorage.setItem("oso.start", "closed");
+      this.render();
+    }));
+    const help = el("button", { class: "btn small", type: "button", "data-act": "home-shortcuts" }, `All shortcuts  (${this.keyText("help.open")} or ?)`);
+    help.onclick = () => this.shortcutsSheet();
+    home.append(el("div", { class: "tip" }, "Secrets live in the encrypted vault (Secrets, left). Everything has a tooltip with its shortcut. ", help));
     return home;
+  }
+
+  private startState(): StartState {
+    return { profiles: this.tree.profiles.length, apiKeys: this.secretsMeta ? this.secretsMeta.filter((m) => m.kind === "api_key").length : null, openedLocal: localStorage.getItem("oso.openedLocal") === "1", aiConnected: this.aiConnected };
+  }
+
+  private aiConnected = false;
+
+  private async refreshAi() {
+    const st = await this.be.integrationStatus().catch(() => null);
+    const on = !!st && (st.claude || st.opencode || st.codex);
+    if (on !== this.aiConnected) {
+      this.aiConnected = on;
+      this.render();
+    }
+  }
+
+  /** The button of a step of "Getting started". */
+  private async startStep(id: StepId) {
+    if (id === "profile") return void this.newProfile();
+    if (id === "key") return void this.newSecret({ kind: "api_key", agent_visible: true });
+    if (id === "terminal") return void this.openServer(LOCAL);
+    return void connectAiDialog(this.be, () => void this.refreshAi());
+  }
+
+  /** "+ New profile": asks for a name, creates it and switches to it. */
+  async newProfile() {
+    const name = await promptBox("New profile", "", "text", "A profile keeps servers, secrets and accounts together: work, personal, a client…");
+    if (!name?.trim()) return;
+    try {
+      const id = await this.be.profileSave("", name);
+      const problems = await this.be.setActiveProfile(id);
+      if (problems.length) toast(problems.join(" · "), 8000);
+      await this.refreshTree();
+    } catch (e) {
+      toast((e as Error).message, 6000);
+    }
+  }
+
+  shortcutsSheet() {
+    shortcutsSheet((a) => this.keyText(a), () => this.settingsDialog());
+  }
+
+  /** Help: the sheet of shortcuts, getting started, what agents asked, connecting an AI, and which version this is. */
+  helpDialog() {
+    openModal((close) => {
+      const item = (act: string, title: string, text: string, run: () => void) => {
+        const b = el("button", { class: "btn way", type: "button", "data-act": act }, el("b", {}, title), el("small", {}, text));
+        b.onclick = () => {
+          close();
+          run();
+        };
+        return b;
+      };
+      const done = el("button", { class: "btn primary", type: "button" }, "Done");
+      done.onclick = close;
+      return el("div", {}, el("h2", {}, "Help"), el("div", { class: "ways" },
+        item("help-shortcuts", `Shortcuts  (${this.keyText("help.open")} or ?)`, "Every shortcut, as they are set right now", () => this.shortcutsSheet()),
+        item("help-start", "Getting started", "Profile, API key, local terminal, connect your AI", () => {
+          localStorage.removeItem("oso.start");
+          this.render();
+          openModal((closeStart) => {
+            const card = startCard(this.startState(), (id) => {
+              closeStart();
+              void this.startStep(id);
+            }, closeStart);
+            return el("div", { class: "wide" }, card);
+          });
+        }),
+        item("help-ai", "Connect your AI", "Let Claude Code, OpenCode or Codex use oso instead of passwords", () => void connectAiDialog(this.be, () => void this.refreshAi())),
+        item("help-activity", "What AI agents asked", "The record of every request and what you answered", () => void auditDialog(this.be)),
+      ), el("div", { class: "hint", style: "margin-top:12px" }, `oso ${versionLabel()}`), el("div", { class: "actions" }, done));
+    });
   }
 
   private ibtn(name: string, title: string, onclick: () => void, on = false, extra = ""): HTMLButtonElement {
@@ -911,10 +989,11 @@ export class App {
       this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this tab"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
       this.ibtn("bell", `Tell me when this terminal is done  (${this.keyText("watch.toggle")})`, () => this.toggleWatch(), ws.screen.active != null && this.watches.has(ws.screen.active)),
       this.ibtn("files", `Copy files to or from this server  (${this.keyText("files.open")})`, () => this.openFiles()),
-      this.ibtn("save", "Save this tab as a group", () => void this.saveAsGroup()),
-      this.ibtn("snippet", "Snippets: saved commands", () => this.snippetsDialog()),
+      this.ibtn("save", `Save this tab as a group  (${this.keyText("group.save")})`, () => void this.saveAsGroup()),
+      this.ibtn("snippet", "Snippets: saved commands you run often", () => this.snippetsDialog()),
       el("span", { class: "sep" }),
-      this.ibtn("plus", `Open a host  (${this.keyText("search")})`, () => void this.hostPicker()),
+      this.ibtn("plus", `Open a server  (${this.keyText("search")})`, () => void this.hostPicker()),
+      el("span", { class: "version", title: "The version of oso you are running" }, versionLabel()),
     );
   }
 
@@ -929,8 +1008,6 @@ export class App {
   // ------------------------------------------------------------ sidebar
 
   private buildSidebar() {
-    const head = el("div", { class: "side-head" }, el("span", { class: "name" }, "Hosts"));
-    head.append(this.ibtn("plus", "New host", () => void this.serverForm(null)), this.ibtn("folder-plus", "New folder", () => void this.newFolder()));
     const searchWrap = el("div", { class: "search" });
     searchWrap.append(icon("search", 15), this.search);
     this.search.onfocus = () => (this.focusArea = "sidebar");
@@ -955,15 +1032,27 @@ export class App {
     };
     this.treeEl.addEventListener("pointerdown", () => (this.focusArea = "sidebar"));
     this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
-    this.side.append(head, this.profileEl, searchWrap, this.treeEl, this.footEl);
+    this.side.append(this.profileEl, searchWrap, this.treeEl, this.footEl);
   }
 
   private renderFoot() {
     clear(this.footEl);
-    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: "Secrets in the vault" });
+    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: `Secrets vault  (${this.keyText("secrets.open")})`, "data-act": "vault" });
     v.append(icon(this.vault.unlocked ? "unlock" : "lock", 16), this.vault.unlocked ? "Vault · unlocked" : this.vault.exists ? "Vault · locked" : "Create the vault");
     v.onclick = () => void this.vaultDialog();
-    this.footEl.append(v, this.ibtn("tunnel", `Tunnels: port forwards  (${this.keyText("tunnels.open")})`, () => this.openTunnels(), false, this.tunnelsUp ? "live" : ""), this.ibtn("terminal", "Local terminal", () => void this.openServer(LOCAL)), this.ibtn("settings", `Settings  (${this.keyText("settings")})`, () => this.settingsDialog()));
+    const row = (iconName: string, label: string, action: string | null, run: () => void, act: string) => {
+      const b = el("button", { class: "foot-btn", type: "button", title: action ? `${label}  (${this.keyText(action)})` : label, "data-act": act });
+      b.append(icon(iconName, 15), el("span", { class: "lbl" }, label));
+      if (action) b.append(el("kbd", {}, this.keyText(action) || ""));
+      b.onclick = run;
+      return b;
+    };
+    this.footEl.append(
+      v,
+      row("terminal", "Local terminal", "local.new", () => void this.openServer(LOCAL), "foot-local"),
+      row("settings", "Settings", "settings", () => this.settingsDialog(), "foot-settings"),
+      row("bell", "Help", "help.open", () => this.helpDialog(), "foot-help"),
+    );
   }
 
   private visibleServers(): Server[] {
@@ -1045,23 +1134,34 @@ export class App {
 
   renderSidebar() {
     clear(this.profileEl);
-    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree()));
+    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree(), () => void this.newProfile()));
     clear(this.treeEl);
-    if (!this.filter) {
-      this.renderGroups();
-      this.renderTunnels();
-      if (this.accountsView) accountsSection(this.treeEl, this.accountsView, this.be, () => this.refreshAccounts());
-    } else if (this.groups.length) {
+    // Servers, always first and always named
+    const n = this.tree.servers.length;
+    const servers = this.secHead("servers", "Servers", n ? String(n) : "", [["+ Add", `Add a server`, () => void this.serverForm(null)], ["+ Folder", "New folder", () => void this.newFolder()]]);
+    this.treeEl.append(servers.head);
+    if (servers.open) this.renderServerRows();
+    if (this.filter) {
       const q = this.filter;
       for (const g of this.groups.filter((g) => g.name.toLowerCase().includes(q))) {
         const row = el("div", { class: "row group" }, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `group · ${g.panes.length} terminals`)));
         row.ondblclick = () => void this.openGroup(g);
         this.treeEl.append(row);
       }
+      return;
     }
+    this.renderGroups();
+    this.renderSecrets();
+    this.renderTunnels();
+    this.renderAccounts();
+  }
+
+  /** The folders and servers, or what to do when there are none. */
+  private renderServerRows() {
     const rows = this.rows();
     if (rows.length === 0) {
-      this.treeEl.append(el("div", { class: "empty" }, this.filter ? "No host matches." : "No hosts yet. Add one with the + above."));
+      if (this.filter) this.treeEl.append(el("div", { class: "empty" }, "No server matches."));
+      else this.treeEl.append(this.emptyBox("You have no servers yet. Add one, or bring in the ones you already use.", [["Add a server", () => void this.serverForm(null), true, "empty-add-server"], ["Import from ~/.ssh", () => void this.importSsh(), false, "empty-import-ssh"]]));
       return;
     }
     const open = this.openServerIds();
@@ -1081,7 +1181,7 @@ export class App {
         const s = this.tree.servers.find((s) => s.id === r.id)!;
         const tail = el("span", { class: "tail" });
         if (s.has_secret) tail.append(icon("key", 14));
-        const go = this.ibtn("play", "Open", () => void this.openServer(s.id), false, "go");
+        const go = this.ibtn("play", "Open a terminal on this server", () => void this.openServer(s.id), false, "go");
         go.style.cssText = "width:24px;height:24px";
         go.onclick = (e) => {
           e.stopPropagation();
@@ -1128,7 +1228,7 @@ export class App {
     return new Promise<void>((resolve) => {
       openModal(
         (close) => {
-          const input = el("input", { type: "search", placeholder: "Open a host…", autocomplete: "off", spellcheck: "false" });
+          const input = el("input", { type: "search", placeholder: "Open a server…", autocomplete: "off", spellcheck: "false" });
           const list = el("div", { class: "picker-list" });
           let at = 0;
           let shown: { id: number; name: string; sub: string }[] = [];
@@ -1143,7 +1243,7 @@ export class App {
               row.onclick = () => choose(x.id);
               list.append(row);
             });
-            if (!shown.length) list.append(el("div", { class: "empty" }, "No host matches."));
+            if (!shown.length) list.append(el("div", { class: "empty" }, "No server matches."));
             list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
           };
           const choose = (id: number) => {
@@ -1167,7 +1267,7 @@ export class App {
             draw();
           };
           draw();
-          return el("div", {}, el("h2", {}, "Open a host"), input, list);
+          return el("div", {}, el("h2", {}, "Open a server"), input, list);
         },
         resolve,
       );
@@ -1303,20 +1403,16 @@ export class App {
   /** The saved tunnels of every host shown, each with a switch (name → port, how it is doing). */
   private renderTunnels() {
     const all = this.tree.servers.flatMap((s) => s.forwards.map((f) => ({ s, f })));
-    if (!all.length) return;
-    const open = localStorage.getItem("oso.tunnels") !== "closed";
     const on = (id: string) => this.tunnelStatus.get(id)?.state === "up";
-    const head = el("div", { class: "sec", title: "Port forwards kept through your hosts" });
-    const chev = el("span", { class: "chev" });
-    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
     const n = all.filter(({ s, f }) => on(`${s.id}:${f.id}`)).length;
-    head.append(chev, "Tunnels", el("span", { class: "n" }, n ? `${n} on` : String(all.length)));
-    head.onclick = () => {
-      localStorage.setItem("oso.tunnels", open ? "closed" : "open");
-      this.renderSidebar();
+    const addTunnel = () => {
+      if (!this.tree.servers.length) return toast("Add a server first: a tunnel goes through one");
+      tunnelForm(this.tunnelCtx(), null, null, () => void this.refreshTree());
     };
+    const { head, open } = this.secHead("tunnels", "Tunnels", all.length ? (n ? `${n} on` : String(all.length)) : "", [["+ Add", "Add a tunnel", addTunnel], ["Manage", `Open the Tunnels window (${this.keyText("tunnels.open")})`, () => this.openTunnels()]]);
     this.treeEl.append(head);
     if (!open) return;
+    if (!all.length) return void this.treeEl.append(this.emptyBox("A tunnel keeps a port open through a server, for example to reach a database that only the server can see.", [["Add a tunnel", addTunnel, true, "empty-add-tunnel"]]));
     for (const { s, f } of all) {
       const id = `${s.id}:${f.id}`;
       const st = this.tunnelStatus.get(id);
@@ -1334,6 +1430,89 @@ export class App {
       row.append(dot, el("span", { class: "txt" }, el("b", {}, f.name.trim() || describeTunnel(f)), el("small", {}, st?.state === "failed" ? st.message : `${f.name.trim() ? describeTunnel(f) + " · " : ""}${s.name}`)), sw);
       this.treeEl.append(row);
     }
+  }
+
+  /** The title line of a section of the left panel: its name, how many, and its own buttons (with words, not just icons). */
+  private secHead(key: string, title: string, count: string, actions: [string, string, () => void][]): { head: HTMLElement; open: boolean } {
+    const open = localStorage.getItem(`oso.sec.${key}`) !== "closed";
+    const head = el("div", { class: "sec", "data-sec": key, title: `${title}: click to ${open ? "fold" : "unfold"}` });
+    const chev = el("span", { class: "chev" });
+    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
+    head.append(chev, title, el("span", { class: "n" }, count));
+    for (const [label, tip, run] of actions) {
+      const b = el("button", { class: "sec-btn", type: "button", title: tip, "aria-label": tip, "data-act": `sec-${key}-${label.replace(/[^a-z]/gi, "").toLowerCase()}` }, label);
+      b.onclick = (e) => {
+        e.stopPropagation();
+        run();
+      };
+      head.append(b);
+    }
+    head.onclick = () => {
+      localStorage.setItem(`oso.sec.${key}`, open ? "closed" : "open");
+      this.renderSidebar();
+    };
+    return { head, open };
+  }
+
+  /** What a section says when it has nothing: one line about what it is for, and a button that does the first thing. */
+  private emptyBox(text: string, buttons: [string, () => void, boolean, string][]): HTMLElement {
+    const box = el("div", { class: "empty-box" }, el("div", {}, text));
+    for (const [label, run, primary, act] of buttons) {
+      const b = el("button", { class: `btn small${primary ? " primary" : ""}`, type: "button", "data-act": act }, label);
+      b.onclick = run;
+      box.append(b);
+    }
+    return box;
+  }
+
+  private secretsCtx() {
+    return { be: this.be, importSsh: () => void this.importSsh(), importEnv: () => void envImportDialog(this.importCtx(), () => void this.vaultDialog()), importProton: () => void protonImportDialog(this.importCtx(), () => void this.vaultDialog()), showCode: (id: number, name: string) => void showCode(this.be, id, name), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault(), changed: () => void this.refreshSecrets() };
+  }
+
+  private importCtx() {
+    return { be: this.be, unlock: async () => (await this.unlockDialog(false)) === "unlocked", refreshTree: () => this.refreshTree() };
+  }
+
+  async importSsh() {
+    await importDialog(this.importCtx(), () => void this.refreshSecrets());
+  }
+
+  /** "Add" on the Secrets section: asks for the vault if it is locked, then the form. */
+  async newSecret(preset: Partial<SecretMeta> = {}) {
+    if ((await this.unlockDialog(false)) !== "unlocked") return;
+    secretForm(this.secretsCtx(), null, () => void this.refreshSecrets(), { profile: null, ...preset });
+  }
+
+  async refreshSecrets() {
+    this.secretsMeta = this.vault.unlocked ? await this.be.secretList().catch(() => null) : null;
+    this.renderSidebar();
+    this.render();
+  }
+
+  private renderSecrets() {
+    const meta = this.secretsMeta;
+    const { head, open } = this.secHead("secrets", "Secrets", meta?.length ? String(meta.length) : "", [["+ Add", "Add a secret", () => void this.newSecret()], ["Open", `Open the Secrets window (${this.keyText("secrets.open")})`, () => void this.vaultDialog()]]);
+    this.treeEl.append(head);
+    if (!open) return;
+    if (!this.vault.exists) return void this.treeEl.append(this.emptyBox("API keys, passwords and SSH keys are kept in an encrypted vault. Create it to save your first one.", [["Create the vault", () => void this.vaultDialog(), true, "empty-create-vault"]]));
+    if (!this.vault.unlocked) return void this.treeEl.append(this.emptyBox("The vault is locked.", [["Unlock the vault", () => void this.vaultDialog(), true, "empty-unlock"]]));
+    if (!meta?.length) return void this.treeEl.append(this.emptyBox("You have no secrets yet. Add your first API key.", [["Add an API key", () => void this.newSecret({ kind: "api_key", agent_visible: true }), true, "empty-add-key"], ["Import…", () => void this.vaultDialog(), false, "empty-import"]]));
+    for (const m of meta.slice(0, 6)) {
+      const row = el("div", { class: "row secret-row", "data-secret-row": m.name, title: "Open the Secrets window" }, el("span", { class: "txt" }, el("b", {}, m.name), el("small", {}, `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`)));
+      row.onclick = () => void this.vaultDialog();
+      this.treeEl.append(row);
+    }
+    if (meta.length > 6) this.treeEl.append(el("div", { class: "hint-row" }, `…and ${meta.length - 6} more in the Secrets window.`));
+  }
+
+  private renderAccounts() {
+    const v = this.accountsView;
+    const any = !!v && (v.github.installed || v.tailscale.installed);
+    const { head, open } = this.secHead("accounts", "Accounts", "", [["Refresh", "Ask GitHub and Tailscale again", () => void this.refreshAccounts()]]);
+    this.treeEl.append(head);
+    if (!open) return;
+    if (v && any) return void accountsRows(this.treeEl, v, this.be, () => this.refreshAccounts());
+    this.treeEl.append(this.emptyBox("Switch your GitHub and Tailscale accounts here, and per profile. It needs `gh` and `tailscale` installed; oso never keeps their tokens.", [["Check again", () => void this.refreshAccounts(), false, "empty-check-accounts"]]));
   }
 
   private renderGroups() {
@@ -1360,7 +1539,7 @@ export class App {
         e.stopPropagation();
         f();
       };
-      const play = this.ibtn("play", "Open", () => {});
+      const play = this.ibtn("play", "Open this group", () => {});
       const edit = this.ibtn("edit", "Edit", () => {});
       const del = this.ibtn("trash", "Delete", () => {});
       [play, edit, del].forEach((b) => (b.style.cssText = "width:24px;height:24px"));
@@ -1516,8 +1695,7 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    const imp = { be: this.be, unlock: async () => (await this.unlockDialog(false)) === "unlocked", refreshTree: () => this.refreshTree() };
-    secretsDialog({ be: this.be, importSsh: () => void importDialog(imp, () => void this.vaultDialog()), importEnv: () => void envImportDialog(imp, () => void this.vaultDialog()), importProton: () => void protonImportDialog(imp, () => void this.vaultDialog()), showCode: (id, name) => void showCode(this.be, id, name), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
+    secretsDialog(this.secretsCtx(), { profile: this.tree.view_all ? "" : this.tree.active_profile });
   }
 
   async lockVault() {
@@ -1619,14 +1797,14 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Address", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
       form.append(el("div", { class: "actions" }, no, ok));
       form.onsubmit = async (e) => {
         e.preventDefault();
-        if (!host.value.trim()) return void (err.textContent = "The host is required");
+        if (!host.value.trim()) return void (err.textContent = "The address is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
         const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null, ai_policy: aiPolicy.value as Server["ai_policy"] };
@@ -1787,6 +1965,11 @@ export class App {
     const tgt = e.target as HTMLElement | null;
     const typing = tgt && (tgt.tagName === "INPUT" || tgt.tagName === "SELECT") && !e.altKey && !e.ctrlKey && !e.metaKey;
     if (typing) return;
+    // "?" opens the sheet of shortcuts, but only when you are not typing (a terminal's own input counts as typing)
+    if (e.key === "?" && !e.altKey && !e.ctrlKey && !e.metaKey && !(tgt && (tgt.tagName === "TEXTAREA" || tgt.isContentEditable || tgt.closest(".xterm")))) {
+      e.preventDefault();
+      return this.shortcutsSheet();
+    }
     const action = matchAction(this.bindings, e);
     if (!action) return;
     e.preventDefault();
@@ -1843,6 +2026,12 @@ export class App {
         return;
       case "settings":
         return this.settingsDialog();
+      case "help.open":
+        return this.shortcutsSheet();
+      case "secrets.open":
+        return void this.vaultDialog();
+      case "local.new":
+        return void this.openServer(LOCAL);
     }
     if (kind === "focus" && dir) {
       if (!ws.moveFocus(dir[0], dir[1]) && dir[0]) ws.step(dir[0]);
