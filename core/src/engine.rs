@@ -176,6 +176,13 @@ impl Engine {
         self.store.path().to_path_buf()
     }
 
+    /// This window answers what AI agents running in the terminals ask of oso.
+    pub fn set_agent_handler(&self, f: crate::daemon::AgentHandlerFn) {
+        if let Some(d) = &self.daemon {
+            d.set_agent_handler(f);
+        }
+    }
+
     pub fn daemon_alive(&self) -> bool {
         self.daemon.as_ref().is_some_and(|d| d.alive())
     }
@@ -257,7 +264,7 @@ impl Engine {
     }
 
     /// A connection that uses a key from the vault finds oso's agent through `SSH_AUTH_SOCK`.
-    fn agent_env(&self, server_id: u64, opts: &mut SpawnOpts) -> std::result::Result<(), OpenError> {
+    pub fn agent_env(&self, server_id: u64, opts: &mut SpawnOpts) -> std::result::Result<(), OpenError> {
         if !connect::uses_vault_key(&self.store, server_id) {
             return Ok(());
         }
@@ -877,7 +884,7 @@ impl Engine {
 
     /// For a server on `tailscale:<account>`: `(wanted, in use)` when they differ. Once the question was answered
     /// "connect anyway" (`network_accept`), the next open goes through.
-    fn network_mismatch(&mut self, server_id: u64) -> Option<(String, String)> {
+    pub fn network_mismatch(&mut self, server_id: u64) -> Option<(String, String)> {
         let wanted = self.store.server(server_id)?.network.as_deref()?.strip_prefix("tailscale:")?.trim().to_string();
         if wanted.is_empty() || self.network_ok.remove(&server_id) {
             return None;
@@ -1337,6 +1344,7 @@ mod tests {
             env_kind: None,
             proxy: None,
             network: None,
+            ai_policy: Default::default(),
         }
     }
 

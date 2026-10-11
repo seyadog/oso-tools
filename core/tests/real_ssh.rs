@@ -38,6 +38,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             env_kind: None,
             proxy: None,
             network: None,
+            ai_policy: Default::default(),
         },
         None,
         None,

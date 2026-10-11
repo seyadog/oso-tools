@@ -534,6 +534,38 @@ await page.evaluate(async () => {
 });
 await clearAll();
 
+// what AI agents ask: a window per request, naming who, where and the exact command
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 11, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "systemctl restart nginx", production: true, can_remember: false }));
+await settle(200);
+check("a request names who asks and shows the exact command", (await page.textContent("#approval-bg")).includes("Claude in web-1, pane 2 wants to run a command") && (await page.textContent("#approval-bg pre.cmd")) === "systemctl restart nginx");
+check("production is marked and cannot be remembered", (await page.textContent("#approval-bg .badge-prod")) === "PRODUCTION" && (await page.$('[data-act="approval-always"]')) === null);
+check("the safe answer has the focus", await page.$eval('[data-act="approval-deny"]', (b) => document.activeElement === b));
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 12, pane: 3, label: "Opencode in Local, pane 3", agent: "opencode", action: "run", host: "web-1", command: "df -h", production: false, can_remember: true }));
+await settle(100);
+check("a second request waits behind the first", (await page.textContent("#approval-bg")).includes("1 more waiting"));
+await page.keyboard.press("Escape");
+await settle(250);
+check("Escape denies, and the next request comes", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "11,deny" && (await page.textContent("#approval-bg")).includes("Opencode in Local, pane 3"));
+check("a plain read can be remembered for the host", (await page.$('[data-act="approval-always"]')) !== null);
+await page.click('[data-act="approval-always"]');
+await settle(250);
+check("the answer goes back", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "12,always_read" && (await page.$("#approval-bg .modal")) === null);
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 13, pane: 2, label: "Claude in Local, pane 2", agent: "claude-code", action: "sudo", host: "this computer", command: "sudo systemctl restart x", production: false, can_remember: false }));
+await settle(150);
+await shot("9f-approval");
+await page.click('[data-act="approval-terminal"]');
+await settle(900);
+const typed = await page.evaluate(() => { const sid = window.oso.ws.screen.active; const t = window.oso.panes.get(sid).term.buffer.active; let s = ""; for (let i = 0; i < t.length; i++) s += t.getLine(i).translateToString(true) + "\n"; return s; });
+check("\"open in a terminal\" types the command without running it", typed.includes("sudo systemctl restart x") && !typed.includes("command not found") && (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "13,terminal");
+await clearAll();
+await page.evaluate(async () => { window.oso.settingsDialog(); });
+await settle(200);
+await page.click('[data-act="ai-activity"]');
+await settle(300);
+check("what agents asked is listed, newest first", (await page.$$(".arow")).length === 2 && (await page.textContent(".arow")).includes("rm -rf /tmp/x"));
+await page.keyboard.press("Escape");
+await settle(150);
+
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

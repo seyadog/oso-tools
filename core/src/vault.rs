@@ -428,6 +428,22 @@ impl Vault {
         st.data.secrets.values().filter(|s| s.kind == SecretKind::SshKey).map(|s| (s.id, s.name.clone(), Zeroizing::new(s.value.clone()))).collect()
     }
 
+    /// Every secret value that is long enough to be worth hiding (to blank them out of what a program printed).
+    pub fn values_to_hide(&self) -> Vec<Zeroizing<String>> {
+        let Some(st) = self.state.as_ref() else { return vec![] };
+        let mut out: Vec<Zeroizing<String>> = vec![];
+        for s in st.data.secrets.values() {
+            // a key is several lines: hide each long line of it as well as the whole
+            if s.kind == SecretKind::SshKey {
+                out.extend(s.value.lines().map(str::trim).filter(|l| l.len() >= 12).map(|l| Zeroizing::new(l.to_string())));
+            }
+            if s.value.trim().len() >= 6 {
+                out.push(Zeroizing::new(s.value.trim().to_string()));
+            }
+        }
+        out
+    }
+
     /// One secret's description (no value).
     pub fn meta(&self, id: u64) -> Option<SecretMeta> {
         self.state.as_ref()?.data.secrets.get(&id).map(Secret::meta)

@@ -19,6 +19,8 @@ export interface Server {
   env_kind: "production" | "staging" | "dev" | null;
   /** Id of the saved proxy its connection leaves through. */
   proxy: number | null;
+  /** What an AI agent may do here without asking. */
+  ai_policy: "ask" | "read_only_auto" | "blocked";
   /** `tailscale:<account>`: the network it is on (oso asks before connecting on another account). */
   network: string | null;
   /** The secret id of the key it logs in with, when that is a key of the vault (only in what `tree` returns, with the vault unlocked). */
@@ -157,6 +159,32 @@ export interface ImportResult {
   originals: string[];
 }
 
+/** What an AI agent asks, for the person to answer. */
+export interface ApprovalRequest {
+  id: number;
+  pane: number;
+  /** "Claude in acme-api, pane 2". */
+  label: string;
+  agent: string;
+  action: "run" | "sudo" | "run_with" | "tunnel";
+  host: string;
+  command: string;
+  production: boolean;
+  can_remember: boolean;
+}
+export type ApprovalDecision = "once" | "always_read" | "deny" | "terminal";
+export interface AuditEntry {
+  ts: number;
+  pane: number;
+  agent: string;
+  action: string;
+  host: string;
+  command: string;
+  decision: string;
+  exit_code: number | null;
+  note: string;
+}
+
 export interface TunnelStatus {
   server_id: number;
   forward_id: number;
@@ -216,6 +244,9 @@ export interface Backend {
   importDeleteOriginals(paths: string[]): Promise<string[]>;
   /** The server logs in with this key of the vault (null: unlink). */
   serverSetKey(serverId: number, secret: number | null): Promise<void>;
+  onApproval(f: (r: ApprovalRequest) => void): void;
+  approvalAnswer(id: number, decision: ApprovalDecision): Promise<boolean>;
+  auditRecent(limit: number): Promise<AuditEntry[]>;
   secretList(): Promise<SecretMeta[]>;
   /** `value` null keeps the saved one of an existing secret. */
   secretSave(meta: SecretMeta, value: string | null): Promise<number>;

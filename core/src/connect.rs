@@ -366,6 +366,7 @@ mod tests {
             env_kind: None,
             proxy: None,
             network: None,
+            ai_policy: Default::default(),
         }
     }
 

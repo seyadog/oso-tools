@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Backend, SessionEvent, VaultLockedError } from "./api";
+import { ApprovalRequest, Backend, SessionEvent, VaultLockedError } from "./api";
 
 /** The commands of src-tauri, one for one. */
 export function tauriBackend(): Backend {
@@ -37,6 +37,9 @@ export function tauriBackend(): Backend {
     importApply: (request) => call("import_apply", { request }),
     importDeleteOriginals: (paths) => call("import_delete_originals", { paths }),
     serverSetKey: (serverId, secret) => call("server_set_key", { serverId, secret }),
+    onApproval: (f) => void listen<ApprovalRequest>("approval", (e) => f(e.payload)),
+    approvalAnswer: (id, decision) => call("approval_answer", { id, decision }),
+    auditRecent: (limit) => call("audit_recent", { limit }),
     secretList: () => call("secret_list"),
     secretSave: (meta, value) => call("secret_save", { meta, value }),
     secretDelete: (id) => call("secret_delete", { id }),

@@ -111,6 +111,9 @@ pub struct Server {
     /// The network it is reached on, as `tailscale:<account>`; oso asks before connecting on another account.
     #[serde(default)]
     pub network: Option<String>,
+    /// What an AI agent may do here without asking.
+    #[serde(default)]
+    pub ai_policy: crate::policy::AiPolicy,
 }
 
 /// What a machine is used for. Production is shown in red and an agent always has to ask before touching it.
@@ -602,6 +605,7 @@ mod tests {
             env_kind: None,
             proxy: None,
             network: None,
+            ai_policy: Default::default(),
         }
     }
 

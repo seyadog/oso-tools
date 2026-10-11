@@ -14,6 +14,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct AppState {
+    /// What AI agents asked and the person has not answered yet.
+    approvals: Arc<oso_core::approvals::Approvals>,
     /// Shared with oso's ssh-agent, which signs with the keys of the vault while it is unlocked.
     engine: Arc<Mutex<Engine>>,
 }
@@ -169,6 +171,27 @@ fn proxy_delete(state: State<AppState>, id: u64) -> Res<()> {
 #[tauri::command]
 fn profile_set_proxy(state: State<AppState>, profile: String, proxy: Option<u64>) -> Res<()> {
     engine!(state).profile_set_proxy(&profile, proxy).map_err(err)
+}
+
+/// The person's answer to what an AI agent asked: `once`, `always_read`, `deny` or `terminal`.
+#[tauri::command]
+fn approval_answer(state: State<AppState>, id: u64, decision: String) -> Res<bool> {
+    let d = match decision.as_str() {
+        "once" => oso_core::approvals::Decision::Once,
+        "always_read" => oso_core::approvals::Decision::AlwaysRead,
+        "terminal" => oso_core::approvals::Decision::Terminal,
+        _ => oso_core::approvals::Decision::Deny,
+    };
+    Ok(state.approvals.answer(id, d))
+}
+
+/// The last lines of what agents asked and what happened (`audit.jsonl`), newest last.
+#[tauri::command]
+fn audit_recent(state: State<AppState>, limit: usize) -> Res<Vec<Value>> {
+    let path = engine!(state).store_path().with_file_name("audit.jsonl");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    Ok(lines[lines.len().saturating_sub(limit.min(500))..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect())
 }
 
 #[tauri::command]
@@ -398,6 +421,24 @@ fn main() {
             }
             return;
         }
+        // `oso mcp`: the MCP server an AI agent starts (it talks over stdin and stdout)
+        Some("mcp") => {
+            if let Err(e) = oso_core::mcp::run() {
+                eprintln!("oso mcp: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // `oso integration install|uninstall <agent>`
+        Some("integration") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "oso".into());
+            if let Err(e) = oso_core::integration::cli(&args, &exe, &mut std::io::stdout()) {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("kill-server") => {
             match oso_core::daemon::kill_server() {
                 Ok(m) => println!("{m}"),
@@ -420,7 +461,17 @@ fn main() {
                 }
             };
             app.manage(AgentHolder(agent));
-            app.manage(AppState { engine });
+            // what AI agents ask of oso: shown to the person, who answers; it all goes in the audit log
+            let approvals = oso_core::approvals::Approvals::new();
+            let shown = app.handle().clone();
+            approvals.on_request(Arc::new(move |r| {
+                let _ = shown.emit("approval", &r);
+            }));
+            let handler = Arc::new(oso_core::agent_api::Handler::new(Arc::clone(&engine), Arc::clone(&approvals)));
+            if let Ok(e) = engine.lock() {
+                e.set_agent_handler(Arc::new(move |call| handler.handle(call)));
+            }
+            app.manage(AppState { engine, approvals });
             // The vault locks itself after a while without use.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -455,6 +506,8 @@ fn main() {
             proxy_save,
             proxy_delete,
             profile_set_proxy,
+            approval_answer,
+            audit_recent,
             import_preview,
             import_apply,
             import_delete_originals,

@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, ApprovalRequest, AuditEntry, Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -21,9 +21,9 @@ export function mockBackend(): Backend {
   let activeProfile = "default";
   let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
@@ -62,6 +62,8 @@ export function mockBackend(): Backend {
   const knobs = { failNext: 0 };
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
+  const approvalAnswers: [number, string][] = [];
+  let approvalHandler: (r: ApprovalRequest) => void = () => {};
   const notices: [string, string][] = [];
   const tunnelState = new Map<string, TunnelStatus>();
   const transferList: TransferStatus[] = [];
@@ -72,6 +74,8 @@ export function mockBackend(): Backend {
     knobs,
     forgotten,
     deletedOriginals,
+    approvalAnswers,
+    approval: (r: ApprovalRequest) => approvalHandler(r),
     notices,
     tunnelState,
     started,
@@ -205,7 +209,7 @@ export function mockBackend(): Backend {
       }
       for (const a of req.hosts) {
         const id = next++;
-        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null });
+        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" });
         out.hosts_added.push(a);
       }
       return out;
@@ -220,6 +224,15 @@ export function mockBackend(): Backend {
       s.vault_key = secret;
       if (secret) s.auth = "vaultkey";
     },
+    onApproval: (f) => void (approvalHandler = f),
+    approvalAnswer: async (id, decision) => {
+      approvalAnswers.push([id, decision]);
+      return true;
+    },
+    auditRecent: async () => [
+      { ts: 1_800_000_000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", exit_code: 0, note: "" },
+      { ts: 1_800_000_060, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "rm -rf /tmp/x", decision: "denied", exit_code: null, note: "" },
+    ] as AuditEntry[],
     secretList: async () => {
       if (!vault.unlocked) throw new Error("the vault is locked");
       return [...vaultSecrets.values()].map((x) => ({ ...x.meta }));

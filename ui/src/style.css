@@ -304,3 +304,14 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .irow .who { cursor: pointer; }
 .irow input[type="password"] { width: 150px; }
 .irow input[type="checkbox"] { margin-right: 8px; }
+
+/* What AI agents ask */
+#approval-bg { position: fixed; inset: 0; z-index: 400; background: rgba(0, 0, 0, .55); display: none; align-items: center; justify-content: center; }
+#approval-bg.show { display: flex; }
+.modal.approval { width: min(640px, 92vw); border: 1px solid var(--accent); }
+.modal.approval.prod { border-color: var(--red); }
+.modal.approval .where { display: flex; align-items: center; gap: 10px; color: var(--muted); margin-bottom: 8px; }
+.badge-prod { background: var(--red); color: #1d1d20; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
+.modal.approval pre.cmd { background: #151517; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; font-family: "Adwaita Mono", monospace; font-size: 13px; }
+.vrow.arow { grid-template-columns: 1fr; }
+.vrow.arow b { white-space: normal; font-weight: 500; word-break: break-all; }

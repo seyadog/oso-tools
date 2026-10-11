@@ -11,6 +11,7 @@ import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
 import { accountsSection } from "./accounts_ui";
+import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { importDialog } from "./import_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
@@ -62,6 +63,8 @@ export class App {
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
+  /** What AI agents ask, waiting for the person. */
+  private approvals!: ApprovalQueue;
 
   snippets: { name: string; command: string }[] = [];
 
@@ -93,6 +96,23 @@ export class App {
     this.stage.append(this.hint);
     this.buildSidebar();
     this.be.onSession((e) => this.onSession(e));
+    this.approvals = new ApprovalQueue({
+      be: this.be,
+      openInTerminal: async (r) => {
+        // a command for a server goes to a terminal of that server; anything else to a local one
+        const host = this.tree.servers.find((s) => s.name === r.host);
+        const before = new Set(this.ws.tabs.keys());
+        await this.openServer(host && r.action === "run" ? host.id : LOCAL);
+        const sid = [...this.ws.tabs.keys()].find((k) => !before.has(k));
+        if (sid != null) {
+          // typed, not sent: the person looks at it and presses Enter (after the shell has shown its prompt)
+          await new Promise((done) => setTimeout(done, 300));
+          await this.be.write(sid, r.command);
+          this.focusActive();
+        }
+      },
+    });
+    this.be.onApproval((r) => this.approvals.push(r));
     this.transfers = new Transfers(this.be);
     this.be.onFileDrag((e) => this.onFileDrag(e));
     window.setInterval(() => void this.pollTunnels(), 3000);
@@ -1519,7 +1539,7 @@ export class App {
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
     const keys = this.vault.unlocked ? (await this.be.secretList().catch(() => [])).filter((k) => k.kind === "ssh_key") : [];
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1534,6 +1554,7 @@ export class App {
       const envKind = makeSelect([["", "Not said"], ["production", "Production"], ["staging", "Staging"], ["dev", "Development"]], s.env_kind ?? "", { "data-name": "env-kind" });
       const proxy = makeSelect([["", "Direct"], ...this.tree.proxies.map((p): [string, string] => [String(p.id), p.name])], s.proxy == null ? "" : String(s.proxy), { "data-name": "proxy" });
       const network = el("input", { value: s.network ?? "", name: "network", autocomplete: "off", spellcheck: "false", placeholder: "tailscale:work-tailnet (optional)" });
+      const aiPolicy = makeSelect([["ask", "Ask me every time"], ["read_only_auto", "Let commands that only read go through"], ["blocked", "Never let an agent use it"]], s.ai_policy, { "data-name": "ai-policy" });
       const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false", placeholder: "nginx + API node, logs in /var/log/acme" }, s.notes);
       const tunnelsBtn = el("button", { class: "btn", type: "button", "data-act": "server-tunnels" }, s.forwards.length ? `Tunnels (${s.forwards.length})…` : "Tunnels…");
       tunnelsBtn.onclick = () => {
@@ -1558,7 +1579,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1568,7 +1589,7 @@ export class App {
         if (!host.value.trim()) return void (err.textContent = "The host is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
-        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null };
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null, ai_policy: aiPolicy.value as Server["ai_policy"] };
         const loginSecret = auth.value === "agent" || auth.value === "vaultkey" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {
@@ -1653,6 +1674,11 @@ export class App {
         draw();
       };
       draw();
+      const activity = el("button", { class: "btn", type: "button", "data-act": "ai-activity" }, "What AI agents asked…");
+      activity.onclick = () => {
+        close();
+        void auditDialog(this.be);
+      };
       const save = el("button", { class: "btn primary", type: "button" }, "Save");
       const cancel = el("button", { class: "btn", type: "button" }, "Cancel");
       cancel.onclick = close;
@@ -1678,7 +1704,7 @@ export class App {
         el("div", { class: "hint", style: "margin:10px 0 6px" }, "Click a shortcut and press the new keys; the cross puts it back. Saved in hotkeys.json, which you can also edit by hand."),
         list,
         warn,
-        el("div", { class: "actions" }, cancel, save),
+        el("div", { class: "actions" }, activity, cancel, save),
       );
     });
   }

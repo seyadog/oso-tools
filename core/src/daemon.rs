@@ -67,6 +67,12 @@ enum Req {
     SetMeta { sid: u64, meta: Value },
     List { req: u64 },
     Shutdown,
+    /// This connection (the window) answers what AI agents ask of oso.
+    AgentHandler,
+    /// From `oso mcp`, inside a terminal: the token proves which session it is.
+    Agent { req: u64, token: String, pane: u64, call: Value },
+    /// The window's answer to an `AgentCall`.
+    AgentReply { call: u64, result: Value },
 }
 
 /// What the client needs to rebuild a tab for a session that is already running.
@@ -98,6 +104,10 @@ enum Ev {
     Output { sid: u64, data: String },
     Exit { sid: u64, code: u32 },
     Sudo { sid: u64, on: bool },
+    /// To the window: an agent running in session `sid` asks for something.
+    AgentCall { call: u64, sid: u64, title: String, body: Value },
+    /// To `oso mcp`: the answer.
+    AgentResult { req: u64, result: Value },
 }
 
 fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> {
@@ -175,12 +185,35 @@ struct Hosted {
     sent: Sent,
 }
 
+/// An agent's request that the window has not answered yet.
+struct PendingCall {
+    to: SyncSender<Ev>,
+    req: u64,
+    handler: u64,
+    since: Instant,
+}
+
 #[derive(Default)]
 struct State {
     next_sid: u64,
     next_client: u64,
     clients: usize,
     sessions: HashMap<u64, Hosted>,
+    /// Connections that answer agents' requests (the window), oldest first.
+    handlers: Vec<(u64, SyncSender<Ev>)>,
+    next_call: u64,
+    calls: HashMap<u64, PendingCall>,
+}
+
+/// An agent request waits this long for the person to answer.
+const AGENT_WAIT: Duration = Duration::from_secs(600);
+
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn agent_error(msg: &str) -> Value {
+    serde_json::json!({ "ok": false, "error": msg })
 }
 
 struct Server {
@@ -257,6 +290,12 @@ fn tick_loop(server: &Server) {
                 broadcast(&h.subs, Ev::Sudo { sid, on: sudo });
             }
         }
+        let stale: Vec<u64> = st.calls.iter().filter(|(_, c)| c.since.elapsed() > AGENT_WAIT).map(|(id, _)| *id).collect();
+        for id in stale {
+            if let Some(c) = st.calls.remove(&id) {
+                let _ = c.to.try_send(Ev::AgentResult { req: c.req, result: agent_error("oso did not answer in time") });
+            }
+        }
         if server.idle_exit && st.sessions.is_empty() && st.clients == 0 {
             let since = *idle_since.get_or_insert_with(Instant::now);
             if since.elapsed() > IDLE_EXIT {
@@ -281,6 +320,14 @@ fn serve_client(server: &Arc<Server>, stream: UnixStream) -> Result<()> {
     st.clients -= 1;
     for h in st.sessions.values() {
         lock(&h.subs).retain(|s| s.client != cid);
+    }
+    // a window that went away leaves its agents' requests unanswered: tell them
+    st.handlers.retain(|(c, _)| *c != cid);
+    let orphaned: Vec<u64> = st.calls.iter().filter(|(_, c)| c.handler == cid).map(|(id, _)| *id).collect();
+    for id in orphaned {
+        if let Some(c) = st.calls.remove(&id) {
+            let _ = c.to.try_send(Ev::AgentResult { req: c.req, result: agent_error("oso's window was closed before it answered") });
+        }
     }
     result
 }
@@ -423,6 +470,48 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
             };
             reply(Ev::Sessions { req, sessions });
         }
+        Req::AgentHandler => {
+            let mut st = lock(&server.state);
+            st.handlers.retain(|(c, _)| *c != cid);
+            st.handlers.push((cid, tx.clone()));
+        }
+        Req::Agent { req, token, pane, call } => {
+            let fail = |m: &str| reply(Ev::AgentResult { req, result: agent_error(m) });
+            let (title, alive) = {
+                let st = lock(&server.state);
+                match st.sessions.get(&pane).filter(|h| h.token.as_deref().is_some_and(|t| same_token(t, &token))) {
+                    Some(h) => (h.meta.get("title").and_then(Value::as_str).unwrap_or("terminal").to_string(), Some(Arc::clone(&h.pty))),
+                    None => (String::new(), None),
+                }
+            };
+            // an unknown token, a token of another session, a session that already closed: all the same answer
+            let Some(pty) = alive.filter(|p| {
+                let mut p = lock(p);
+                p.poll_exit();
+                p.exit_code.is_none()
+            }) else {
+                return fail("You are not inside an oso terminal (the token is missing, wrong, or its terminal has closed).");
+            };
+            drop(pty);
+            let mut st = lock(&server.state);
+            let Some((hid, hand)) = st.handlers.last().cloned() else {
+                return fail("oso's window is not open: open it, so that you can be asked.");
+            };
+            st.next_call += 1;
+            let id = st.next_call;
+            st.calls.insert(id, PendingCall { to: tx.clone(), req, handler: hid, since: Instant::now() });
+            if hand.try_send(Ev::AgentCall { call: id, sid: pane, title, body: call }).is_err() {
+                st.calls.remove(&id);
+                drop(st);
+                fail("oso's window did not take the request.");
+            }
+        }
+        Req::AgentReply { call, result } => {
+            let pending = lock(&server.state).calls.remove(&call);
+            if let Some(c) = pending {
+                let _ = c.to.try_send(Ev::AgentResult { req: c.req, result });
+            }
+        }
         Req::Shutdown => {
             let hosted: Vec<Hosted> = lock(&server.state).sessions.drain().map(|(_, h)| h).collect();
             for h in hosted {
@@ -457,12 +546,24 @@ pub struct Remote {
     sudo: AtomicBool,
 }
 
+/// What an agent asked, as the window gets it.
+pub struct AgentCall {
+    pub sid: u64,
+    /// The title of the terminal it runs in.
+    pub title: String,
+    pub body: Value,
+}
+
+pub type AgentHandlerFn = Arc<dyn Fn(AgentCall) -> Value + Send + Sync>;
+
 struct ClientShared {
+    agent_handler: Mutex<Option<AgentHandlerFn>>,
     writer: Mutex<UnixStream>,
     sessions: Mutex<HashMap<u64, Arc<Remote>>>,
     waiting: Mutex<HashMap<u64, Sender<Ev>>>,
     next_req: AtomicU64,
     alive: AtomicBool,
+    me: std::sync::Weak<ClientShared>,
 }
 
 impl ClientShared {
@@ -543,6 +644,20 @@ impl ClientShared {
                 }
             }
             Ev::Hello { .. } => {}
+            Ev::AgentCall { call, sid, title, body } => {
+                let handler = lock(&self.agent_handler).clone();
+                let me = self.me.upgrade();
+                if let (Some(handler), Some(me)) = (handler, me) {
+                    // the person may take minutes to answer: not on the thread that reads the socket
+                    std::thread::spawn(move || {
+                        let result = handler(AgentCall { sid, title, body });
+                        me.send(&Req::AgentReply { call, result });
+                    });
+                } else {
+                    self.send(&Req::AgentReply { call, result: agent_error("oso cannot answer agents right now") });
+                }
+            }
+            Ev::AgentResult { .. } => {}
         }
     }
 
@@ -597,12 +712,14 @@ impl Daemon {
             return Err(ConnectError::Incompatible(version));
         }
         stream.set_read_timeout(None).map_err(|e| other(e.into()))?;
-        let shared = Arc::new(ClientShared {
+        let shared = Arc::new_cyclic(|me| ClientShared {
+            agent_handler: Mutex::new(None),
             writer: Mutex::new(writer),
             sessions: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
             next_req: AtomicU64::new(1),
             alive: AtomicBool::new(true),
+            me: me.clone(),
         });
         let inbox = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -691,6 +808,35 @@ impl Daemon {
 
     pub fn alive(&self) -> bool {
         self.shared.alive.load(Ordering::Relaxed)
+    }
+
+    /// This connection answers what AI agents running in the terminals ask of oso.
+    pub fn set_agent_handler(&self, f: AgentHandlerFn) {
+        *lock(&self.shared.agent_handler) = Some(f);
+        self.shared.send(&Req::AgentHandler);
+    }
+}
+
+/// What `oso mcp` does: sends one request to the background server at `socket`, as the terminal `pane` with its
+/// `token`, and waits (as long as the person takes) for the answer.
+pub fn agent_call(socket: &Path, token: &str, pane: u64, call: Value, wait: Duration) -> Result<Value> {
+    let stream = UnixStream::connect(socket).with_context(|| format!("could not reach oso's background server at {}", socket.display()))?;
+    stream.set_read_timeout(Some(wait))?;
+    let mut writer = stream.try_clone()?;
+    write_line(&mut writer, &Req::Hello { proto: PROTO })?;
+    write_line(&mut writer, &Req::Agent { req: 1, token: token.to_string(), pane, call })?;
+    let mut lines = BufReader::new(stream).lines();
+    loop {
+        let line = lines.next().ok_or_else(|| anyhow!("oso's background server closed the connection"))?.map_err(|e| anyhow!("oso did not answer: {e}"))?;
+        match serde_json::from_str::<Ev>(&line) {
+            Ok(Ev::Hello { proto, version }) => {
+                if proto != PROTO || version.split('.').next().and_then(|m| m.parse::<u32>().ok()) == Some(0) && version.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) < 2 {
+                    bail!("oso's background server is an older version ({version}) that does not know agents: close oso and run `oso kill-server`, then open it again");
+                }
+            }
+            Ok(Ev::AgentResult { req: 1, result }) => return Ok(result),
+            _ => {}
+        }
     }
 }
 

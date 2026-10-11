@@ -293,6 +293,7 @@ fn server_for(name: &str, sshd: &Sshd, jump: Option<u64>) -> Server {
         env_kind: None,
         proxy: None,
         network: None,
+        ai_policy: Default::default(),
     }
 }
 
