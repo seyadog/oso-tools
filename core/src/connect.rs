@@ -253,6 +253,12 @@ pub fn autofills(store: &Store, vault: &mut Vault, id: u64) -> Vec<Autofill> {
     servers.extend(store.server(id).cloned());
     let mut out = vec![];
     for s in servers {
+        // the second factor is asked after the first, whatever the first was
+        if s.has_totp {
+            if let Some(seed) = vault.get(s.id, Kind::Totp) {
+                out.push(Autofill { when: format!("{}@{}", s.user, s.host).to_lowercase(), secret: seed, fallback: s.id == id, totp: true });
+            }
+        }
         if s.auth == Auth::Agent || s.auth == Auth::VaultKey || !s.has_secret {
             continue;
         }
@@ -261,14 +267,14 @@ pub fn autofills(store: &Store, vault: &mut Vault, id: u64) -> Vec<Autofill> {
             Auth::Key => format!("'{}'", expand_tilde(&s.key_path)).to_lowercase(),
             _ => format!("{}@{}", s.user, s.host).to_lowercase(),
         };
-        out.push(Autofill { when, secret, fallback: s.id == id });
+        out.push(Autofill { when, secret, fallback: s.id == id, totp: false });
     }
     out
 }
 
 /// Whether opening `id` needs the vault unlocked: it or a jump host on the way has a saved secret.
 pub fn needs_vault(store: &Store, id: u64) -> bool {
-    let wants = |s: &Server| s.auth == Auth::VaultKey || (s.auth != Auth::Agent && s.has_secret);
+    let wants = |s: &Server| s.auth == Auth::VaultKey || s.has_totp || (s.auth != Auth::Agent && s.has_secret);
     store.server(id).is_some_and(wants) || store.jump_chain(id).into_iter().any(wants)
 }
 
@@ -360,6 +366,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            has_totp: false,
             forwards: vec![],
             profile: None,
             notes: String::new(),

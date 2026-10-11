@@ -94,6 +94,9 @@ pub struct Server {
     /// A sudo/su password is saved in the vault.
     #[serde(default)]
     pub has_sudo: bool,
+    /// A seed for the one-time codes this server asks for is linked in the vault.
+    #[serde(default)]
+    pub has_totp: bool,
     /// Port forwards (tunnels) kept for this server.
     #[serde(default)]
     pub forwards: Vec<Forward>,
@@ -199,6 +202,15 @@ pub struct Profile {
     /// The Tailscale account (id, tailnet or account name) to be on while this profile is active.
     #[serde(default)]
     pub tailscale_account: Option<String>,
+    /// `AWS_PROFILE` for the local terminals of this profile (a name from `~/.aws/config`; never a key).
+    #[serde(default)]
+    pub aws_profile: Option<String>,
+    /// `KUBECONFIG` for them (a path).
+    #[serde(default)]
+    pub kubeconfig: Option<String>,
+    /// Real machines are on the other end of this profile: the window shows it in red.
+    #[serde(default)]
+    pub production: bool,
 }
 
 impl Profile {
@@ -599,6 +611,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            has_totp: false,
             forwards: vec![],
             profile: None,
             notes: String::new(),

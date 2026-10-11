@@ -507,6 +507,9 @@ await page.evaluate(async () => {
 });
 await page.click(".side-foot .vault");
 await settle(300);
+await page.click('[data-act="import"]');
+await settle(200);
+check("the ways of importing are offered", (await page.textContent("#modal-bg")).includes(".env files") && (await page.textContent("#modal-bg")).includes("Proton Pass"));
 await page.click('[data-act="import-ssh"]');
 await settle(400);
 check("the import lists the keys and hosts it found", (await page.$$(".irow")).length === 5 && (await page.textContent("#modal-bg")).includes("id_ed25519") && (await page.textContent("#modal-bg")).includes("via bastion"));
@@ -565,6 +568,88 @@ await settle(300);
 check("what agents asked is listed, newest first", (await page.$$(".arow")).length === 2 && (await page.textContent(".arow")).includes("rm -rf /tmp/x"));
 await page.keyboard.press("Escape");
 await settle(150);
+
+// more ways in: .env files, Proton Pass; one-time codes; cloud and production; the command line
+await page.click(".side-foot .vault");
+await settle(300);
+await page.click('[data-act="import"]');
+await settle(200);
+await page.click('[data-act="import-env"]');
+await settle(250);
+await page.fill("#modal-bg input", "~/projects");
+await page.keyboard.press("Enter");
+await settle(400);
+check("the .env files found are listed by variable, without values", (await page.textContent("#modal-bg")).includes("STRIPE_KEY") && (await page.textContent("#modal-bg")).includes("17 characters") && (await page.textContent("#modal-bg")).includes("1 other setting not imported"));
+await page.click('[data-row="1"] input');
+await page.click('[data-act="do-env-import"]');
+await settle(500);
+check("what was ticked is imported", (await page.textContent("#toast")).includes("Imported 2 secrets"));
+check("deleting the originals is asked, and the way out is first", (await page.textContent("#modal-bg")).includes("Delete the original .env files?"));
+await page.keyboard.press("Escape");
+await settle(300);
+check("keeping them deletes nothing", (await page.evaluate(() => globalThis.__osoMock.deletedEnv.length)) === 0);
+await page.keyboard.press("Escape");
+await settle(200);
+await page.click(".side-foot .vault");
+await settle(300);
+await page.click('[data-act="import"]');
+await settle(200);
+await page.click('[data-act="import-proton"]');
+await settle(250);
+await page.fill("#modal-bg input", "~/Downloads/proton.csv");
+await page.keyboard.press("Enter");
+await settle(400);
+check("the Proton Pass logins are listed without passwords", (await page.$$('[data-row]')).length === 2 && (await page.textContent("#modal-bg")).includes("with 2FA"));
+await page.click('[data-act="do-proton-import"]');
+await settle(400);
+check("and imported", (await page.textContent("#toast")).includes("Imported 2 secrets"));
+await page.keyboard.press("Escape");
+await settle(200);
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.secretSave({ id: 0, name: "github 2fa", kind: "totp", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "GEZDGNBVGY3TQOJQ");
+});
+await page.click(".side-foot .vault");
+await settle(300);
+await page.click('.srow:has-text("github 2fa") [data-act="totp-code"]');
+await settle(250);
+check("a one-time-code secret shows its code and the seconds left", /\d{3} \d{3}\s+\(\d+ s left, copied\)/.test(await page.textContent("#toast")));
+await page.keyboard.press("Escape");
+await settle(150);
+await page.click('.row[data-kind="server"]:has-text("web-1")');
+await page.evaluate(() => window.oso.editSelected());
+await settle(300);
+await page.click('.select[data-name="mfa"] .sel-btn');
+await page.click('.select[data-name="mfa"] .sel-item:has-text("github 2fa")');
+await page.click("#modal-bg button.primary");
+await settle(300);
+check("a server can be given the seed of the codes it asks for", (await page.evaluate(async () => (await window.oso.be.tree()).servers.find((x) => x.name === "web-1").has_totp)) === true);
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  const w = (await be.tree()).servers.find((x) => x.name === "web-1");
+  await be.serverSetTotp(w.id, null);
+  for (const m of await be.secretList()) if (m.kind === "totp") await be.secretDelete(m.id);
+});
+// cloud settings and production
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.profileSetCloud("default", "acme-prod", "/home/me/.kube/config", true);
+  await window.oso.refreshTree();
+});
+await settle(200);
+check("a profile with cloud settings shows them in the header, in red when it is production", (await page.textContent(".cloud-chip.prod")).includes("aws acme-prod") && (await page.textContent(".cloud-chip.prod")).includes("k8s config") && (await page.$(".profile-bar.prod")) !== null);
+await shot("9g-production-profile");
+await page.evaluate(async () => {
+  await window.oso.be.profileSetCloud("default", null, null, false);
+  await window.oso.refreshTree();
+});
+await settle(150);
+check("and nothing when it has none", (await page.$(".cloud-chip")) === null);
+// the command line
+await page.evaluate(() => globalThis.__osoMock.cli({ event: "open", data: { server_id: 2 } }));
+await settle(500);
+check("`oso ssh web-1` opens it in the window", (await state()).tabs === 1 && (await page.$$eval(".tab", (ts) => ts.map((t) => t.textContent))).some((t) => t.includes("web-1")));
+await clearAll();
 
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();

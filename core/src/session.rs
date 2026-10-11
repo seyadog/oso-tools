@@ -54,6 +54,8 @@ pub struct Autofill {
     pub secret: String,
     /// May also answer a bare `Password:` prompt (the destination's keyboard-interactive login).
     pub fallback: bool,
+    /// `secret` is the seed of one-time codes: what is typed is the code for the moment the question appears.
+    pub totp: bool,
 }
 
 /// Called with every chunk of output, while the screen is locked (so nothing can slip between a
@@ -165,18 +167,38 @@ impl PtySession {
                         continue;
                     }
                     match classify_prompt(&line.1, login_phase) {
+                        Some(Prompt::Code) => {
+                            last_seen = Some(line.clone());
+                            let text = &line.1;
+                            let generic = !text.contains('@');
+                            let pick = fills
+                                .iter()
+                                .position(|f| f.as_ref().is_some_and(|f| f.totp && text.contains(&f.when)))
+                                .or_else(|| if generic { fills.iter().position(|f| f.as_ref().is_some_and(|f| f.totp && f.fallback)) } else { None });
+                            if let Some(mut f) = pick.and_then(|i| fills[i].take()) {
+                                // the code for this moment, not for when the connection was started
+                                if let Ok(spec) = crate::totp::parse(&f.secret) {
+                                    let code = crate::totp::code(&spec, crate::totp::now());
+                                    if let Ok(mut w) = writer.lock() {
+                                        let _ = w.write_all(format!("{code}\r").as_bytes());
+                                        let _ = w.flush();
+                                    }
+                                }
+                                f.secret.zeroize();
+                            }
+                        }
                         Some(Prompt::Login) => {
                             last_seen = Some(line.clone());
                             let text = &line.1;
                             let generic = !text.contains('@') && !text.contains("passphrase");
                             let pick = fills
                                 .iter()
-                                .position(|f| f.as_ref().is_some_and(|f| text.contains(&f.when)))
+                                .position(|f| f.as_ref().is_some_and(|f| !f.totp && text.contains(&f.when)))
                                 .or_else(|| {
                                     if !generic {
                                         return None;
                                     }
-                                    fills.iter().position(|f| f.as_ref().is_some_and(|f| f.fallback))
+                                    fills.iter().position(|f| f.as_ref().is_some_and(|f| !f.totp && f.fallback))
                                 });
                             if let Some(mut f) = pick.and_then(|i| fills[i].take()) {
                                 if let Ok(mut w) = writer.lock() {
@@ -186,7 +208,7 @@ impl PtySession {
                                 f.secret.zeroize();
                             }
                             // Stay in the login phase while a later hop or the destination still has a secret to give.
-                            if fills.iter().all(|f| f.is_none()) {
+                            if fills.iter().all(|f| f.as_ref().is_none_or(|f| f.totp)) {
                                 login_phase = false;
                             }
                         }
@@ -419,6 +441,8 @@ enum Prompt {
     Login,
     /// The remote shell asking for a `sudo` / `su` password.
     Sudo,
+    /// A one-time code (the second factor of a login).
+    Code,
 }
 
 /// Classifies a screen line (lowercased, up to the cursor) as a password prompt, if it is one.
@@ -429,6 +453,15 @@ fn classify_prompt(line: &str, login_phase: bool) -> Option<Prompt> {
     }
     if t.starts_with("[sudo] password for") || t.starts_with("[sudo] contraseña para") {
         return Some(Prompt::Sudo);
+    }
+    // a key's passphrase is a passphrase, whatever the key's file is called
+    if t.contains("passphrase for") {
+        return Some(Prompt::Login);
+    }
+    // the second factor: "Verification code:", "Enter MFA code:", "One-time password (OATH) for `x':"…
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).collect();
+    if ["verification code", "verification-code", "one-time", "authenticator", "token code", "security code", "two-factor", "código de verificación"].iter().any(|w| t.contains(w)) || ["otp", "mfa", "2fa", "oath"].iter().any(|w| words.contains(w)) {
+        return Some(Prompt::Code);
     }
     if t.contains("passphrase for") || t.ends_with("'s password:") {
         return Some(Prompt::Login);
@@ -485,7 +518,7 @@ mod tests {
 
     #[cfg(unix)]
     fn fill(when: &str, secret: &str, fallback: bool) -> Autofill {
-        Autofill { when: when.into(), secret: secret.into(), fallback }
+        Autofill { when: when.into(), secret: secret.into(), fallback, totp: false }
     }
 
     /// A jump host asks first, then the destination: each gets its own password.
@@ -563,6 +596,32 @@ mod tests {
     fn a_bare_password_prompt_is_not_answered_with_the_sudo_password() {
         let text = with_sudo_fill("printf 'Password: '; read -t 2 p; echo \"got:[$p]\"", "got:");
         assert!(text.contains("got:[]"), "{text:?}");
+    }
+
+    /// The code is made when the question appears, from the seed, and typed only at a question for a code.
+    #[test]
+    #[cfg(unix)]
+    fn a_code_prompt_gets_the_code_for_that_moment_and_a_password_prompt_does_not_get_it() {
+        let seed = "GEZDGNBVGY3TQOJQ";
+        let script = "printf 'Password: '; read -t 2 a; printf '\\n(me@host) Verification code: '; read b; echo \"pw=[$a] code=$b\"";
+        let argv = vec!["sh".into(), "-c".into(), script.into()];
+        let fills = vec![Autofill { when: "me@host".into(), secret: seed.into(), fallback: true, totp: true }];
+        let spec = crate::totp::parse(seed).unwrap();
+        let (before, mut s) = (crate::totp::now(), Session::spawn(&argv, 24, 100, fills, true).unwrap());
+        let text = wait_for(&mut s, "code=");
+        let after = crate::totp::now();
+        let ok = (before..=after).any(|t| text.contains(&format!("pw=[] code={}", crate::totp::code(&spec, t))));
+        assert!(ok, "{text:?}");
+    }
+
+    #[test]
+    fn classifies_a_code_prompt() {
+        for p in ["(me@host) verification code: ", "enter mfa code:", "one-time password (oath) for `me':", "authenticator code:", "2fa token:"] {
+            assert_eq!(classify_prompt(p, true), Some(Prompt::Code), "{p}");
+        }
+        assert_eq!(classify_prompt("password: ", true), Some(Prompt::Login));
+        assert_eq!(classify_prompt("enter passphrase for key '/home/me/.ssh/otp_key':", true), Some(Prompt::Login), "a file called otp_key is still a passphrase");
+        assert_eq!(classify_prompt("[sudo] password for otpuser: ", true), Some(Prompt::Sudo), "a sudo question is a sudo question");
     }
 
     #[test]

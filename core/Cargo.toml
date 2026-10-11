@@ -12,11 +12,13 @@ base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 directories = "6.0.0"
 getrandom = "0.4.3"
+hmac = "0.12"
 libc = "0.2"
 portable-pty = "0.9.0"
 rsa = "0.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha1 = "0.10"
 sha2 = "0.10"
 signature = "2"
 ssh-encoding = { version = "0.2", features = ["alloc"] }

@@ -20,6 +20,9 @@ struct AppState {
     engine: Arc<Mutex<Engine>>,
 }
 
+/// Keeps the command line's socket open as long as the app runs.
+struct ControlHolder(#[allow(dead_code)] Option<oso_core::control::Control>);
+
 /// Keeps the agent alive as long as the app runs (dropping it removes its socket).
 struct AgentHolder(#[allow(dead_code)] Option<oso_core::agent::Agent>);
 
@@ -192,6 +195,55 @@ fn audit_recent(state: State<AppState>, limit: usize) -> Res<Vec<Value>> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text.lines().collect();
     Ok(lines[lines.len().saturating_sub(limit.min(500))..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect())
+}
+
+#[tauri::command]
+fn totp_code(state: State<AppState>, id: u64) -> Res<Value> {
+    let (code, left) = engine!(state).totp_code(id).map_err(err)?;
+    Ok(json!({ "code": code, "seconds_left": left }))
+}
+
+#[tauri::command]
+fn server_set_totp(state: State<AppState>, server_id: u64, secret: Option<u64>) -> Res<()> {
+    engine!(state).server_set_totp(server_id, secret).map_err(err)
+}
+
+#[tauri::command]
+fn env_preview(state: State<AppState>, dir: String) -> Res<Vec<oso_core::envscan::EnvFile>> {
+    Ok(engine!(state).env_preview(&oso_core::connect::expand_tilde(&dir)))
+}
+
+#[tauri::command]
+fn env_import(state: State<AppState>, dir: String, choices: Vec<oso_core::envscan::EnvChoice>) -> Res<Value> {
+    let s = engine!(state).env_import(&oso_core::connect::expand_tilde(&dir), &choices).map_err(err)?;
+    Ok(json!({ "added": s.added, "skipped": s.skipped, "originals": s.originals }))
+}
+
+/// Only called after the window asked the person, with "keep them" as the first answer.
+#[tauri::command]
+fn env_delete(state: State<AppState>, dir: String, paths: Vec<String>) -> Res<Vec<String>> {
+    engine!(state).env_delete(&oso_core::connect::expand_tilde(&dir), &paths).map_err(err)
+}
+
+#[tauri::command]
+fn proton_preview(state: State<AppState>, path: String) -> Res<Vec<oso_core::envscan::ProtonItem>> {
+    engine!(state).proton_preview(&oso_core::connect::expand_tilde(&path)).map_err(err)
+}
+
+#[tauri::command]
+fn proton_import(state: State<AppState>, path: String, which: Vec<usize>) -> Res<Value> {
+    let s = engine!(state).proton_import(&oso_core::connect::expand_tilde(&path), &which).map_err(err)?;
+    Ok(json!({ "added": s.added, "skipped": s.skipped, "originals": [] }))
+}
+
+#[tauri::command]
+fn cloud_options(state: State<AppState>) -> Res<oso_core::cloud::CloudOptions> {
+    Ok(engine!(state).cloud_options())
+}
+
+#[tauri::command]
+fn profile_set_cloud(state: State<AppState>, profile: String, aws_profile: Option<String>, kubeconfig: Option<String>, production: bool) -> Res<()> {
+    engine!(state).profile_set_cloud(&profile, aws_profile, kubeconfig, production).map_err(err)
 }
 
 #[tauri::command]
@@ -412,6 +464,12 @@ fn build_engine(handle: AppHandle) -> anyhow::Result<Engine> {
 }
 
 fn main() {
+    // oso's command line (`oso unlock`, `oso run -- …`): it talks to the window that is open, and never starts one
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if oso_core::cli::is_command(&cli_args) {
+        let code = oso_core::cli::run(&cli_args, &oso_core::control::socket_path(), &mut oso_core::cli::RealTerm);
+        std::process::exit(code);
+    }
     // The background server is this same program started with `daemon`: it holds the sessions so they survive the window.
     match std::env::args().nth(1).as_deref() {
         Some("daemon") => {
@@ -471,6 +529,30 @@ fn main() {
             if let Ok(e) = engine.lock() {
                 e.set_agent_handler(Arc::new(move |call| handler.handle(call)));
             }
+            // the command line: it asks this window (the vault is here); `oso ssh` and `oso host add` tell the page
+            let to_page = app.handle().clone();
+            let api = Arc::new(oso_core::control::Api {
+                engine: Arc::clone(&engine),
+                approvals: Arc::clone(&approvals),
+                ui: Arc::new(move |event, data| {
+                    let _ = to_page.emit("cli", json!({ "event": event, "data": data }));
+                }),
+            });
+            let control = match oso_core::control::start(oso_core::control::socket_path(), Arc::new(move |req| api.handle(req))) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("oso: the command line will not reach this window ({e:#})");
+                    None
+                }
+            };
+            app.manage(ControlHolder(control));
+            // the vault locks with the screen and with sleep, as well as when it is idle
+            let locker = Arc::clone(&engine);
+            oso_core::lockwatch::start(Arc::new(move || {
+                if let Ok(mut e) = locker.lock() {
+                    e.vault_lock();
+                }
+            }));
             app.manage(AppState { engine, approvals });
             // The vault locks itself after a while without use.
             let handle = app.handle().clone();
@@ -508,6 +590,15 @@ fn main() {
             profile_set_proxy,
             approval_answer,
             audit_recent,
+            totp_code,
+            server_set_totp,
+            env_preview,
+            env_import,
+            env_delete,
+            proton_preview,
+            proton_import,
+            cloud_options,
+            profile_set_cloud,
             import_preview,
             import_apply,
             import_delete_originals,

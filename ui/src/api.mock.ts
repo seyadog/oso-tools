@@ -1,12 +1,12 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, ApprovalRequest, AuditEntry, Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
   const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true, profile: null }];
-  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null, gh_user: null, tailscale_account: null }];
+  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null, gh_user: null, tailscale_account: null, aws_profile: null, kubeconfig: null, production: false }];
   const tools: AccountsView = {
     github: { installed: true, error: null, accounts: [{ id: "github.com/me", name: "me", detail: "github.com", active: true }, { id: "github.com/work-user", name: "work-user", detail: "github.com", active: false }] },
     tailscale: { installed: true, error: null, accounts: [{ id: "4ab1", name: "me@corp.example.com", detail: "corp.example.com", active: true }, { id: "9fe2", name: "me@gmail.com", detail: "home.ts.net", active: false }] },
@@ -21,9 +21,9 @@ export function mockBackend(): Backend {
   let activeProfile = "default";
   let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
@@ -63,6 +63,8 @@ export function mockBackend(): Backend {
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
+  const deletedEnv: string[] = [];
+  let cliHandler: (e: CliEvent) => void = () => {};
   let approvalHandler: (r: ApprovalRequest) => void = () => {};
   const notices: [string, string][] = [];
   const tunnelState = new Map<string, TunnelStatus>();
@@ -75,6 +77,8 @@ export function mockBackend(): Backend {
     forgotten,
     deletedOriginals,
     approvalAnswers,
+    deletedEnv,
+    cli: (e: CliEvent) => cliHandler(e),
     approval: (r: ApprovalRequest) => approvalHandler(r),
     notices,
     tunnelState,
@@ -112,7 +116,7 @@ export function mockBackend(): Backend {
       }
       const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       if (!slug || profiles.some((p) => p.id === slug)) throw new Error(`there is already a profile called "${name}"`);
-      profiles.push({ id: slug, name: name.trim(), proxy: null, gh_user: null, tailscale_account: null });
+      profiles.push({ id: slug, name: name.trim(), proxy: null, gh_user: null, tailscale_account: null, aws_profile: null, kubeconfig: null, production: false });
       return slug;
     },
     profileDelete: async (id) => {
@@ -209,7 +213,7 @@ export function mockBackend(): Backend {
       }
       for (const a of req.hosts) {
         const id = next++;
-        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" });
+        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" });
         out.hosts_added.push(a);
       }
       return out;
@@ -224,6 +228,61 @@ export function mockBackend(): Backend {
       s.vault_key = secret;
       if (secret) s.auth = "vaultkey";
     },
+    totpCode: async (id) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const x = vaultSecrets.get(id);
+      if (!x || x.meta.kind !== "totp") throw new Error("that secret does not make one-time codes");
+      const now = Math.floor(Date.now() / 1000);
+      return { code: String(123456 + (Math.floor(now / 30) % 1000)).slice(0, 6), seconds_left: 30 - (now % 30) };
+    },
+    serverSetTotp: async (serverId, secret) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const s = servers.find((x) => x.id === serverId)!;
+      s.has_totp = secret != null;
+      s.vault_totp = secret;
+    },
+    envPreview: async (dir) => (dir.includes("nothing") ? [] : [
+      { path: `${dir}/app/.env`, project: "app", entries: [{ name: "STRIPE_KEY", kind: "api_key", length: 17 }, { name: "DB_PASSWORD", kind: "password", length: 14 }], others: 1 },
+      { path: `${dir}/web/.env.production`, project: "web", entries: [{ name: "API_TOKEN", kind: "token", length: 20 }], others: 0 },
+    ] as EnvFile[]),
+    envImport: async (_dir, choices) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const out = { added: [] as string[], skipped: [] as string[], originals: [] as string[] };
+      for (const c of choices) {
+        const project = c.path.split("/").slice(-2)[0];
+        const names = c.names.length ? c.names : project === "app" ? ["STRIPE_KEY", "DB_PASSWORD"] : ["API_TOKEN"];
+        for (const n of names) {
+          const id = nextSecret++;
+          vaultSecrets.set(id, { meta: { id, name: `${project}/${n}`, kind: "token", profile: null, env_var: null, agent_visible: false, notes: `imported from ${c.path}`, updated: Math.floor(Date.now() / 1000) }, value: "v" });
+          out.added.push(`${project}/${n}`);
+        }
+        out.originals.push(c.path);
+      }
+      return out;
+    },
+    envDelete: async (_dir, paths) => {
+      deletedEnv.push(...paths);
+      return paths;
+    },
+    protonPreview: async (path) => {
+      if (path.includes("bad")) throw new Error("no logins found in that file (a Proton Pass export, CSV or JSON, without encryption)");
+      return [
+        { name: "GitHub", username: "me", url: "https://github.com", note: "", has_totp: true },
+        { name: "Mail", username: "m@x.com", url: "https://mail", note: "", has_totp: false },
+      ] as ProtonItem[];
+    },
+    protonImport: async (_path, which) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      return { added: which.map((i) => ["GitHub (me)", "Mail (m@x.com)"][i]), skipped: [], originals: [] };
+    },
+    cloudOptions: async () => ({ aws_profiles: ["default", "acme-prod"], kubeconfigs: [{ path: "/home/me/.kube/config", contexts: ["prod", "dev"] }] }),
+    profileSetCloud: async (profile, aws, kube, production) => {
+      const p = profiles.find((x) => x.id === profile)!;
+      p.aws_profile = aws || null;
+      p.kubeconfig = kube || null;
+      p.production = production;
+    },
+    onCli: (f) => void (cliHandler = f),
     onApproval: (f) => void (approvalHandler = f),
     approvalAnswer: async (id, decision) => {
       approvalAnswers.push([id, decision]);

@@ -13,6 +13,7 @@ import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
 import { accountsSection } from "./accounts_ui";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { importDialog } from "./import_ui";
+import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel } from "./tunnels";
@@ -113,6 +114,13 @@ export class App {
       },
     });
     this.be.onApproval((r) => this.approvals.push(r));
+    // `oso ssh <host>`, `oso host add`, `oso unlock` on the command line: the window follows
+    this.be.onCli((e) => {
+      if (e.event === "open" && e.data?.server_id != null) void this.openServer(e.data.server_id);
+      else if (e.event === "refresh") void this.refreshAll();
+    });
+    // the vault also locks on its own (idle, the screen locking, the command line): the lock on the screen follows
+    window.setInterval(() => void this.refreshVaultMark(), 4000);
     this.transfers = new Transfers(this.be);
     this.be.onFileDrag((e) => this.onFileDrag(e));
     window.setInterval(() => void this.pollTunnels(), 3000);
@@ -289,7 +297,25 @@ export class App {
     this.tree = await this.be.tree();
     for (const s of this.tree.servers) this.prod.set(s.id, s.env_kind === "production");
     this.renderSidebar();
-    if (this.ws.tabs.size) this.render();
+    this.render();
+  }
+
+  private async refreshVaultMark() {
+    try {
+      const v = await this.be.vaultStatus();
+      if (v.exists !== this.vault.exists || v.unlocked !== this.vault.unlocked) {
+        this.vault = v;
+        this.renderFoot();
+      }
+    } catch {
+      /* the next one will do */
+    }
+  }
+
+  private async refreshAll() {
+    await this.refreshTree();
+    await this.refreshVaultMark();
+    void this.refreshAccounts();
   }
 
   /** Who is logged in to GitHub and Tailscale (asked of the tools themselves; hidden if they are not installed). */
@@ -877,6 +903,8 @@ export class App {
     // tools
     clear(this.toolsEl);
     const bc = ws.broadcasting;
+    const chip = this.cloudChip();
+    if (chip) this.toolsEl.append(chip, el("span", { class: "sep" }));
     this.toolsEl.append(
       this.ibtn("split-right", `New terminal to the right  (${this.keyText("split.right")})`, () => this.run("split.right")),
       this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
@@ -888,6 +916,14 @@ export class App {
       el("span", { class: "sep" }),
       this.ibtn("plus", `Open a host  (${this.keyText("search")})`, () => void this.hostPicker()),
     );
+  }
+
+  /** The cloud account the active profile points the local terminals at, in red when it is a production one. */
+  private cloudChip(): HTMLElement | null {
+    const p = this.tree.profiles.find((x) => x.id === this.tree.active_profile);
+    if (!p || (!p.production && !p.aws_profile && !p.kubeconfig)) return null;
+    const parts = [p.name, p.aws_profile ? `aws ${p.aws_profile}` : "", p.kubeconfig ? `k8s ${p.kubeconfig.split("/").pop()}` : ""].filter(Boolean);
+    return el("span", { class: `cloud-chip${p.production ? " prod" : ""}`, title: p.production ? "A production profile: its terminals point at real machines" : "Where this profile's local terminals point", "data-chip": p.id }, parts.join(" · "));
   }
 
   // ------------------------------------------------------------ sidebar
@@ -1480,7 +1516,8 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretsDialog({ be: this.be, importSsh: () => void importDialog({ be: this.be, unlock: async () => (await this.unlockDialog(false)) === "unlocked", refreshTree: () => this.refreshTree() }, () => void this.vaultDialog()), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
+    const imp = { be: this.be, unlock: async () => (await this.unlockDialog(false)) === "unlocked", refreshTree: () => this.refreshTree() };
+    secretsDialog({ be: this.be, importSsh: () => void importDialog(imp, () => void this.vaultDialog()), importEnv: () => void envImportDialog(imp, () => void this.vaultDialog()), importProton: () => void protonImportDialog(imp, () => void this.vaultDialog()), showCode: (id, name) => void showCode(this.be, id, name), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
   }
 
   async lockVault() {
@@ -1538,8 +1575,10 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
-    const keys = this.vault.unlocked ? (await this.be.secretList().catch(() => [])).filter((k) => k.kind === "ssh_key") : [];
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
+    const all = this.vault.unlocked ? await this.be.secretList().catch(() => []) : [];
+    const keys = all.filter((k) => k.kind === "ssh_key");
+    const seeds = all.filter((k) => k.kind === "totp");
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1563,6 +1602,7 @@ export class App {
       };
       const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
       const vaultKey = makeSelect([["", this.vault.unlocked ? (keys.length ? "Choose a key" : "No SSH key in the vault yet") : "Unlock the vault to choose"], ...keys.map((k): [string, string] => [String(k.id), k.name])], s.vault_key == null ? "" : String(s.vault_key), { "data-name": "vault-key" });
+      const mfa = makeSelect([["", this.vault.unlocked ? "None" : "Unlock the vault to choose"], ...seeds.map((k): [string, string] => [String(k.id), k.name])], s.vault_totp == null ? "" : String(s.vault_totp), { "data-name": "mfa" });
       const vaultKeyRow = field("Key (kept in the vault, signed by oso's own ssh-agent)", vaultKey);
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
@@ -1579,7 +1619,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1603,6 +1643,8 @@ export class App {
         try {
           const id = await this.be.saveServer(next, loginSecret, sudoSecret);
           if (auth.value === "vaultkey") await this.be.serverSetKey(id, Number(vaultKey.value));
+          const wantTotp = mfa.value ? Number(mfa.value) : null;
+          if (wantTotp !== (s.vault_totp ?? null)) await this.be.serverSetTotp(id, wantTotp);
           this.selected = { kind: "server", id };
           close();
           await this.refreshTree();

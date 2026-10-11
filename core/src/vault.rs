@@ -32,6 +32,8 @@ pub enum Kind {
     Login,
     /// Password for `sudo` / `su` on the remote machine.
     Sudo,
+    /// The seed of the server's one-time codes (the link is made with `set_totp_link`).
+    Totp,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +115,9 @@ pub struct HostSecrets {
     /// A private key kept in the vault (`Auth::VaultKey`).
     #[serde(default)]
     pub key: Option<u64>,
+    /// The seed of the one-time codes the server asks for after the password (`TOTP`).
+    #[serde(default)]
+    pub totp: Option<u64>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -171,7 +176,7 @@ impl Data {
     }
 
     fn referenced(&self, secret: u64, except_server: Option<u64>) -> bool {
-        self.host_links.iter().any(|(s, l)| Some(*s) != except_server && (l.login == Some(secret) || l.sudo == Some(secret) || l.key == Some(secret)))
+        self.host_links.iter().any(|(s, l)| Some(*s) != except_server && (l.login == Some(secret) || l.sudo == Some(secret) || l.key == Some(secret) || l.totp == Some(secret)))
     }
 }
 
@@ -323,13 +328,20 @@ impl Vault {
         let st = self.state.as_mut()?;
         st.last_used = Instant::now();
         let link = st.data.host_links.get(&id)?;
-        let sid = if kind == Kind::Login { link.login } else { link.sudo }?;
+        let sid = match kind {
+            Kind::Login => link.login,
+            Kind::Sudo => link.sudo,
+            Kind::Totp => link.totp,
+        }?;
         st.data.secrets.get(&sid).map(|s| s.value.clone())
     }
 
     /// Stores (or, with `None`, removes) the login or sudo secret of a server and saves the vault. `label` names
     /// a secret that has to be created for it.
     pub fn set(&mut self, id: u64, kind: Kind, secret: Option<&str>, label: &str) -> Result<()> {
+        if kind == Kind::Totp {
+            bail!("a server's one-time codes are linked with set_totp_link");
+        }
         let st = self.state.as_mut().context("the vault is locked")?;
         st.last_used = Instant::now();
         let current = st.data.host_links.get(&id).and_then(|l| if kind == Kind::Login { l.login } else { l.sudo });
@@ -367,7 +379,7 @@ impl Vault {
     pub fn remove_server(&mut self, id: u64) -> Result<()> {
         let st = self.state.as_mut().context("the vault is locked")?;
         let Some(link) = st.data.host_links.remove(&id) else { return Ok(()) };
-        for sid in [link.login, link.sudo, link.key].into_iter().flatten() {
+        for sid in [link.login, link.sudo, link.key, link.totp].into_iter().flatten() {
             if !st.data.referenced(sid, None) {
                 st.data.secrets.remove(&sid);
             }
@@ -391,6 +403,23 @@ impl Vault {
             }
         }
         st.data.host_links.entry(server).or_default().key = secret;
+        if st.data.host_links.get(&server) == Some(&HostSecrets::default()) {
+            st.data.host_links.remove(&server);
+        }
+        self.save()
+    }
+
+    /// Links a server to the seed of its one-time codes (a `Totp` secret), or unlinks with `None`.
+    pub fn set_totp_link(&mut self, server: u64, secret: Option<u64>) -> Result<()> {
+        let st = self.state.as_mut().context("the vault is locked")?;
+        if let Some(sid) = secret {
+            match st.data.secrets.get(&sid) {
+                Some(s) if s.kind == SecretKind::Totp => {}
+                Some(_) => bail!("that secret is not a one-time-code seed"),
+                None => bail!("that secret no longer exists"),
+            }
+        }
+        st.data.host_links.entry(server).or_default().totp = secret;
         if st.data.host_links.get(&server) == Some(&HostSecrets::default()) {
             st.data.host_links.remove(&server);
         }
@@ -518,7 +547,7 @@ impl Vault {
         let mut touched = vec![];
         for (server, link) in st.data.host_links.iter_mut() {
             let before = link.clone();
-            for slot in [&mut link.login, &mut link.sudo, &mut link.key] {
+            for slot in [&mut link.login, &mut link.sudo, &mut link.key, &mut link.totp] {
                 if *slot == Some(id) {
                     *slot = None;
                 }
@@ -530,6 +559,18 @@ impl Vault {
         st.data.host_links.retain(|_, l| *l != HostSecrets::default());
         self.save()?;
         Ok(touched)
+    }
+
+    /// For `oso run`: `(secret name, variable, value, visible to agents)` of every secret that fills a variable in `profile`.
+    pub fn env_with_flags(&mut self, profile: &str) -> Vec<(String, String, Zeroizing<String>, bool)> {
+        let Some(st) = self.state.as_mut() else { return vec![] };
+        st.last_used = Instant::now();
+        st.data
+            .secrets
+            .values()
+            .filter(|s| s.profile.as_deref().is_none_or(|p| p == profile))
+            .filter_map(|s| s.env_var.clone().map(|v| (s.name.clone(), v, Zeroizing::new(s.value.clone()), s.agent_visible)))
+            .collect()
     }
 
     /// `(variable, value)` for every secret that fills a variable in `profile` and may be seen by agents.

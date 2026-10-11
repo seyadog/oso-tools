@@ -287,6 +287,7 @@ fn server_for(name: &str, sshd: &Sshd, jump: Option<u64>) -> Server {
         jump,
         has_secret: false,
         has_sudo: false,
+        has_totp: false,
         forwards: vec![],
         profile: None,
         notes: String::new(),

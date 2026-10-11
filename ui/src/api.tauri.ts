@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ApprovalRequest, Backend, SessionEvent, VaultLockedError } from "./api";
+import { ApprovalRequest, Backend, CliEvent, SessionEvent, VaultLockedError } from "./api";
 
 /** The commands of src-tauri, one for one. */
 export function tauriBackend(): Backend {
@@ -37,6 +37,16 @@ export function tauriBackend(): Backend {
     importApply: (request) => call("import_apply", { request }),
     importDeleteOriginals: (paths) => call("import_delete_originals", { paths }),
     serverSetKey: (serverId, secret) => call("server_set_key", { serverId, secret }),
+    totpCode: (id) => call("totp_code", { id }),
+    serverSetTotp: (serverId, secret) => call("server_set_totp", { serverId, secret }),
+    envPreview: (dir) => call("env_preview", { dir }),
+    envImport: (dir, choices) => call("env_import", { dir, choices }),
+    envDelete: (dir, paths) => call("env_delete", { dir, paths }),
+    protonPreview: (path) => call("proton_preview", { path }),
+    protonImport: (path, which) => call("proton_import", { path, which }),
+    cloudOptions: () => call("cloud_options"),
+    profileSetCloud: (profile, awsProfile, kubeconfig, production) => call("profile_set_cloud", { profile, awsProfile, kubeconfig, production }),
+    onCli: (f) => void listen<CliEvent>("cli", (e) => f(e.payload)),
     onApproval: (f) => void listen<ApprovalRequest>("approval", (e) => f(e.payload)),
     approvalAnswer: (id, decision) => call("approval_answer", { id, decision }),
     auditRecent: (limit) => call("audit_recent", { limit }),

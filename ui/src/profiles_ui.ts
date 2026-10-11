@@ -103,14 +103,20 @@ export function profilesDialog(be: Backend, profiles: () => Profile[], proxies: 
 /** The accounts a profile puts in use when it becomes the active one. */
 async function profileAccountsDialog(be: Backend, p: Profile, onChange: () => Promise<void>, again: () => void) {
   const view = await be.accounts().catch(() => null);
+  const cloud = await be.cloudOptions().catch(() => ({ aws_profiles: [] as string[], kubeconfigs: [] as { path: string; contexts: string[] }[] }));
   openModal((close) => {
     const gh = makeSelect(accountChoices(view?.github, p.gh_user), p.gh_user ?? "", { "data-name": "gh-user" });
     const ts = makeSelect(accountChoices(view?.tailscale, p.tailscale_account), p.tailscale_account ?? "", { "data-name": "ts-account" });
+    const aws = makeSelect(accountChoices({ installed: true, error: null, accounts: cloud.aws_profiles.map((n) => ({ id: n, name: n, detail: "", active: false })) }, p.aws_profile), p.aws_profile ?? "", { "data-name": "aws-profile" });
+    const kube = makeSelect(accountChoices({ installed: true, error: null, accounts: cloud.kubeconfigs.map((k) => ({ id: k.path, name: k.path.split("/").pop() ?? k.path, detail: k.contexts.join(", "), active: false })) }, p.kubeconfig), p.kubeconfig ?? "", { "data-name": "kubeconfig" });
+    const prod = el("input", { type: "checkbox", id: "profile-production", name: "production" }) as HTMLInputElement;
+    prod.checked = p.production;
     const form = el("form", {}, el("h2", {}, `Accounts of ${p.name}`), el("div", { class: "hint", style: "margin:0 0 10px" }, "Switching to this profile also switches these. oso does not keep their tokens: the tools themselves do. Leave one alone to not touch it."));
     if (view?.github.installed) form.append(field("GitHub (gh)", gh));
     if (view?.tailscale.installed) form.append(field("Tailscale", ts));
     if (!view?.github.installed && !view?.tailscale.installed) form.append(el("div", { class: "empty" }, "Neither `gh` nor `tailscale` is installed."));
     if (view?.tailscale.error) form.append(el("div", { class: "hint" }, view.tailscale.error));
+    form.append(el("h3", {}, "Cloud"), el("div", { class: "hint", style: "margin:0 0 8px" }, "Set in this profile's local terminals (AWS_PROFILE, KUBECONFIG). Only names are read; no key is ever shown or kept."), field("AWS profile", aws), field("Kubernetes config", kube), el("div", { class: "hint" }, prod, el("label", { for: "profile-production", style: "display:inline;margin-left:6px" }, "This is a production profile (shown in red)")));
     const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
     const no = el("button", { class: "btn", type: "button" }, "Cancel");
     no.onclick = close;
@@ -118,6 +124,7 @@ async function profileAccountsDialog(be: Backend, p: Profile, onChange: () => Pr
     form.onsubmit = async (e) => {
       e.preventDefault();
       try {
+        await be.profileSetCloud(p.id, aws.value || null, kube.value || null, prod.checked);
         await be.profileSetAccounts(p.id, view?.github.installed ? gh.value || null : p.gh_user, view?.tailscale.installed ? ts.value || null : p.tailscale_account);
         await onChange();
         close();
@@ -207,7 +214,8 @@ function proxyForm(be: Backend, profiles: () => Profile[], existing: Proxy | nul
 /** The strip above the host list: which profile is active, a switch to see every profile's hosts, and the manager. */
 export function profileBar(be: Backend, state: () => { profiles: Profile[]; proxies: Proxy[]; active: string; all: boolean }, changed: () => Promise<void>): HTMLElement {
   const { profiles, active, all } = state();
-  const bar = el("div", { class: "profile-bar" });
+  const current = profiles.find((p) => p.id === active);
+  const bar = el("div", { class: `profile-bar${current?.production ? " prod" : ""}` });
   const sel = makeSelect(profiles.map((p): [string, string] => [p.id, p.name]), active, { "data-name": "active-profile", title: "Active profile" });
   sel.onchange = async () => {
     const problems = await be.setActiveProfile(sel.value);

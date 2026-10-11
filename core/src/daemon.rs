@@ -38,6 +38,8 @@ struct Fill {
     when: String,
     secret: String,
     fallback: bool,
+    #[serde(default)]
+    totp: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -389,7 +391,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                 argv,
                 rows,
                 cols,
-                fills: fills.into_iter().map(|f| Autofill { when: f.when, secret: f.secret, fallback: f.fallback }).collect(),
+                fills: fills.into_iter().map(|f| Autofill { when: f.when, secret: f.secret, fallback: f.fallback, totp: f.totp }).collect(),
                 login_expected,
                 cwd: cwd.map(PathBuf::from),
                 env: Some(env),
@@ -744,7 +746,7 @@ impl Daemon {
         let env = opts.env.take().unwrap_or_else(|| std::env::vars().collect());
         let mut fills: Vec<Fill> = std::mem::take(&mut opts.fills)
             .into_iter()
-            .map(|f| Fill { when: f.when, secret: f.secret, fallback: f.fallback })
+            .map(|f| Fill { when: f.when, secret: f.secret, fallback: f.fallback, totp: f.totp })
             .collect();
         let argv = opts.argv.clone();
         let cwd = opts.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());

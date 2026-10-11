@@ -239,13 +239,10 @@ impl Engine {
             }
             plan.opts.sudo_fill = self.vault.get(LOCAL, Kind::Sudo);
         }
-        // a profile with a proxy sends this terminal's programs through it (and only this terminal's)
-        let proxy = self.store.profiles.iter().find(|p| p.id == profile).and_then(|p| p.proxy).and_then(|id| self.store.proxy(id));
-        if let Some(p) = proxy.filter(|p| p.problem().is_none()) {
-            for (k, v) in connect::proxy_env(p) {
-                env.retain(|(name, _)| *name != k);
-                env.push((k, v));
-            }
+        // what the profile asks for (a proxy, an AWS profile, a kubeconfig) goes into this terminal and no other
+        for (k, v) in self.profile_env(&profile) {
+            env.retain(|(name, _)| *name != k);
+            env.push((k, v));
         }
         // git and ssh in this terminal find oso's agent (which hands on to the agent that was there before)
         if let Some(sock) = &self.agent_sock {
@@ -274,6 +271,46 @@ impl Engine {
         env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
         opts.env = Some(env);
         Ok(())
+    }
+
+    /// What a profile adds to the environment of a program that is not a secret: its proxy and its cloud settings.
+    pub fn profile_env(&self, profile: &str) -> Vec<(String, String)> {
+        let mut env = vec![];
+        let Some(p) = self.store.profiles.iter().find(|p| p.id == profile) else { return env };
+        if let Some(px) = p.proxy.and_then(|id| self.store.proxy(id)).filter(|px| px.problem().is_none()) {
+            env.extend(connect::proxy_env(px));
+        }
+        if let Some(a) = p.aws_profile.as_deref().filter(|a| !a.is_empty()) {
+            env.push(("AWS_PROFILE".into(), a.to_string()));
+        }
+        if let Some(k) = p.kubeconfig.as_deref().filter(|k| !k.is_empty()) {
+            env.push(("KUBECONFIG".into(), connect::expand_tilde(k)));
+        }
+        env
+    }
+
+    /// The AWS profiles and kubeconfigs that exist, by name (nothing secret is read).
+    pub fn cloud_options(&self) -> crate::cloud::CloudOptions {
+        let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()).unwrap_or_default();
+        crate::cloud::options(&home, std::env::var("KUBECONFIG").ok().as_deref())
+    }
+
+    /// The cloud settings of a profile's local terminals, and whether it is a production one (shown in red).
+    pub fn profile_set_cloud(&mut self, profile: &str, aws_profile: Option<String>, kubeconfig: Option<String>, production: bool) -> Result<()> {
+        let clean = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        let aws = clean(aws_profile);
+        if aws.as_deref().is_some_and(|a| a.starts_with('-') || a.chars().any(|c| c.is_whitespace() || c.is_control())) {
+            bail!("an AWS profile name has no spaces");
+        }
+        let kube = clean(kubeconfig);
+        if kube.as_deref().is_some_and(|k| k.contains('\0') || k.contains('\n')) {
+            bail!("that is not a path");
+        }
+        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
+        p.aws_profile = aws;
+        p.kubeconfig = kube;
+        p.production = production;
+        self.store.save()
     }
 
     /// Does the background server in use know about tokens (an older one, still running, does not)?
@@ -450,6 +487,10 @@ impl Engine {
     pub fn secret_save(&mut self, meta: SecretMeta, value: Option<&str>) -> Result<u64> {
         let normalized = match (meta.kind, value.filter(|v| !v.trim().is_empty())) {
             (crate::vault::SecretKind::SshKey, Some(v)) => Some(check_ssh_key(v)?),
+            (crate::vault::SecretKind::Totp, Some(v)) => {
+                crate::totp::parse(v)?;
+                Some(v.trim().to_string())
+            }
             (_, v) => v.map(str::to_string),
         };
         let id = self.vault.save_secret(meta, normalized.as_deref())?;
@@ -466,8 +507,37 @@ impl Engine {
             self.set_flags(server, |s| {
                 s.has_secret = links.login.is_some();
                 s.has_sudo = links.sudo.is_some();
+                s.has_totp = links.totp.is_some();
             });
         }
+        self.store.save()
+    }
+
+    /// The code a one-time-code secret shows now, and the seconds it still lasts. The seed does not leave.
+    pub fn totp_code(&mut self, id: u64) -> Result<(String, u64)> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        let meta = self.vault.meta(id).context("this secret no longer exists")?;
+        if meta.kind != crate::vault::SecretKind::Totp {
+            bail!("that secret does not make one-time codes");
+        }
+        let seed = zeroize::Zeroizing::new(self.vault.reveal(id).context("this secret no longer exists")?);
+        let spec = crate::totp::parse(&seed)?;
+        let now = crate::totp::now();
+        Ok((crate::totp::code(&spec, now), crate::totp::seconds_left(&spec, now)))
+    }
+
+    /// The server asks for one-time codes after the password; this seed (`None`: none) answers them.
+    pub fn server_set_totp(&mut self, server_id: u64, secret: Option<u64>) -> Result<()> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        if self.store.server(server_id).is_none() {
+            bail!("this server no longer exists");
+        }
+        self.vault.set_totp_link(server_id, secret)?;
+        self.set_flags(server_id, |s| s.has_totp = secret.is_some());
         self.store.save()
     }
 
@@ -509,6 +579,7 @@ impl Engine {
                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                 v["profile_eff"] = self.store.server_profile(s).map(Value::from).unwrap_or(Value::Null);
                 v["vault_key"] = self.vault.links(s.id).key.map(Value::from).unwrap_or(Value::Null);
+                v["vault_totp"] = self.vault.links(s.id).totp.map(Value::from).unwrap_or(Value::Null);
                 v
             })
             .collect();
@@ -1338,6 +1409,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            has_totp: false,
             forwards: vec![],
             profile: None,
             notes: String::new(),
@@ -1760,5 +1832,28 @@ mod tests {
         // the right account, or no network declared: no question
         assert!(!matches!(e.open(on_corp, 24, 80, true).err(), Some(OpenError::Network { .. })));
         assert!(!matches!(e.open(plain, 24, 80, true).err(), Some(OpenError::Network { .. })));
+    }
+
+    #[test]
+    fn a_local_terminal_gets_the_cloud_settings_of_its_profile() {
+        let (mut e, log) = engine("cloud");
+        let work = e.profile_save("", "Work").unwrap();
+        e.profile_set_cloud(&work, Some("acme-prod".into()), Some("~/.kube/acme.yaml".into()), true).unwrap();
+        assert!(e.profile_set_cloud(&work, Some("bad name".into()), None, false).is_err());
+        assert!(e.store.profiles.iter().find(|p| p.id == work).unwrap().production, "a refused change changed nothing");
+        e.set_active_profile(&work).unwrap();
+        let s = e.open(LOCAL, 24, 160, true).unwrap();
+        e.write(s.sid, b"echo aws=$AWS_PROFILE kube=$KUBECONFIG .\r");
+        let home = directories::BaseDirs::new().unwrap().home_dir().to_string_lossy().into_owned();
+        assert!(wait_for(&log, s.sid, &format!("aws=acme-prod kube={home}/.kube/acme.yaml .")), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        e.set_active_profile("default").unwrap();
+        let s = e.open(LOCAL, 24, 160, true).unwrap();
+        e.write(s.sid, b"echo [$AWS_PROFILE] [$KUBECONFIG] .\r");
+        assert!(wait_for(&log, s.sid, "[] [] ."), "another profile does not get them: {:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // and they survive a restart
+        let again = Store::load_from(e.store_path()).unwrap();
+        assert_eq!(again.profiles.iter().find(|p| p.id == work).unwrap().aws_profile.as_deref(), Some("acme-prod"));
     }
 }

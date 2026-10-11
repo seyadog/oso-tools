@@ -13,6 +13,8 @@ export interface Server {
   jump: number | null;
   has_secret: boolean;
   has_sudo: boolean;
+  /** A seed for its one-time codes is linked in the vault. */
+  has_totp: boolean;
   forwards: Forward[];
   /** Free text about the machine. */
   notes: string;
@@ -23,6 +25,8 @@ export interface Server {
   ai_policy: "ask" | "read_only_auto" | "blocked";
   /** `tailscale:<account>`: the network it is on (oso asks before connecting on another account). */
   network: string | null;
+  /** The secret id of the seed of its one-time codes (only in what `tree` returns, with the vault unlocked). */
+  vault_totp?: number | null;
   /** The secret id of the key it logs in with, when that is a key of the vault (only in what `tree` returns, with the vault unlocked). */
   vault_key?: number | null;
   /** Its own profile (null: its folder's, else every profile). */
@@ -57,6 +61,40 @@ export interface Profile {
   gh_user: string | null;
   /** The Tailscale account to be on while it is active. */
   tailscale_account: string | null;
+  /** `AWS_PROFILE` for its local terminals. */
+  aws_profile: string | null;
+  /** `KUBECONFIG` for them. */
+  kubeconfig: string | null;
+  /** Shown in red. */
+  production: boolean;
+}
+export interface CloudOptions {
+  aws_profiles: string[];
+  kubeconfigs: { path: string; contexts: string[] }[];
+}
+export interface EnvFile {
+  path: string;
+  project: string;
+  entries: { name: string; kind: SecretKind; length: number }[];
+  others: number;
+}
+export interface ProtonItem {
+  name: string;
+  username: string;
+  url: string;
+  note: string;
+  has_totp: boolean;
+}
+/** What an import did. */
+export interface ImportSummary {
+  added: string[];
+  skipped: string[];
+  originals: string[];
+}
+/** Something the command line asked the window to do (`oso ssh`, `oso host add`…). */
+export interface CliEvent {
+  event: "open" | "refresh";
+  data: { server_id?: number } | null;
 }
 export interface Account {
   id: string;
@@ -244,6 +282,17 @@ export interface Backend {
   importDeleteOriginals(paths: string[]): Promise<string[]>;
   /** The server logs in with this key of the vault (null: unlink). */
   serverSetKey(serverId: number, secret: number | null): Promise<void>;
+  totpCode(id: number): Promise<{ code: string; seconds_left: number }>;
+  serverSetTotp(serverId: number, secret: number | null): Promise<void>;
+  envPreview(dir: string): Promise<EnvFile[]>;
+  envImport(dir: string, choices: { path: string; names: string[] }[]): Promise<ImportSummary>;
+  /** Only called after the person said yes. */
+  envDelete(dir: string, paths: string[]): Promise<string[]>;
+  protonPreview(path: string): Promise<ProtonItem[]>;
+  protonImport(path: string, which: number[]): Promise<ImportSummary>;
+  cloudOptions(): Promise<CloudOptions>;
+  profileSetCloud(profile: string, awsProfile: string | null, kubeconfig: string | null, production: boolean): Promise<void>;
+  onCli(f: (e: CliEvent) => void): void;
   onApproval(f: (r: ApprovalRequest) => void): void;
   approvalAnswer(id: number, decision: ApprovalDecision): Promise<boolean>;
   auditRecent(limit: number): Promise<AuditEntry[]>;

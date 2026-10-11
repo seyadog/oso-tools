@@ -32,6 +32,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            has_totp: false,
             forwards: vec![],
             profile: None,
             notes: String::new(),

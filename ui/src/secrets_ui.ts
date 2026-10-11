@@ -6,8 +6,12 @@ import { icon } from "./icons";
 
 export interface Ctx {
   be: Backend;
-  /** Opens the import window (keys and hosts of ~/.ssh). */
+  /** The ways of bringing secrets in. */
   importSsh(): void;
+  importEnv(): void;
+  importProton(): void;
+  /** Shows the current code of a one-time-code secret. */
+  showCode(id: number, name: string): void;
   /** Profiles that exist: id and name. */
   profiles(): { id: string; name: string }[];
   /** The profile the window is showing. */
@@ -72,6 +76,8 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
           const v = await ctx.be.secretReveal(key).catch(() => null);
           if (v) copyForAWhile(v);
         });
+        const code = m.kind === "totp" ? btn("key", "Show the code now", () => ctx.showCode(m.id, m.name)) : null;
+        if (code) code.setAttribute("data-act", "totp-code");
         const ed = btn("edit", "Change", () => {
           close();
           secretForm(ctx, m, () => secretsDialog(ctx));
@@ -86,7 +92,7 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
         list.append(
           el("div", { class: "vrow srow", "data-secret": m.name },
             el("div", { class: "who" }, el("span", { class: "txt" }, el("b", {}, m.name), el("small", {}, where))),
-            el("div", { class: "secret" }, text, old ? el("span", { class: "old", title: `Last changed ${daysOld(m.updated)} days ago` }, `${daysOld(m.updated)} days old`) : null, eye, cp, ed, rm),
+            el("div", { class: "secret" }, text, old ? el("span", { class: "old", title: `Last changed ${daysOld(m.updated)} days ago` }, `${daysOld(m.updated)} days old`) : null, code, eye, cp, ed, rm),
           ),
         );
       }
@@ -120,10 +126,10 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       }
       secretsDialog(ctx);
     };
-    const imp = el("button", { class: "btn", type: "button", "data-act": "import-ssh" }, "Import from ~/.ssh…");
+    const imp = el("button", { class: "btn", type: "button", "data-act": "import" }, "Import…");
     imp.onclick = () => {
       close();
-      ctx.importSsh();
+      importChooser(ctx);
     };
     const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
     lock.onclick = () => {
@@ -146,6 +152,30 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     const done = el("button", { class: "btn primary", type: "button" }, "Done");
     done.onclick = close;
     return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
+  });
+}
+
+/** Where secrets can come from. */
+function importChooser(ctx: Ctx) {
+  openModal((close) => {
+    const way = (act: string, title: string, text: string, f: () => void) => {
+      const b = el("button", { class: "btn way", type: "button", "data-act": act }, el("b", {}, title), el("small", {}, text));
+      b.onclick = () => {
+        close();
+        f();
+      };
+      return b;
+    };
+    const back = el("button", { class: "btn", type: "button" }, "Back");
+    back.onclick = () => {
+      close();
+      secretsDialog(ctx);
+    };
+    return el("div", {}, el("h2", {}, "Import"), el("div", { class: "ways" },
+      way("import-ssh", "SSH keys and hosts", "from ~/.ssh: keys go into the vault, hosts into the list", () => ctx.importSsh()),
+      way("import-env", ".env files", "secrets in your projects' .env files", () => ctx.importEnv()),
+      way("import-proton", "Proton Pass", "the CSV or JSON export", () => ctx.importProton()),
+    ), el("div", { class: "actions" }, back));
   });
 }
 
