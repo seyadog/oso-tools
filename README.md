@@ -40,3 +40,7 @@ cargo test -p oso-core     # engine: servers, vault, sessions, background server
 cd ui && npm test          # tiling tree, tabs, hotkeys
 cd ui && npm run e2e       # the real interface in a real browser, driven like a person would
 ```
+
+## Author
+
+Made by [seyadog](https://github.com/seyadog).
