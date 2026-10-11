@@ -85,6 +85,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             has_secret: false,
             has_sudo: false,
             forwards: vec![],
+            profile: None,
         },
         None,
         None,

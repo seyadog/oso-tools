@@ -6,7 +6,7 @@ use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
-use crate::store::{Auth, Forward, ForwardKind, NodeId, Server, Store};
+use crate::store::{Auth, DEFAULT_PROFILE, Forward, ForwardKind, NodeId, Profile, Server, Store, slug};
 use crate::vault::{Kind, SecretMeta, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -103,11 +103,20 @@ pub struct Engine {
     next_transfer: u64,
     /// Extra options put before the target of every tunnel and copy (the tests use it to reach their own sshd).
     pub ssh_extra: Vec<String>,
+    /// The profile the window works in, and whether the sidebar shows every profile's hosts.
+    active_profile: String,
+    view_all: bool,
 }
 
 impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![] }
+        let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
+        let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles }
+    }
+
+    fn config_dir(&self) -> std::path::PathBuf {
+        self.store.path().parent().map(|p| p.to_path_buf()).unwrap_or_default()
     }
 
     /// Connects to the background server, starting it if needed.
@@ -353,14 +362,128 @@ impl Engine {
 
     // ---------------------------------------------------------------- servers
 
-    /// The folders and servers, for the sidebar.
+    /// The folders and servers of the active profile (or of every one), for the sidebar.
     pub fn tree(&self) -> Value {
-        serde_json::json!({ "folders": self.store.folders, "servers": self.store.servers })
+        let p = self.active_profile.as_str();
+        let (folders, servers): (Vec<&crate::store::Folder>, Vec<&Server>) = if self.view_all {
+            (self.store.folders.iter().collect(), self.store.servers.iter().collect())
+        } else {
+            let shown = self.store.folders_in(p);
+            // a hop of a shown server stays in the list, whatever its profile: the server's form needs to name it
+            let mut ids: Vec<u64> = self.store.servers.iter().filter(|s| self.store.server_in(s, p)).map(|s| s.id).collect();
+            for id in ids.clone() {
+                ids.extend(self.store.jump_chain(id).into_iter().map(|h| h.id));
+            }
+            (self.store.folders.iter().filter(|f| shown.contains(&f.id)).collect(), self.store.servers.iter().filter(|s| ids.contains(&s.id)).collect())
+        };
+        // a server also says which profile it ends up in (its own or its folder's)
+        let servers: Vec<Value> = servers
+            .into_iter()
+            .map(|s| {
+                let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+                v["profile_eff"] = self.store.server_profile(s).map(Value::from).unwrap_or(Value::Null);
+                v
+            })
+            .collect();
+        serde_json::json!({ "folders": folders, "servers": servers, "profiles": self.store.profiles, "active_profile": self.active_profile, "view_all": self.view_all })
+    }
+
+    // ---------------------------------------------------------------- profiles
+
+    pub fn profiles(&self) -> &[Profile] {
+        &self.store.profiles
+    }
+
+    pub fn active_profile(&self) -> &str {
+        &self.active_profile
+    }
+
+    pub fn set_active_profile(&mut self, id: &str) -> Result<()> {
+        if !self.store.profiles.iter().any(|p| p.id == id) {
+            bail!("there is no profile {id:?}");
+        }
+        self.active_profile = id.to_string();
+        crate::settings::save_key_in(&self.config_dir(), "active_profile", id.into());
+        Ok(())
+    }
+
+    pub fn set_view_all(&mut self, all: bool) {
+        self.view_all = all;
+        crate::settings::save_key_in(&self.config_dir(), "view_all_profiles", all.into());
+    }
+
+    /// Adds a profile (`id` empty) or renames one. Returns its id.
+    pub fn profile_save(&mut self, id: &str, name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a profile needs a name");
+        }
+        if id.is_empty() {
+            let id = slug(name);
+            if id.is_empty() {
+                bail!("a profile name needs letters or digits");
+            }
+            if self.store.profiles.iter().any(|p| p.id == id) {
+                bail!("there is already a profile called {name:?}");
+            }
+            self.store.profiles.push(Profile { id: id.clone(), name: name.to_string() });
+            self.store.save()?;
+            return Ok(id);
+        }
+        let p = self.store.profiles.iter_mut().find(|p| p.id == id).context("this profile no longer exists")?;
+        p.name = name.to_string();
+        self.store.save()?;
+        Ok(id.to_string())
+    }
+
+    /// Deletes a profile; what belonged to it moves to the default one. The vault must be unlocked, so that no
+    /// secret of the profile is left without it (and so shown in every profile).
+    pub fn profile_delete(&mut self, id: &str) -> Result<()> {
+        if id == DEFAULT_PROFILE {
+            bail!("the default profile cannot be deleted");
+        }
+        if !self.store.profiles.iter().any(|p| p.id == id) {
+            return Ok(());
+        }
+        if !self.vault.is_unlocked() && self.vault.exists() {
+            bail!("unlock the vault first: its secrets of this profile move to the default one");
+        }
+        for m in self.vault.list().into_iter().filter(|m| m.profile.as_deref() == Some(id)) {
+            self.vault.save_secret(SecretMeta { profile: Some(DEFAULT_PROFILE.into()), ..m }, None)?;
+        }
+        let mine = Some(id.to_string());
+        let default = Some(DEFAULT_PROFILE.to_string());
+        for s in self.store.servers.iter_mut().filter(|s| s.profile == mine) {
+            s.profile = default.clone();
+        }
+        for f in self.store.folders.iter_mut().filter(|f| f.profile == mine) {
+            f.profile = default.clone();
+        }
+        self.store.profiles.retain(|p| p.id != id);
+        self.store.save()?;
+        if self.active_profile == id {
+            self.set_active_profile(DEFAULT_PROFILE)?;
+        }
+        Ok(())
+    }
+
+    /// Puts a folder (and what is in it) in a profile, or in none.
+    pub fn set_folder_profile(&mut self, id: u64, profile: Option<String>) -> Result<()> {
+        if profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
+            bail!("there is no such profile");
+        }
+        if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
+            f.profile = profile;
+        }
+        self.store.save()
     }
 
     /// Adds a server (`id == 0`) or updates it. The secrets go to the vault, never to the store: `None` leaves
     /// a saved one alone, `Some("")` removes it.
     pub fn save_server(&mut self, mut s: Server, login: Option<&str>, sudo: Option<&str>) -> Result<u64> {
+        if s.profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
+            bail!("there is no such profile");
+        }
         let touches_vault = login.is_some() || sudo.is_some();
         if touches_vault && !self.vault.is_unlocked() {
             bail!("unlock the vault to save a password");
@@ -686,6 +809,7 @@ mod tests {
             has_secret: false,
             has_sudo: false,
             forwards: vec![],
+            profile: None,
         }
     }
 
@@ -831,5 +955,74 @@ mod tests {
         e.vault_set(LOCAL, true, Some("local-pw")).unwrap();
         assert_eq!(e.vault_reveal(LOCAL, true).unwrap().as_deref(), Some("local-pw"));
         assert!(e.secret_list().unwrap().iter().any(|m| m.name == "this computer (sudo)"));
+    }
+
+    fn names(tree: &Value, key: &str) -> Vec<String> {
+        tree[key].as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn the_tree_shows_the_active_profile_and_everything_when_asked() {
+        let (mut e, _log) = engine("profiles");
+        let work = e.profile_save("", "Work").unwrap();
+        assert_eq!(work, "work");
+        let home = e.profile_save("", "Home").unwrap();
+        let folder = e.add_folder("clients".into(), None).unwrap();
+        e.set_folder_profile(folder, Some(work.clone())).unwrap();
+        e.save_server(Server { parent: Some(folder), auth: Auth::Agent, ..server("acme") }, None, None).unwrap();
+        e.save_server(Server { profile: Some(home.clone()), auth: Auth::Agent, ..server("nas") }, None, None).unwrap();
+        e.save_server(Server { auth: Auth::Agent, ..server("everywhere") }, None, None).unwrap();
+        e.set_active_profile(&work).unwrap();
+        let t = e.tree();
+        assert_eq!(names(&t, "servers"), vec!["acme", "everywhere"]);
+        assert_eq!(names(&t, "folders"), vec!["clients"]);
+        assert_eq!(t["servers"][0]["profile_eff"], "work", "it says where it ended up");
+        e.set_active_profile(&home).unwrap();
+        let t = e.tree();
+        assert_eq!(names(&t, "servers"), vec!["nas", "everywhere"]);
+        assert!(names(&t, "folders").is_empty());
+        // a hop of a shown server is listed even when it belongs to another profile
+        let hop = e.store.servers.iter().find(|s| s.name == "nas").unwrap().id;
+        let mut ev = e.store.servers.iter().find(|s| s.name == "everywhere").unwrap().clone();
+        ev.jump = Some(hop);
+        e.save_server(ev, None, None).unwrap();
+        e.set_active_profile(&work).unwrap();
+        assert_eq!(names(&e.tree(), "servers"), vec!["acme", "nas", "everywhere"]);
+        e.set_active_profile(&home).unwrap();
+        e.set_view_all(true);
+        assert_eq!(names(&e.tree(), "servers").len(), 3);
+        assert!(e.set_active_profile("nope").is_err());
+        assert!(e.save_server(Server { profile: Some("nope".into()), ..server("x") }, None, None).is_err());
+    }
+
+    #[test]
+    fn the_active_profile_is_remembered_next_to_the_other_files() {
+        let (mut e, _log) = engine("profile-memory");
+        let work = e.profile_save("", "Work").unwrap();
+        e.set_active_profile(&work).unwrap();
+        e.set_view_all(true);
+        let dir = e.store_path().parent().unwrap().to_path_buf();
+        let again = Engine::new(Store::load_from(e.store_path()).unwrap(), Vault::new(dir.join("vault.json")), Arc::new(|_, _| {}));
+        assert_eq!(again.active_profile(), "work");
+        assert!(again.tree()["view_all"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn deleting_a_profile_moves_what_was_in_it_to_the_default_one() {
+        let (mut e, _log) = engine("profile-delete");
+        e.vault_unlock("m").unwrap();
+        let work = e.profile_save("", "Work").unwrap();
+        let sid = e.save_server(Server { profile: Some(work.clone()), auth: Auth::Agent, ..server("a") }, None, None).unwrap();
+        let key = e.secret_save(SecretMeta { id: 0, name: "k".into(), kind: SecretKind::ApiKey, profile: Some(work.clone()), env_var: None, agent_visible: false, notes: String::new(), updated: 0 }, Some("v")).unwrap();
+        e.set_active_profile(&work).unwrap();
+        assert!(e.profile_delete("default").is_err());
+        e.vault_lock();
+        assert!(e.profile_delete(&work).is_err(), "a locked vault could leave a secret in every profile");
+        e.vault_unlock("m").unwrap();
+        e.profile_delete(&work).unwrap();
+        assert_eq!(e.active_profile(), "default");
+        assert_eq!(e.store.server(sid).unwrap().profile.as_deref(), Some("default"));
+        assert_eq!(e.vault.meta(key).unwrap().profile.as_deref(), Some("default"));
+        assert!(e.profile_save("", "").is_err() && e.profile_save("", "Default").is_err());
     }
 }

@@ -324,6 +324,46 @@ check("and a secret can be deleted", (await page.$$(".srow")).length === 0);
 await page.keyboard.press("Escape");
 await settle(150);
 
+// profiles: the host list follows the active profile
+await page.click('.profile-bar button[data-act="profiles"]');
+await settle(200);
+await page.fill('input[name="new-profile"]', "Work");
+await page.keyboard.press("Enter");
+await settle(250);
+check("a profile can be added", (await page.textContent(".plist")).includes("Work"));
+await page.keyboard.press("Escape");
+await settle(150);
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  const t = await be.tree();
+  const web = t.servers.find((x) => x.name === "web-1");
+  await be.saveServer({ ...web, profile: "work" }, null, null);
+  await be.setActiveProfile("work");
+  await window.oso.refreshTree();
+});
+await settle(200);
+check("the profile bar always shows the active profile", (await page.textContent('.profile-bar .select[data-name="active-profile"]')).includes("Work"));
+check("the hosts of the active profile show, and the ones of no profile", (await page.$$('.row[data-kind="server"]')).length === 3);
+await page.click('.profile-bar .select[data-name="active-profile"] .sel-btn');
+await page.click('.profile-bar .select[data-name="active-profile"] .sel-item[data-value="default"]');
+await settle(250);
+check("another profile hides them", (await page.$$('.row[data-kind="server"]:has-text("web-1")')).length === 0 && (await page.$$('.row[data-kind="server"]')).length === 2);
+await page.click('.profile-bar button[data-act="view-all"]');
+await settle(250);
+check("and the eye shows every profile's hosts", (await page.$$('.row[data-kind="server"]')).length === 3);
+await page.click('.profile-bar button[data-act="view-all"]');
+await settle(200);
+await shot("9b-profiles");
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.setActiveProfile("work");
+  const web = (await be.tree()).servers.find((x) => x.name === "web-1");
+  await be.saveServer({ ...web, profile: null }, null, null);
+  await be.setActiveProfile("default");
+  await window.oso.refreshTree();
+});
+await settle(200);
+
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

@@ -1,15 +1,18 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { Backend, FileDrag, Folder, Forward, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { Backend, FileDrag, Folder, Forward, Profile, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
-  const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true }];
+  const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true, profile: null }];
+  const profiles: Profile[] = [{ id: "default", name: "default" }];
+  let activeProfile = "default";
+  let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [] },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [] },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [] },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
@@ -72,7 +75,39 @@ export function mockBackend(): Backend {
   };
 
   return {
-    tree: async () => ({ folders: structuredClone(folders), servers: structuredClone(servers) }) as TreeData,
+    tree: async () => {
+      const folderProfile = (id: number | null): string | null => {
+        for (let f = folders.find((x) => x.id === id), n = 0; f && n < 50; f = folders.find((x) => x.id === f!.parent), n++) if (f.profile) return f.profile;
+        return null;
+      };
+      const eff = (s: Server) => s.profile ?? folderProfile(s.parent);
+      const inProfile = (p: string | null) => viewAll || p === null || p === activeProfile;
+      const srv = servers.filter((s) => inProfile(eff(s)));
+      const holds = (fid: number) => srv.some((s) => { for (let f = folders.find((x) => x.id === s.parent); f; f = folders.find((x) => x.id === f!.parent)) if (f.id === fid) return true; return false; });
+      const fol = folders.filter((f) => viewAll || folderProfile(f.id) === activeProfile || holds(f.id) || (folderProfile(f.id) === null && !servers.some((s) => s.parent === f.id)));
+      return { folders: structuredClone(fol), servers: structuredClone(srv).map((s) => ({ ...s, profile_eff: eff(s) })), profiles: structuredClone(profiles), active_profile: activeProfile, view_all: viewAll } as TreeData;
+    },
+    profileSave: async (id, name) => {
+      if (!name.trim()) throw new Error("a profile needs a name");
+      if (id) {
+        profiles.find((p) => p.id === id)!.name = name.trim();
+        return id;
+      }
+      const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      if (!slug || profiles.some((p) => p.id === slug)) throw new Error(`there is already a profile called "${name}"`);
+      profiles.push({ id: slug, name: name.trim() });
+      return slug;
+    },
+    profileDelete: async (id) => {
+      if (id === "default") throw new Error("the default profile cannot be deleted");
+      profiles.splice(profiles.findIndex((p) => p.id === id), 1);
+      servers.forEach((s) => s.profile === id && (s.profile = "default"));
+      folders.forEach((f) => f.profile === id && (f.profile = "default"));
+      if (activeProfile === id) activeProfile = "default";
+    },
+    setActiveProfile: async (id) => void (activeProfile = id),
+    setViewAll: async (all) => void (viewAll = all),
+    setFolderProfile: async (id, profile) => void (folders.find((f) => f.id === id)!.profile = profile),
     vaultStatus: async () => ({ ...vault }),
     vaultUnlock: async (master) => {
       if (master !== "master") throw new Error("Wrong master password");
@@ -132,7 +167,7 @@ export function mockBackend(): Backend {
     },
     addFolder: async (name, parent) => {
       const id = next++;
-      folders.push({ id, name, parent, expanded: true });
+      folders.push({ id, name, parent, expanded: true, profile: null });
       return id;
     },
     renameFolder: async (id, name) => void (folders.find((f) => f.id === id)!.name = name),

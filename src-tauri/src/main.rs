@@ -104,6 +104,32 @@ fn vault_change_master(state: State<AppState>, master: String) -> Res<()> {
 }
 
 #[tauri::command]
+fn profile_save(state: State<AppState>, id: String, name: String) -> Res<String> {
+    engine!(state).profile_save(&id, &name).map_err(err)
+}
+
+#[tauri::command]
+fn profile_delete(state: State<AppState>, id: String) -> Res<()> {
+    engine!(state).profile_delete(&id).map_err(err)
+}
+
+#[tauri::command]
+fn set_active_profile(state: State<AppState>, id: String) -> Res<()> {
+    engine!(state).set_active_profile(&id).map_err(err)
+}
+
+#[tauri::command]
+fn set_view_all(state: State<AppState>, all: bool) -> Res<()> {
+    engine!(state).set_view_all(all);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_folder_profile(state: State<AppState>, id: u64, profile: Option<String>) -> Res<()> {
+    engine!(state).set_folder_profile(id, profile).map_err(err)
+}
+
+#[tauri::command]
 fn secret_list(state: State<AppState>) -> Res<Vec<SecretMeta>> {
     engine!(state).secret_list().map_err(err)
 }
@@ -345,6 +371,11 @@ fn main() {
             vault_reveal,
             vault_set,
             vault_change_master,
+            profile_save,
+            profile_delete,
+            set_active_profile,
+            set_view_all,
+            set_folder_profile,
             secret_list,
             secret_save,
             secret_delete,

@@ -14,6 +14,10 @@ export interface Server {
   has_secret: boolean;
   has_sudo: boolean;
   forwards: Forward[];
+  /** Its own profile (null: its folder's, else every profile). */
+  profile: string | null;
+  /** Where it ended up: its own or its folder's (only in what `tree` returns). */
+  profile_eff?: string | null;
 }
 export interface Forward {
   /** 0 for one that is not saved yet. */
@@ -28,10 +32,19 @@ export interface Folder {
   name: string;
   parent: number | null;
   expanded: boolean;
+  profile: string | null;
+}
+export interface Profile {
+  id: string;
+  name: string;
 }
 export interface TreeData {
   folders: Folder[];
   servers: Server[];
+  profiles: Profile[];
+  active_profile: string;
+  /** The sidebar shows the hosts of every profile. */
+  view_all: boolean;
 }
 export interface VaultStatus {
   exists: boolean;
@@ -102,6 +115,12 @@ export interface Backend {
   vaultReveal(serverId: number, sudo: boolean): Promise<string | null>;
   vaultSet(serverId: number, sudo: boolean, secret: string | null): Promise<void>;
   vaultChangeMaster(master: string): Promise<void>;
+  /** Adds a profile (`id` empty) or renames one; returns its id. */
+  profileSave(id: string, name: string): Promise<string>;
+  profileDelete(id: string): Promise<void>;
+  setActiveProfile(id: string): Promise<void>;
+  setViewAll(all: boolean): Promise<void>;
+  setFolderProfile(id: number, profile: string | null): Promise<void>;
   secretList(): Promise<SecretMeta[]>;
   /** `value` null keeps the saved one of an existing secret. */
   secretSave(meta: SecretMeta, value: string | null): Promise<number>;

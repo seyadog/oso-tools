@@ -223,6 +223,7 @@ mod tests {
             has_secret: false,
             has_sudo: false,
             forwards: vec![],
+            profile: None,
         }
     }
 

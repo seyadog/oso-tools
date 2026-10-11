@@ -10,6 +10,7 @@ import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
 import { tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
@@ -29,7 +30,7 @@ interface Drag {
 
 export class App {
   ws = new Workspace();
-  tree: TreeData = { folders: [], servers: [] };
+  tree: TreeData = { folders: [], servers: [], profiles: [], active_profile: "default", view_all: false };
   vault: VaultStatus = { exists: false, unlocked: false };
   panes = new Map<Id, Pane>();
   private early = new Map<Id, SessionEvent[]>();
@@ -67,6 +68,7 @@ export class App {
   private toolsEl = el("div", { class: "tools" });
   private treeEl = el("div", { class: "tree", tabindex: "0" });
   private footEl = el("div", { class: "side-foot" });
+  private profileEl = el("div", { class: "profile-slot" });
   private search = el("input", { type: "search", placeholder: "Search hosts", autocomplete: "off", spellcheck: "false" });
   private dividers: HTMLElement[] = [];
 
@@ -831,7 +833,7 @@ export class App {
     };
     this.treeEl.addEventListener("pointerdown", () => (this.focusArea = "sidebar"));
     this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
-    this.side.append(head, searchWrap, this.treeEl, this.footEl);
+    this.side.append(head, this.profileEl, searchWrap, this.treeEl, this.footEl);
   }
 
   private renderFoot() {
@@ -920,6 +922,8 @@ export class App {
   }
 
   renderSidebar() {
+    clear(this.profileEl);
+    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree()));
     clear(this.treeEl);
     if (!this.filter) this.renderGroups();
     else if (this.groups.length) {
@@ -1351,7 +1355,7 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretsDialog({ be: this.be, profiles: () => [], activeProfile: () => "", lockVault: () => this.lockVault() });
+    secretsDialog({ be: this.be, profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
   }
 
   async lockVault() {
@@ -1376,12 +1380,24 @@ export class App {
     else void this.renameFolder(this.tree.folders.find((f) => f.id === s.id)!);
   }
 
-  private async renameFolder(f: Folder) {
-    const name = await promptBox("Rename folder", f.name);
-    if (name?.trim()) {
-      await this.be.renameFolder(f.id, name.trim());
-      await this.refreshTree();
-    }
+  private renameFolder(f: Folder) {
+    openModal((close) => {
+      const name = el("input", { value: f.name, name: "name", autocomplete: "off" });
+      const profile = makeSelect(profileOptions(this.tree.profiles, "Inherit, or every profile"), f.profile ?? "", { "data-name": "folder-profile" });
+      const form = el("form", {}, el("h2", {}, "Folder"), field("Name", name), field("Profile of what is inside", profile));
+      const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
+      const no = el("button", { class: "btn", type: "button" }, "Cancel");
+      no.onclick = close;
+      form.append(el("div", { class: "actions" }, no, ok));
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        if (name.value.trim() && name.value.trim() !== f.name) await this.be.renameFolder(f.id, name.value.trim());
+        if ((profile.value || null) !== f.profile) await this.be.setFolderProfile(f.id, profile.value || null);
+        close();
+        await this.refreshTree();
+      };
+      return form;
+    });
   }
 
   async deleteSelected() {
@@ -1397,7 +1413,7 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [] };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1408,6 +1424,7 @@ export class App {
       const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
       const jump = makeSelect([["", "Direct"], ...this.tree.servers.filter((x) => x.id !== s.id).map((x): [string, string] => [String(x.id), x.name])], s.jump == null ? "" : String(s.jump), { "data-name": "jump" });
+      const profile = makeSelect(profileOptions(this.tree.profiles, "Its folder's, or every profile"), s.profile ?? "", { "data-name": "profile" });
       const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
@@ -1423,7 +1440,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1433,7 +1450,7 @@ export class App {
         if (!host.value.trim()) return void (err.textContent = "The host is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
-        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null };
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null };
         const loginSecret = auth.value === "agent" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {

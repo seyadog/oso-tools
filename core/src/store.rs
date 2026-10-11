@@ -86,6 +86,9 @@ pub struct Server {
     /// Port forwards (tunnels) kept for this server.
     #[serde(default)]
     pub forwards: Vec<Forward>,
+    /// The profile it belongs to (`None`: its folder's, and failing that every profile).
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -97,6 +100,40 @@ pub struct Folder {
     /// Folders start closed, and stay as the user leaves them.
     #[serde(default)]
     pub expanded: bool,
+    /// The profile of what is inside, unless a server says its own.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// The profile every installation has.
+pub const DEFAULT_PROFILE: &str = "default";
+
+/// A profile groups servers, secrets and accounts ("work", "personal"): switching it switches them together.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Profile {
+    /// Short name used as the key everywhere (`work`); never changes.
+    pub id: String,
+    /// What the window shows.
+    pub name: String,
+}
+
+impl Profile {
+    pub fn default_one() -> Profile {
+        Profile { id: DEFAULT_PROFILE.into(), name: "default".into() }
+    }
+}
+
+/// `work-laptop` from `Work laptop!`: lowercase letters and digits joined by dashes.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +150,9 @@ pub struct Store {
     next_id: u64,
     pub folders: Vec<Folder>,
     pub servers: Vec<Server>,
+    /// Saved in `profiles.json`, next to this file; always has at least the default one.
+    #[serde(skip)]
+    pub profiles: Vec<Profile>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -141,6 +181,13 @@ impl Store {
         } else {
             Store::default()
         };
+        store.profiles = std::fs::read_to_string(path.with_file_name("profiles.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Vec<Profile>>(&t).ok())
+            .unwrap_or_default();
+        if !store.profiles.iter().any(|p| p.id == DEFAULT_PROFILE) {
+            store.profiles.insert(0, Profile::default_one());
+        }
         store.path = path;
         Ok(store)
     }
@@ -153,7 +200,78 @@ impl Store {
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &self.path)?;
+        // the file of profiles appears with the first profile that is not the implicit one
+        let pfile = self.path.with_file_name("profiles.json");
+        if self.profiles != [Profile::default_one()] || pfile.exists() {
+            let tmp = pfile.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&self.profiles)?)?;
+            std::fs::rename(&tmp, &pfile)?;
+        }
         Ok(())
+    }
+
+    // ------------------------------------------------------------ profiles
+
+    /// The profile a folder is in: its own, or the nearest one above.
+    pub fn folder_profile(&self, folder: Option<u64>) -> Option<&str> {
+        let mut cur = folder;
+        let mut guard = 0;
+        while let Some(id) = cur {
+            let f = self.folder(id)?;
+            if let Some(p) = f.profile.as_deref() {
+                return Some(p);
+            }
+            cur = f.parent;
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+        }
+        None
+    }
+
+    /// The profile of a server: its own, else its folder's (`None`: every profile).
+    pub fn server_profile<'a>(&'a self, s: &'a Server) -> Option<&'a str> {
+        s.profile.as_deref().or_else(|| self.folder_profile(s.parent))
+    }
+
+    /// Does this server show in `profile`? One that belongs to no profile shows in all of them.
+    pub fn server_in(&self, s: &Server, profile: &str) -> bool {
+        self.server_profile(s).is_none_or(|p| p == profile)
+    }
+
+    /// Folders worth showing in `profile`: those that belong to it, empty ones that belong to every profile, and
+    /// every folder above one of those or above a server that shows.
+    pub fn folders_in(&self, profile: &str) -> Vec<u64> {
+        let mut shown: Vec<u64> = self
+            .folders
+            .iter()
+            .filter(|f| {
+                let own = self.folder_profile(Some(f.id));
+                own == Some(profile) || self.holds_visible(f.id, profile) || (own.is_none() && !self.holds_anything(f.id))
+            })
+            .map(|f| f.id)
+            .collect();
+        // a shown folder needs the folders it sits in
+        let mut i = 0;
+        while i < shown.len() {
+            if let Some(p) = self.folder(shown[i]).and_then(|f| f.parent) {
+                if !shown.contains(&p) {
+                    shown.push(p);
+                }
+            }
+            i += 1;
+        }
+        shown
+    }
+
+    fn holds_anything(&self, folder: u64) -> bool {
+        self.servers.iter().any(|s| s.parent.is_some_and(|p| self.is_inside(Some(p), folder))) || self.folders.iter().any(|f| f.id != folder && f.parent.is_some_and(|p| self.is_inside(Some(p), folder)))
+    }
+
+    /// Does the folder (or one below it) hold a server that shows in `profile`?
+    fn holds_visible(&self, folder: u64, profile: &str) -> bool {
+        self.servers.iter().any(|s| s.parent.is_some_and(|p| self.is_inside(Some(p), folder)) && self.server_in(s, profile))
     }
 
     pub fn new_id(&mut self) -> u64 {
@@ -206,7 +324,7 @@ impl Store {
 
     pub fn add_folder(&mut self, name: String, parent: Option<u64>) -> u64 {
         let id = self.new_id();
-        self.folders.push(Folder { id, name, parent, expanded: false });
+        self.folders.push(Folder { id, name, parent, expanded: false, profile: None });
         id
     }
 
@@ -374,6 +492,7 @@ mod tests {
             has_secret: false,
             has_sudo: false,
             forwards: vec![],
+            profile: None,
         }
     }
 
@@ -441,5 +560,68 @@ mod tests {
         let s2 = Store::load_from(path).unwrap();
         assert_eq!(s2.servers.len(), 1);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn named(store: &mut Store, name: &str, parent: Option<u64>, profile: Option<&str>) -> u64 {
+        let mut s = srv(name, parent);
+        s.profile = profile.map(str::to_string);
+        store.add_server(s)
+    }
+
+    #[test]
+    fn a_server_takes_its_folders_profile_unless_it_has_its_own() {
+        let mut st = Store::default();
+        let work = st.add_folder("work".into(), None);
+        let deep = st.add_folder("deep".into(), Some(work));
+        st.folders.iter_mut().find(|f| f.id == work).unwrap().profile = Some("work".into());
+        let a = named(&mut st, "a", Some(deep), None);
+        let b = named(&mut st, "b", Some(deep), Some("home"));
+        let c = named(&mut st, "c", None, None);
+        assert_eq!(st.server_profile(st.server(a).unwrap()), Some("work"), "inherited through two folders");
+        assert_eq!(st.server_profile(st.server(b).unwrap()), Some("home"), "its own wins");
+        assert_eq!(st.server_profile(st.server(c).unwrap()), None);
+        assert!(st.server_in(st.server(a).unwrap(), "work") && !st.server_in(st.server(a).unwrap(), "home"));
+        assert!(st.server_in(st.server(b).unwrap(), "home") && !st.server_in(st.server(b).unwrap(), "work"));
+        assert!(st.server_in(st.server(c).unwrap(), "work") && st.server_in(st.server(c).unwrap(), "home"), "no profile: shown in all");
+    }
+
+    #[test]
+    fn folders_show_when_they_belong_or_hold_something_that_does() {
+        let mut st = Store::default();
+        let shared = st.add_folder("shared".into(), None);
+        let work = st.add_folder("work".into(), None);
+        let clients = st.add_folder("clients".into(), Some(shared));
+        let empty = st.add_folder("empty".into(), None);
+        st.folders.iter_mut().find(|f| f.id == work).unwrap().profile = Some("work".into());
+        named(&mut st, "w", Some(clients), Some("work"));
+        named(&mut st, "h", Some(work), None);
+        let home: Vec<u64> = st.folders_in("home");
+        assert!(!home.contains(&work) && !home.contains(&clients) && !home.contains(&shared), "nothing for home inside them: {home:?}");
+        assert!(home.contains(&empty), "an empty folder of no profile shows everywhere");
+        let w = st.folders_in("work");
+        assert!(w.contains(&work) && w.contains(&clients) && w.contains(&shared), "the folder above one that shows also shows: {w:?}");
+    }
+
+    #[test]
+    fn profiles_live_in_their_own_file_and_default_always_exists() {
+        let dir = std::env::temp_dir().join(format!("oso-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("servers.json");
+        let mut s = Store::load_from(path.clone()).unwrap();
+        assert_eq!(s.profiles, vec![Profile::default_one()]);
+        s.save().unwrap();
+        assert!(!dir.join("profiles.json").exists(), "nothing is written for the implicit profile");
+        s.profiles.push(Profile { id: "work".into(), name: "Work".into() });
+        s.save().unwrap();
+        let again = Store::load_from(path).unwrap();
+        assert_eq!(again.profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["default", "work"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn profile_ids_are_slugs() {
+        assert_eq!(slug("Work laptop!"), "work-laptop");
+        assert_eq!(slug("  Casa  "), "casa");
+        assert_eq!(slug("!!!"), "");
     }
 }

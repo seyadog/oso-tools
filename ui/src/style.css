@@ -276,3 +276,9 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .srow .secret { justify-content: flex-end; }
 .srow .secret .pw { flex: none; width: 110px; }
 .srow .old { color: var(--yellow, #e5c07b); font-size: 11.5px; margin: 0 6px; white-space: nowrap; }
+
+/* Profiles */
+.profile-slot { padding: 0 10px 6px; }
+.profile-bar { display: flex; align-items: center; gap: 4px; }
+.profile-bar .select { flex: 1; min-width: 0; }
+.prow { grid-template-columns: 1fr auto; }
