@@ -576,7 +576,7 @@ await page.evaluate(async () => { for (const s of window.oso.tree.servers) await
 // 13g. files: dropped on a terminal, or typed
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
-await page.keyboard.press("Alt+f");
+await page.keyboard.press("Alt+u");
 await settle(250);
 check("Alt+F asks what to copy for the server of the terminal", (await page.$eval("#modal-bg h2", (e) => e.textContent)).includes("web-1"));
 await page.fill('#modal-bg textarea[name="local"]', "/tmp/a b.txt\n'/tmp/c.txt'\n");
@@ -601,7 +601,7 @@ check("dropping them asks where, with the paths already filled in", (await page.
 await page.click("#modal-bg button:has-text('Cancel')");
 await settle(150);
 // download, and a failure
-await page.keyboard.press("Alt+f");
+await page.keyboard.press("Alt+u");
 await settle(250);
 await page.click('#modal-bg [data-name="direction"] .sel-btn');
 await page.click('#modal-bg [data-name="direction"] .sel-item[data-value="down"]');
@@ -613,7 +613,7 @@ await page.click("#transfers .xfer.failed button");
 await settle(200);
 check("closing it removes it", (await page.$$("#transfers .xfer.failed")).length === 0);
 await clearAll();
-await page.keyboard.press("Alt+f");
+await page.keyboard.press("Alt+u");
 await settle(200);
 check("without a terminal there is nothing to copy to", (await page.$$("#modal-bg")).length === 0 || true);
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

@@ -45,7 +45,7 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "broadcast.toggle": "Mod+B",
   "group.save": "Mod+G",
   "watch.toggle": "Mod+A",
-  "files.open": "Mod+F",
+  "files.open": "Mod+U",
   "tunnels.open": "Mod+T",
   "search": "Mod+K",
   "sudo.fill": "Mod+P",
