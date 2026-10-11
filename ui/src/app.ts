@@ -831,7 +831,7 @@ export class App {
         el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
         el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
       ),
-      el("div", { class: "tip" }, "Passwords are kept in the vault (bottom left): unlock it to read, copy or change them. The main key of every shortcut can be changed in Settings."),
+      el("div", { class: "tip" }, "Secrets are kept in the vault (bottom left): unlock it to read, copy or change them. The main key of every shortcut can be changed in Settings."),
     );
     return home;
   }
