@@ -1,6 +1,6 @@
 // The layout of a screen in mosaic mode: a tree of divisions. Every division is side by side or stacked and
-// holds two parts, each a terminal or another division, so any arrangement can be built (like Hyprland's
-// default layout, but you can drag things around).
+// holds two parts, each a terminal or another division, so any arrangement can be built
+// (and you can drag things around).
 
 export type Id = number;
 export type Side = "left" | "right" | "top" | "bottom";
@@ -119,7 +119,7 @@ export function autoSide(r: Rect): Side {
   return "bottom";
 }
 
-/** Like Hyprland's default layout: each terminal splits the one before it, beside or below by the shape of its box. */
+/** Automatic layout: each terminal splits the one before it, beside or below by the shape of its box. */
 export function dwindle(ids: Id[], area: Rect): Tree | null {
   if (ids.length === 0) return null;
   let t = leaf(ids[0]);

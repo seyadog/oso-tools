@@ -1,4 +1,4 @@
-// Hotkeys: every action has a default (mine, Hyprland style) and you can change any of them in hotkeys.json.
+// Hotkeys: every action has a default and you can change any of them in hotkeys.json.
 // A combo is written like "Alt+Shift+2" or "Alt+Left". Keys are matched by their physical place (the digit
 // row, the letter keys), so the same combo works on every keyboard layout.
 

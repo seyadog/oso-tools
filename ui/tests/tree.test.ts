@@ -41,7 +41,7 @@ describe("the tree of divisions", () => {
     expect(contains(t, 9)).toBe(true);
   });
 
-  it("opens terminals by themselves like Hyprland and never makes one too small", () => {
+  it("opens terminals by themselves and never makes one too small", () => {
     const t = dwindle([1, 2, 3, 4], AREA)!;
     const { boxes } = layout(t, AREA);
     const at = (id: number) => boxes.find((b) => b.id === id)!.rect;

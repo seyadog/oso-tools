@@ -1,4 +1,4 @@
-// Screens (like Hyprland's workspaces): each has its own tabs. A tab is one terminal, or several tiled together
+// The workspace: one row of tabs. A tab is one terminal, or several tiled together
 // (a mosaic); every terminal is born as a tab and drag and drop joins them or sets them apart. This is the whole
 // state of the window and every way to change it, with no DOM in it, so it is tested on its own.
 

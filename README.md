@@ -4,7 +4,7 @@
 
 # oso
 
-A graphical SSH workspace for Linux: your servers in a tree, terminals that tile themselves like Hyprland,
+A graphical SSH workspace for Linux: your servers in a tree, terminals that tile themselves,
 **tabs** like a browser's (`Alt+1`…`Alt+9`); a tab is one terminal, or several tiled together, and hotkeys
 you can change. Passwords live in an encrypted vault and are typed for you at the prompt they belong to.
 
@@ -21,7 +21,7 @@ Servers, folders and the vault live in `~/.config/oso` (`servers.json`, `vault.j
 ## Using it
 
 - **Tabs:** one row, like a browser: `Alt+1`…`Alt+8` go to that tab, `Alt+9` to the last one, `Alt+,` / `Alt+.` to the previous / next. Numbers have no gaps (there is no tab 3 without tab 2). Nothing happens for a number with no tab.
-- **Tabs and mosaic:** every terminal is born as a tab (numbered 1, 2, 3…). Drag a tab down onto the screen and it joins the one you are looking at, side by side: the two become *one* tab (it shows a ▦ and the count). Drag a terminal by its title up to the tab bar and it is a tab again. Hosts from the left list can be dragged onto the screen too. `Alt+V` / `Alt+H` open the next terminal inside the current tab (right / below); `Alt+M` joins every tab in one mosaic, and again sets them apart. New terminals inside a mosaic tile like Hyprland's dwindle (beside if the box is wide, below if tall, never too small).
+- **Tabs and mosaic:** every terminal is born as a tab (numbered 1, 2, 3…). Drag a tab down onto the screen and it joins the one you are looking at, side by side: the two become *one* tab (it shows a ▦ and the count). Drag a terminal by its title up to the tab bar and it is a tab again. Hosts from the left list can be dragged onto the screen too. `Alt+V` / `Alt+H` open the next terminal inside the current tab (right / below); `Alt+M` joins every tab in one mosaic, and again sets them apart. New terminals inside a mosaic tile automatically (beside if the box is wide, below if tall, never too small).
 - **Placing terminals:** `Alt+V` / `Alt+H` open a new one to the right / below. Drag a terminal by its title (or a tab from the bar) to the edge of another: it docks there and takes half; in the middle it trades places. Drag the line between two to resize. `Alt+arrows` move the keyboard between terminals, `Alt+Shift+arrows` move the terminal itself.
 - **Closing:** the **×** on a terminal, or `Alt+W`. A session that ended cleanly closes itself; one that failed stays with `Enter: reconnect`.
 - **Broadcast:** `Alt+B` / `⇉ all`: what you type goes to every terminal of the tab.
