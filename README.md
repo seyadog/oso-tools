@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="160" alt="oso, a brown bear sleeping on its back">
+</p>
+
 # oso
 
 A graphical SSH workspace for Linux: your servers in a tree, terminals that tile themselves like Hyprland,
