@@ -12,6 +12,8 @@ pub enum Auth {
     Agent,
     Key,
     Password,
+    /// A private key kept in the vault, offered by oso's own ssh-agent.
+    VaultKey,
 }
 
 impl Auth {
@@ -20,6 +22,7 @@ impl Auth {
             Auth::Agent => "SSH agent",
             Auth::Key => "Private key",
             Auth::Password => "Password",
+            Auth::VaultKey => "Key from the vault",
         }
     }
 
@@ -27,12 +30,13 @@ impl Auth {
         match self {
             Auth::Agent => Auth::Key,
             Auth::Key => Auth::Password,
-            Auth::Password => Auth::Agent,
+            Auth::Password => Auth::VaultKey,
+            Auth::VaultKey => Auth::Agent,
         }
     }
 
     pub fn prev(self) -> Self {
-        self.next().next()
+        self.next().next().next()
     }
 }
 
@@ -69,7 +73,7 @@ pub struct Forward {
     pub port: u16,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Server {
     pub id: u64,
     pub name: String,
@@ -233,6 +237,13 @@ pub struct Store {
     /// Saved in `proxies.json`, next to this file.
     #[serde(skip)]
     pub proxies: Vec<Proxy>,
+    /// For servers that log in with a key from the vault: the file with its public half (written when the vault is
+    /// unlocked), which `ssh -i` uses to pick that key from oso's agent. Never saved.
+    #[serde(skip)]
+    pub key_files: std::collections::HashMap<u64, PathBuf>,
+    /// Extra `ssh` options for every connection and every hop of a chain (the tests use it to trust their own sshd).
+    #[serde(skip)]
+    pub extra_options: Vec<String>,
     #[serde(skip)]
     path: PathBuf,
 }

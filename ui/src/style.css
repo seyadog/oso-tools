@@ -298,3 +298,9 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .row.acct-head { cursor: default; }
 .row.acct { padding-left: 24px; cursor: default; }
 .btn.small { padding: 2px 10px; font-size: 12px; }
+
+/* Import from ~/.ssh */
+.irow { grid-template-columns: 1fr auto; }
+.irow .who { cursor: pointer; }
+.irow input[type="password"] { width: 150px; }
+.irow input[type="checkbox"] { margin-right: 8px; }

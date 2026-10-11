@@ -3,10 +3,12 @@
 //! is tested without a screen.
 
 use crate::accounts::{self, AccountsView, Runner};
+use crate::agent::{self, KeyProvider};
 use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
+use crate::ssh_import::{self, Preview};
 use crate::store::{Auth, DEFAULT_PROFILE, Forward, ForwardKind, NodeId, Profile, Proxy, Server, Store, slug};
 use crate::vault::{Kind, SecretMeta, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +19,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crate::daemon::Stream as SessionEvent;
+
+/// A key of `~/.ssh` chosen for the import, with its passphrase when it has one.
+#[derive(serde::Deserialize)]
+pub struct ImportKey {
+    pub path: String,
+    pub passphrase: Option<String>,
+}
+
+/// What the person chose in the import preview: keys by path, hosts by alias.
+#[derive(serde::Deserialize)]
+pub struct ImportRequest {
+    pub keys: Vec<ImportKey>,
+    pub hosts: Vec<String>,
+}
+
+#[derive(Serialize, Default, Debug)]
+pub struct ImportResult {
+    pub keys_added: Vec<String>,
+    pub hosts_added: Vec<String>,
+    /// What could not be done, in words.
+    pub problems: Vec<String>,
+    /// The files that were imported, for the question "delete the originals?". oso never deletes them by itself.
+    pub originals: Vec<String>,
+}
 
 /// A session as the window needs to know it.
 #[derive(Serialize, Clone, Debug)]
@@ -113,13 +139,15 @@ pub struct Engine {
     pub runner: Box<dyn Runner>,
     /// Servers whose network question was answered "connect anyway", once.
     network_ok: std::collections::HashSet<u64>,
+    /// Where oso's own ssh-agent listens, once it runs (`start_agent`).
+    pub agent_sock: Option<std::path::PathBuf>,
 }
 
 impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default() }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -169,6 +197,9 @@ impl Engine {
             if let Some(why) = connect::proxy_problem(&self.store, server_id) {
                 return Err(OpenError::Other(why));
             }
+            if let Some(why) = connect::key_problem(&self.store, server_id) {
+                return Err(OpenError::Other(why));
+            }
             if let Some((wanted, current)) = self.network_mismatch(server_id) {
                 return Err(OpenError::Network { wanted, current });
             }
@@ -179,6 +210,8 @@ impl Engine {
         let mut plan = connect::plan(&self.store, &mut self.vault, server_id, rows, cols, use_vault).ok_or(OpenError::NoSuchServer)?;
         if server_id == LOCAL {
             self.prepare_local(&mut plan, use_vault);
+        } else {
+            self.agent_env(server_id, &mut plan.opts)?;
         }
         let title = plan.title.clone();
         self.spawn(plan.opts, title, server_id).map_err(|e| OpenError::Other(format!("{e:#}")))
@@ -207,6 +240,11 @@ impl Engine {
                 env.push((k, v));
             }
         }
+        // git and ssh in this terminal find oso's agent (which hands on to the agent that was there before)
+        if let Some(sock) = &self.agent_sock {
+            env.retain(|(k, _)| k != "SSH_AUTH_SOCK");
+            env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
+        }
         plan.opts.env = Some(env);
         plan.opts.agent = self.agent_ok();
         let name = self.store.profiles.iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or(profile.clone());
@@ -216,6 +254,19 @@ impl Engine {
         if self.vault.exists() && !unlocked {
             plan.title.push_str(" · vault locked");
         }
+    }
+
+    /// A connection that uses a key from the vault finds oso's agent through `SSH_AUTH_SOCK`.
+    fn agent_env(&self, server_id: u64, opts: &mut SpawnOpts) -> std::result::Result<(), OpenError> {
+        if !connect::uses_vault_key(&self.store, server_id) {
+            return Ok(());
+        }
+        let sock = self.agent_sock.as_ref().ok_or_else(|| OpenError::Other("oso's ssh-agent is not running, so a key kept in the vault cannot be used".into()))?;
+        let mut env = opts.env.take().unwrap_or_else(connect::client_env);
+        env.retain(|(k, _)| k != "SSH_AUTH_SOCK");
+        env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
+        opts.env = Some(env);
+        Ok(())
     }
 
     /// Does the background server in use know about tokens (an older one, still running, does not)?
@@ -341,7 +392,9 @@ impl Engine {
         })?;
         // an old vault was migrated by number: name its secrets after their servers
         let names: HashMap<u64, String> = self.store.servers.iter().map(|s| (s.id, s.name.clone())).chain([(LOCAL, "this computer".to_string())]).collect();
-        self.vault.relabel_hosts(|id| names.get(&id).cloned()).map_err(|e| format!("{e:#}"))
+        self.vault.relabel_hosts(|id| names.get(&id).cloned()).map_err(|e| format!("{e:#}"))?;
+        self.refresh_key_files();
+        Ok(())
     }
 
     fn host_label(&self, server_id: u64) -> String {
@@ -388,12 +441,19 @@ impl Engine {
     /// Creates (`meta.id == 0`) or changes a secret; `None` keeps the value of an existing one. (The window offers
     /// "agents may see it" switched on for an API key and off for the rest.)
     pub fn secret_save(&mut self, meta: SecretMeta, value: Option<&str>) -> Result<u64> {
-        self.vault.save_secret(meta, value)
+        let normalized = match (meta.kind, value.filter(|v| !v.trim().is_empty())) {
+            (crate::vault::SecretKind::SshKey, Some(v)) => Some(check_ssh_key(v)?),
+            (_, v) => v.map(str::to_string),
+        };
+        let id = self.vault.save_secret(meta, normalized.as_deref())?;
+        self.refresh_key_files();
+        Ok(id)
     }
 
     /// Deletes a secret and keeps the flags of the servers that used it in step.
     pub fn secret_delete(&mut self, id: u64) -> Result<()> {
         let touched = self.vault.delete_secret(id)?;
+        self.refresh_key_files();
         for server in touched {
             let links = self.vault.links(server);
             self.set_flags(server, |s| {
@@ -441,6 +501,7 @@ impl Engine {
             .map(|s| {
                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                 v["profile_eff"] = self.store.server_profile(s).map(Value::from).unwrap_or(Value::Null);
+                v["vault_key"] = self.vault.links(s.id).key.map(Value::from).unwrap_or(Value::Null);
                 v
             })
             .collect();
@@ -524,6 +585,238 @@ impl Engine {
             self.set_active_profile(DEFAULT_PROFILE)?;
         }
         Ok(())
+    }
+
+    // ---------------------------------------------------------------- ssh keys and oso's agent
+
+    /// Starts oso's ssh-agent on its usual socket, handing on to the agent that was running before (if any).
+    pub fn start_agent(engine: &Arc<std::sync::Mutex<Engine>>) -> Result<agent::Agent> {
+        let path = agent::socket_path();
+        let upstream = std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from).filter(|p| p.exists());
+        Self::start_agent_at(engine, path, upstream)
+    }
+
+    pub fn start_agent_at(engine: &Arc<std::sync::Mutex<Engine>>, path: std::path::PathBuf, upstream: Option<std::path::PathBuf>) -> Result<agent::Agent> {
+        let keys: Arc<dyn KeyProvider> = Arc::clone(engine) as Arc<dyn KeyProvider>;
+        let a = agent::start(path.clone(), keys, upstream)?;
+        if let Ok(mut e) = engine.lock() {
+            e.agent_sock = Some(path);
+        }
+        Ok(a)
+    }
+
+    /// The keys of the vault that can sign (an encrypted one cannot), with the secret's name as comment.
+    fn parsed_keys(&self) -> Vec<(u64, ssh_key::PrivateKey, String)> {
+        self.vault
+            .ssh_keys()
+            .into_iter()
+            .filter_map(|(id, name, text)| ssh_key::PrivateKey::from_openssh(text.as_bytes()).ok().filter(|k| !k.is_encrypted()).map(|k| (id, k, name)))
+            .collect()
+    }
+
+    pub fn agent_identities(&self) -> Vec<(Vec<u8>, String)> {
+        self.parsed_keys().iter().filter_map(|(_, k, name)| agent::identity_of(k, name)).collect()
+    }
+
+    pub fn agent_sign(&self, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>> {
+        let (_, key, _) = self.parsed_keys().into_iter().find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
+        agent::sign_with(&key, data, flags)
+    }
+
+    /// The server logs in with this key of the vault (`None`: unlink). The server's authentication becomes
+    /// "key from the vault" when a key is given.
+    pub fn server_set_key(&mut self, server_id: u64, secret: Option<u64>) -> Result<()> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        let mut s = self.store.server(server_id).context("this server no longer exists")?.clone();
+        self.vault.set_key_link(server_id, secret)?;
+        if secret.is_some() {
+            s.auth = Auth::VaultKey;
+            self.store.update_server(s);
+            self.store.save()?;
+        }
+        self.refresh_key_files();
+        Ok(())
+    }
+
+    /// Writes the public half of the key of every server that has one to `<config>/keys/`, where `ssh -i` finds it.
+    /// Public halves are not secrets.
+    fn refresh_key_files(&mut self) {
+        self.store.key_files.clear();
+        if !self.vault.is_unlocked() {
+            return;
+        }
+        let dir = self.config_dir().join("keys");
+        let keys: HashMap<u64, (ssh_key::PrivateKey, String)> = self.parsed_keys().into_iter().map(|(id, k, name)| (id, (k, name))).collect();
+        let ids: Vec<u64> = self.store.servers.iter().map(|s| s.id).collect();
+        for server in ids {
+            let Some(secret) = self.vault.links(server).key else { continue };
+            let Some((key, name)) = keys.get(&secret) else { continue };
+            let Ok(mut text) = key.public_key().to_openssh() else { continue };
+            text.push('\n');
+            let file = dir.join(format!("{secret}-{}.pub", slug(name)));
+            let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, text));
+            if written.is_ok() {
+                self.store.key_files.insert(server, file);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- importing from ~/.ssh
+
+    fn ssh_dir(dir: Option<&str>) -> (std::path::PathBuf, std::path::PathBuf) {
+        let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()).unwrap_or_default();
+        (dir.map(std::path::PathBuf::from).unwrap_or_else(|| home.join(".ssh")), home)
+    }
+
+    /// What `~/.ssh` has that could come into oso (read only).
+    pub fn import_preview(&self, dir: Option<&str>) -> Preview {
+        let (dir, home) = Self::ssh_dir(dir);
+        ssh_import::scan(&dir, &home)
+    }
+
+    /// Brings the chosen keys (decrypted with the passphrase given, then kept in the vault) and hosts into oso.
+    /// The originals are not touched. A host that uses an imported key logs in with it from the vault.
+    pub fn import_apply(&mut self, dir: Option<&str>, req: ImportRequest) -> Result<ImportResult> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        let (dir, home) = Self::ssh_dir(dir);
+        let root = dir.canonicalize().with_context(|| format!("{} is not there", dir.display()))?;
+        let preview = ssh_import::scan(&dir, &home);
+        let mut out = ImportResult::default();
+        // secret ids by canonical path of the file they came from
+        let mut by_path: HashMap<std::path::PathBuf, u64> = HashMap::new();
+        let known: Vec<(Vec<u8>, u64)> = self.parsed_keys().into_iter().filter_map(|(id, k, _)| k.public_key().to_bytes().ok().map(|b| (b, id))).collect();
+
+        for k in req.keys {
+            let Ok(path) = std::path::Path::new(&k.path).canonicalize() else {
+                out.problems.push(format!("{} is not there", k.path));
+                continue;
+            };
+            if !path.starts_with(&root) {
+                out.problems.push(format!("{} is not inside {}", k.path, root.display()));
+                continue;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if preview.keys.iter().find(|f| std::path::Path::new(&f.path).canonicalize().ok().as_deref() == Some(&path)).is_some_and(|f| !f.unsupported.is_empty()) {
+                out.problems.push(format!("{name}: kept as a file (a security key or an old format cannot go into the vault)"));
+                continue;
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    out.problems.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
+            let mut key = match ssh_key::PrivateKey::from_openssh(text.trim().as_bytes()) {
+                Ok(key) => key,
+                Err(_) => {
+                    out.problems.push(format!("{name}: not a key oso can read"));
+                    continue;
+                }
+            };
+            if key.is_encrypted() {
+                let pass = zeroize::Zeroizing::new(k.passphrase.unwrap_or_default());
+                match key.decrypt(pass.as_bytes()) {
+                    Ok(plain) => key = plain,
+                    Err(_) => {
+                        out.problems.push(format!("{name}: wrong passphrase (or none given)"));
+                        continue;
+                    }
+                }
+            }
+            let blob = key.public_key().to_bytes().unwrap_or_default();
+            if let Some((_, id)) = known.iter().find(|(b, _)| *b == blob) {
+                out.problems.push(format!("{name}: already in the vault"));
+                by_path.insert(path, *id);
+                continue;
+            }
+            let plain = zeroize::Zeroizing::new(key.to_openssh(ssh_key::LineEnding::LF).map_err(|e| anyhow!("{name}: {e}"))?.to_string());
+            let meta = SecretMeta { id: 0, name: name.clone(), kind: crate::vault::SecretKind::SshKey, profile: None, env_var: None, agent_visible: false, notes: format!("imported from {}", path.display()), updated: 0 };
+            let id = self.vault.save_secret(meta, Some(plain.as_str()))?;
+            by_path.insert(path.clone(), id);
+            out.keys_added.push(name);
+            out.originals.push(path.to_string_lossy().into_owned());
+        }
+        self.refresh_key_files();
+
+        // hosts, with the hops they go through
+        let config: HashMap<String, ssh_import::HostEntry> = preview.hosts.iter().map(|h| (h.alias.clone(), h.clone())).collect();
+        for alias in &req.hosts {
+            match config.get(alias) {
+                Some(h) => {
+                    if let Err(e) = self.import_host(h, &config, &by_path, &mut out, 0) {
+                        out.problems.push(format!("{alias}: {e:#}"));
+                    }
+                }
+                None => out.problems.push(format!("{alias}: not in the config")),
+            }
+        }
+        self.store.save()?;
+        self.refresh_key_files();
+        Ok(out)
+    }
+
+    /// The id of a server for this config entry: the one already there, or a new one.
+    fn import_host(&mut self, h: &ssh_import::HostEntry, config: &HashMap<String, ssh_import::HostEntry>, keys: &HashMap<std::path::PathBuf, u64>, out: &mut ImportResult, depth: u8) -> Result<u64> {
+        if let Some(s) = self.store.servers.iter().find(|s| s.name == h.alias || (s.host == h.host && s.port == h.port && s.user == h.user)) {
+            if depth == 0 {
+                out.problems.push(format!("{}: already a server here", h.alias));
+            }
+            return Ok(s.id);
+        }
+        if depth > 8 {
+            bail!("too many hops");
+        }
+        // hops first: the last one named is the one this server is reached through
+        let mut previous: Option<u64> = None;
+        if let Some(j) = &h.proxy_jump {
+            for (user, host, port) in ssh_import::parse_jump(j) {
+                let entry = config.get(&host).cloned().unwrap_or_else(|| ssh_import::HostEntry { alias: host.clone(), host: host.clone(), user: user.clone().unwrap_or_else(|| h.user.clone()), port: port.unwrap_or(22), ..Default::default() });
+                let id = self.import_host(&entry, config, keys, out, depth + 1)?;
+                if let Some(prev) = previous.filter(|p| self.store.server(id).is_some_and(|s| s.jump.is_none()) && !self.store.would_cycle(id, *p)) {
+                    self.store.move_via(id, Some(prev));
+                }
+                previous = Some(id);
+            }
+        }
+        let key = h.identity_file.as_ref().and_then(|f| std::path::Path::new(f).canonicalize().ok());
+        let secret = key.as_ref().and_then(|p| keys.get(p)).copied();
+        let (auth, key_path) = match (&secret, &key) {
+            (Some(_), _) => (Auth::VaultKey, String::new()),
+            (None, Some(p)) if p.is_file() => (Auth::Key, p.to_string_lossy().into_owned()),
+            _ => (Auth::Agent, String::new()),
+        };
+        let server = Server { name: h.alias.clone(), host: h.host.clone(), port: h.port, user: h.user.clone(), auth, key_path, jump: previous, ..Default::default() };
+        let id = self.store.add_server(server);
+        if let Some(sec) = secret {
+            self.vault.set_key_link(id, Some(sec))?;
+        }
+        out.hosts_added.push(h.alias.clone());
+        Ok(id)
+    }
+
+    /// Deletes the imported key files (and their `.pub`) the person asked to be deleted. Only `id_*` files inside the
+    /// folder that was scanned are ever touched; the window asks first and offers "keep them" as the first choice.
+    pub fn import_delete_originals(&mut self, dir: Option<&str>, paths: &[String]) -> Result<Vec<String>> {
+        let (dir, _) = Self::ssh_dir(dir);
+        let root = dir.canonicalize().context("that folder is not there")?;
+        let mut gone = vec![];
+        for p in paths {
+            let Ok(path) = std::path::Path::new(p).canonicalize() else { continue };
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if !path.starts_with(&root) || path.parent() != Some(root.as_path()) || !name.starts_with("id_") || name.ends_with(".pub") {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                gone.push(name.clone());
+                let _ = std::fs::remove_file(path.with_file_name(format!("{name}.pub")));
+            }
+        }
+        Ok(gone)
     }
 
     // ---------------------------------------------------------------- accounts
@@ -705,7 +998,7 @@ impl Engine {
             self.set_flags(id, |s| s.has_sudo = secret.is_some());
         }
         // A server that no longer logs in with a secret should not keep one.
-        if self.store.server(id).is_some_and(|s| s.auth == Auth::Agent && s.has_secret) && self.vault.is_unlocked() {
+        if self.store.server(id).is_some_and(|s| matches!(s.auth, Auth::Agent | Auth::VaultKey) && s.has_secret) && self.vault.is_unlocked() {
             self.vault.set(id, Kind::Login, None, &name)?;
             self.set_flags(id, |s| s.has_secret = false);
         }
@@ -808,7 +1101,11 @@ impl Engine {
         self.tunnel_stop(server_id, forward_id);
         let mut argv = connect::tunnel_argv(&self.store, &server, &fwd, &self.ssh_extra);
         argv.insert(1, "-v".into());
-        let opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        if let Some(why) = connect::key_problem(&self.store, server_id) {
+            return Err(OpenError::Other(why));
+        }
+        let mut opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        self.agent_env(server_id, &mut opts)?;
         let tunnel = match Job::spawn(opts) {
             Ok(job) => Tunnel { job: Some(job), up: false, failed: None },
             Err(e) => Tunnel { job: None, up: false, failed: Some(format!("{e:#}")) },
@@ -873,7 +1170,11 @@ impl Engine {
         }
         let dir = if upload { connect::Direction::Up } else { connect::Direction::Down };
         let argv = connect::scp_argv(&self.store, &server, dir, &local, remote, &self.ssh_extra);
-        let opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        if let Some(why) = connect::key_problem(&self.store, server_id) {
+            return Err(OpenError::Other(why));
+        }
+        let mut opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        self.agent_env(server_id, &mut opts)?;
         let job = Job::spawn(opts).map_err(|e| OpenError::Other(format!("{e:#}")))?;
         let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string());
         let what = if upload {
@@ -924,6 +1225,30 @@ impl Engine {
             self.store.save()?;
         }
         Ok(ok)
+    }
+}
+
+/// A private key as it is kept in the vault: OpenSSH format, with no passphrase (the agent has to be able to sign).
+fn check_ssh_key(text: &str) -> Result<String> {
+    let key = ssh_key::PrivateKey::from_openssh(text.trim().as_bytes()).map_err(|_| anyhow!("that is not a private key in OpenSSH format (it starts with -----BEGIN OPENSSH PRIVATE KEY-----)"))?;
+    if key.is_encrypted() {
+        bail!("this key has a passphrase: remove it first (ssh-keygen -p -N \"\" -f <file>), or use the import, which asks for it once");
+    }
+    let mut out = key.to_openssh(ssh_key::LineEnding::LF).map_err(|e| anyhow!("could not read the key: {e}"))?.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// The window's engine is also the key source of oso's agent: the keys exist while the vault is unlocked.
+impl KeyProvider for std::sync::Mutex<Engine> {
+    fn identities(&self) -> Vec<(Vec<u8>, String)> {
+        self.lock().map(|e| e.agent_identities()).unwrap_or_default()
+    }
+
+    fn sign(&self, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>> {
+        self.lock().ok()?.agent_sign(blob, data, flags)
     }
 }
 

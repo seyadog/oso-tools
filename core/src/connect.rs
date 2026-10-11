@@ -103,6 +103,19 @@ pub fn outer_proxy<'a>(store: &'a Store, id: u64) -> Option<&'a Proxy> {
     hop.proxy.and_then(|p| store.proxy(p))
 }
 
+/// Does reaching `id` use a key kept in the vault (so the session needs oso's agent)?
+pub fn uses_vault_key(store: &Store, id: u64) -> bool {
+    store.server(id).is_some_and(|s| s.auth == Auth::VaultKey) || store.jump_chain(id).iter().any(|h| h.auth == Auth::VaultKey)
+}
+
+/// The name of a server on the way (or `id` itself) whose vault key has no public file: the vault has not given it yet.
+pub fn key_problem(store: &Store, id: u64) -> Option<String> {
+    let mut hops: Vec<&Server> = store.jump_chain(id);
+    hops.extend(store.server(id));
+    let missing = hops.into_iter().find(|h| h.auth == Auth::VaultKey && !store.key_files.contains_key(&h.id))?;
+    Some(format!("{} logs in with a key kept in the vault, and none is chosen for it (or the vault has not been unlocked yet): choose it in the server's form.", missing.name))
+}
+
 /// Why `id` cannot be reached through its proxy (a words-for-a-person answer), or `None`.
 pub fn proxy_problem(store: &Store, id: u64) -> Option<String> {
     let hop = store.jump_chain(id).first().copied().or_else(|| store.server(id))?;
@@ -131,9 +144,18 @@ pub fn proxy_env(p: &Proxy) -> Vec<(String, String)> {
 }
 
 /// Options shared by direct connections and by the hops of a ProxyCommand.
-fn auth_args(s: &Server) -> Vec<String> {
+fn auth_args(store: &Store, s: &Server) -> Vec<String> {
     match s.auth {
         Auth::Agent => vec![],
+        // oso's agent has the key; its public half says which one this server wants
+        Auth::VaultKey => {
+            let mut a = vec![];
+            if let Some(f) = store.key_files.get(&s.id) {
+                a.extend(["-i".to_string(), f.to_string_lossy().into_owned()]);
+            }
+            a.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
+            a
+        }
         Auth::Key => vec!["-i".into(), expand_tilde(&s.key_path), "-o".into(), "IdentitiesOnly=yes".into()],
         Auth::Password => vec![
             "-o".into(),
@@ -146,13 +168,14 @@ fn auth_args(s: &Server) -> Vec<String> {
 
 /// `ssh` command that tunnels through `chain` (outermost first), as a single shell string. `via` is the proxy
 /// command the outermost hop leaves through, if it has one.
-fn proxy_command(chain: &[&Server], via: Option<&str>) -> String {
+fn proxy_command(store: &Store, chain: &[&Server], via: Option<&str>) -> String {
     let Some((hop, before)) = chain.split_last() else { return String::new() };
     let mut parts = vec!["ssh".to_string()];
-    parts.extend(auth_args(hop).into_iter().map(|a| sh_quote(&a)));
+    parts.extend(auth_args(store, hop).into_iter().map(|a| sh_quote(&a)));
+    parts.extend(store.extra_options.iter().map(|a| sh_quote(a)));
     parts.extend(["-p".into(), hop.port.to_string()]);
     if !before.is_empty() {
-        parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={}", proxy_command(before, via)))]);
+        parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={}", proxy_command(store, before, via)))]);
     } else if let Some(v) = via {
         parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={v}"))]);
     }
@@ -182,7 +205,8 @@ fn ssh_argv_plain(store: &Store, s: &Server) -> Vec<String> {
 fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<String> {
     let mut a: Vec<String> = vec!["ssh".into(), "-p".into(), s.port.to_string()];
     a.extend(["-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ConnectTimeout=15".into()]);
-    a.extend(auth_args(s));
+    a.extend(auth_args(store, s));
+    a.extend(store.extra_options.iter().cloned());
     let chain = store.jump_chain(s.id);
     let via = outer_proxy(store, s.id).map(|p| proxy_command_for(tool, p));
     if chain.is_empty() {
@@ -190,7 +214,7 @@ fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<Stri
             a.extend(["-o".into(), format!("ProxyCommand={v}")]);
         }
     } else {
-        if chain.iter().all(|h| h.auth != Auth::Key) && via.is_none() {
+        if chain.iter().all(|h| h.auth != Auth::Key && h.auth != Auth::VaultKey) && via.is_none() {
             let hops: Vec<String> = chain
                 .iter()
                 .map(|h| if h.port == 22 { target(h) } else { format!("{}:{}", target(h), h.port) })
@@ -198,7 +222,7 @@ fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<Stri
             a.extend(["-J".into(), hops.join(",")]);
         } else {
             // -J cannot give each hop its own key (nor leave through a proxy), so build the tunnel by hand.
-            a.extend(["-o".into(), format!("ProxyCommand={}", proxy_command(&chain, via.as_deref()))]);
+            a.extend(["-o".into(), format!("ProxyCommand={}", proxy_command(store, &chain, via.as_deref()))]);
         }
     }
     if auto {
@@ -229,7 +253,7 @@ pub fn autofills(store: &Store, vault: &mut Vault, id: u64) -> Vec<Autofill> {
     servers.extend(store.server(id).cloned());
     let mut out = vec![];
     for s in servers {
-        if s.auth == Auth::Agent || !s.has_secret {
+        if s.auth == Auth::Agent || s.auth == Auth::VaultKey || !s.has_secret {
             continue;
         }
         let Some(secret) = vault.get(s.id, Kind::Login) else { continue };
@@ -244,7 +268,7 @@ pub fn autofills(store: &Store, vault: &mut Vault, id: u64) -> Vec<Autofill> {
 
 /// Whether opening `id` needs the vault unlocked: it or a jump host on the way has a saved secret.
 pub fn needs_vault(store: &Store, id: u64) -> bool {
-    let wants = |s: &Server| s.auth != Auth::Agent && s.has_secret;
+    let wants = |s: &Server| s.auth == Auth::VaultKey || (s.auth != Auth::Agent && s.has_secret);
     store.server(id).is_some_and(wants) || store.jump_chain(id).into_iter().any(wants)
 }
 

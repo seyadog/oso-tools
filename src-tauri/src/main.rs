@@ -5,7 +5,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use oso_core::daemon::Stream;
-use oso_core::engine::{Emit, Engine, OpenError, SessionInfo, TransferStatus, TunnelStatus, VaultStatus};
+use oso_core::engine::{Emit, Engine, ImportRequest, ImportResult, OpenError, SessionInfo, TransferStatus, TunnelStatus, VaultStatus};
 use oso_core::store::{Forward, NodeId, Proxy, Server, Store};
 use oso_core::vault::{SecretMeta, Vault};
 use serde_json::{Value, json};
@@ -14,8 +14,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct AppState {
-    engine: Mutex<Engine>,
+    /// Shared with oso's ssh-agent, which signs with the keys of the vault while it is unlocked.
+    engine: Arc<Mutex<Engine>>,
 }
+
+/// Keeps the agent alive as long as the app runs (dropping it removes its socket).
+struct AgentHolder(#[allow(dead_code)] Option<oso_core::agent::Agent>);
 
 type Res<T> = Result<T, String>;
 
@@ -165,6 +169,27 @@ fn proxy_delete(state: State<AppState>, id: u64) -> Res<()> {
 #[tauri::command]
 fn profile_set_proxy(state: State<AppState>, profile: String, proxy: Option<u64>) -> Res<()> {
     engine!(state).profile_set_proxy(&profile, proxy).map_err(err)
+}
+
+#[tauri::command]
+fn import_preview(state: State<AppState>) -> Res<oso_core::ssh_import::Preview> {
+    Ok(engine!(state).import_preview(None))
+}
+
+#[tauri::command]
+fn import_apply(state: State<AppState>, request: ImportRequest) -> Res<ImportResult> {
+    engine!(state).import_apply(None, request).map_err(err)
+}
+
+/// Only called after the window asked the person, with "keep them" as the first choice.
+#[tauri::command]
+fn import_delete_originals(state: State<AppState>, paths: Vec<String>) -> Res<Vec<String>> {
+    engine!(state).import_delete_originals(None, &paths).map_err(err)
+}
+
+#[tauri::command]
+fn server_set_key(state: State<AppState>, server_id: u64, secret: Option<u64>) -> Res<()> {
+    engine!(state).server_set_key(server_id, secret).map_err(err)
 }
 
 #[tauri::command]
@@ -385,8 +410,17 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|app| {
-            let engine = build_engine(app.handle().clone())?;
-            app.manage(AppState { engine: Mutex::new(engine) });
+            let engine = Arc::new(Mutex::new(build_engine(app.handle().clone())?));
+            // oso's ssh-agent: the keys of the vault, offered to ssh and git only while the vault is unlocked
+            let agent = match Engine::start_agent(&engine) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    eprintln!("oso: no ssh-agent ({e:#}); keys kept in the vault cannot be used");
+                    None
+                }
+            };
+            app.manage(AgentHolder(agent));
+            app.manage(AppState { engine });
             // The vault locks itself after a while without use.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -421,6 +455,10 @@ fn main() {
             proxy_save,
             proxy_delete,
             profile_set_proxy,
+            import_preview,
+            import_apply,
+            import_delete_originals,
+            server_set_key,
             secret_list,
             secret_save,
             secret_delete,

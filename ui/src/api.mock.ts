@@ -61,6 +61,7 @@ export function mockBackend(): Backend {
   // For the tests: make a session end the way a dropped connection does.
   const knobs = { failNext: 0 };
   const forgotten: string[] = [];
+  const deletedOriginals: string[] = [];
   const notices: [string, string][] = [];
   const tunnelState = new Map<string, TunnelStatus>();
   const transferList: TransferStatus[] = [];
@@ -70,6 +71,7 @@ export function mockBackend(): Backend {
   (globalThis as unknown as { __osoMock: unknown }).__osoMock = {
     knobs,
     forgotten,
+    deletedOriginals,
     notices,
     tunnelState,
     started,
@@ -175,6 +177,49 @@ export function mockBackend(): Backend {
       else if (s) s.has_secret = !!secret;
     },
     vaultChangeMaster: async () => {},
+    importPreview: async () => ({
+      keys: [
+        { path: "/home/me/.ssh/id_ed25519", name: "id_ed25519", algorithm: "ssh-ed25519", fingerprint: "SHA256:abc", comment: "me@laptop", encrypted: false, unsupported: "" },
+        { path: "/home/me/.ssh/id_work", name: "id_work", algorithm: "ssh-ed25519", fingerprint: "SHA256:def", comment: "me@work", encrypted: true, unsupported: "" },
+        { path: "/home/me/.ssh/id_old", name: "id_old", algorithm: "ssh-rsa", fingerprint: "", comment: "", encrypted: false, unsupported: "an old key format (PEM): convert it with `ssh-keygen -p -m RFC4716 -f <file>`" },
+      ],
+      hosts: [
+        { alias: "bastion", host: "bastion.example.com", user: "ops", port: 22, identity_file: "/home/me/.ssh/id_ed25519", proxy_jump: null },
+        { alias: "app", host: "app.internal", user: "deploy", port: 2200, identity_file: "/home/me/.ssh/id_work", proxy_jump: "bastion" },
+      ],
+      skipped: ["Host *.corp: a pattern, not a host"],
+    }),
+    importApply: async (req) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const out = { keys_added: [] as string[], hosts_added: [] as string[], problems: [] as string[], originals: [] as string[] };
+      for (const k of req.keys) {
+        if (k.path.endsWith("id_work") && k.passphrase !== "right") {
+          out.problems.push("id_work: wrong passphrase (or none given)");
+          continue;
+        }
+        const id = nextSecret++;
+        const name = k.path.split("/").pop()!;
+        vaultSecrets.set(id, { meta: { id, name, kind: "ssh_key", profile: null, env_var: null, agent_visible: false, notes: "imported", updated: Math.floor(Date.now() / 1000) }, value: "PRIVATE" });
+        out.keys_added.push(name);
+        out.originals.push(k.path);
+      }
+      for (const a of req.hosts) {
+        const id = next++;
+        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null });
+        out.hosts_added.push(a);
+      }
+      return out;
+    },
+    importDeleteOriginals: async (paths) => {
+      deletedOriginals.push(...paths);
+      return paths.map((p) => p.split("/").pop()!);
+    },
+    serverSetKey: async (serverId, secret) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const s = servers.find((x) => x.id === serverId)!;
+      s.vault_key = secret;
+      if (secret) s.auth = "vaultkey";
+    },
     secretList: async () => {
       if (!vault.unlocked) throw new Error("the vault is locked");
       return [...vaultSecrets.values()].map((x) => ({ ...x.meta }));
@@ -233,6 +278,7 @@ export function mockBackend(): Backend {
     open: async (serverId, _rows, _cols, useVault = true) => {
       const s = servers.find((x) => x.id === serverId);
       if (serverId && !s) throw new Error("This server no longer exists");
+      if (s?.auth === "vaultkey" && !vault.unlocked) throw new VaultLockedError();
       const wanted = s?.network?.startsWith("tailscale:") ? s.network.slice(10) : "";
       if (wanted && !networkOk.delete(serverId)) {
         const now = tools.tailscale.accounts.find((a) => a.active);

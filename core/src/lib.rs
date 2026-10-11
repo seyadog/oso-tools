@@ -2,12 +2,14 @@
 //! sessions (`session`) and the background server that keeps them alive when the window closes (`daemon`).
 
 pub mod accounts;
+pub mod agent;
 pub mod connect;
 pub mod daemon;
 pub mod engine;
 pub mod jobs;
 pub mod known_hosts;
 pub mod session;
+pub mod ssh_import;
 pub mod settings;
 pub mod store;
 pub mod vault;

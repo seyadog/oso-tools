@@ -11,6 +11,7 @@ import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
 import { accountsSection } from "./accounts_ui";
+import { importDialog } from "./import_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel } from "./tunnels";
@@ -1459,7 +1460,7 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretsDialog({ be: this.be, profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
+    secretsDialog({ be: this.be, importSsh: () => void importDialog({ be: this.be, unlock: async () => (await this.unlockDialog(false)) === "unlocked", refreshTree: () => this.refreshTree() }, () => void this.vaultDialog()), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault() }, { profile: this.tree.view_all ? "" : this.tree.active_profile });
   }
 
   async lockVault() {
@@ -1517,13 +1518,14 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
+    const keys = this.vault.unlocked ? (await this.be.secretList().catch(() => [])).filter((k) => k.kind === "ssh_key") : [];
     const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
       const port = el("input", { value: String(s.port), name: "port", inputmode: "numeric" });
       const user = el("input", { value: s.user, name: "user", autocomplete: "off", spellcheck: "false" });
-      const auth = makeSelect([["agent", "SSH agent"], ["key", "Private key"], ["password", "Password"]], s.auth, { "data-name": "auth" });
+      const auth = makeSelect([["agent", "SSH agent"], ["key", "Private key"], ["password", "Password"], ["vaultkey", "Key from the vault"]], s.auth, { "data-name": "auth" });
       const key = el("input", { value: s.key_path, name: "key", placeholder: "~/.ssh/id_ed25519", spellcheck: "false" });
       const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
@@ -1539,6 +1541,8 @@ export class App {
         this.openTunnels();
       };
       const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
+      const vaultKey = makeSelect([["", this.vault.unlocked ? (keys.length ? "Choose a key" : "No SSH key in the vault yet") : "Unlock the vault to choose"], ...keys.map((k): [string, string] => [String(k.id), k.name])], s.vault_key == null ? "" : String(s.vault_key), { "data-name": "vault-key" });
+      const vaultKeyRow = field("Key (kept in the vault, signed by oso's own ssh-agent)", vaultKey);
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
       const loginLabel = el("label", {}, "");
@@ -1546,14 +1550,15 @@ export class App {
       const rmRow = el("div", { class: "hint" }, clearLogin, " remove the saved password");
       const sync = () => {
         keyRow.style.display = auth.value === "key" ? "" : "none";
-        loginRow.style.display = auth.value === "agent" ? "none" : "";
+        vaultKeyRow.style.display = auth.value === "vaultkey" ? "" : "none";
+        loginRow.style.display = auth.value === "agent" || auth.value === "vaultkey" ? "none" : "";
         loginLabel.textContent = auth.value === "key" ? "Key passphrase (kept in the vault)" : "Password (kept in the vault)";
-        rmRow.style.display = auth.value !== "agent" && s.has_secret ? "" : "none";
+        rmRow.style.display = auth.value !== "agent" && auth.value !== "vaultkey" && s.has_secret ? "" : "none";
       };
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1564,14 +1569,19 @@ export class App {
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
         const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null };
-        const loginSecret = auth.value === "agent" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
+        const loginSecret = auth.value === "agent" || auth.value === "vaultkey" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {
           const r = await this.unlockDialog(false);
           if (r !== "unlocked") return void (err.textContent = "Unlock the vault to save a password");
         }
+        if (auth.value === "vaultkey") {
+          if (!this.vault.unlocked) return void (err.textContent = "Unlock the vault (the lock, bottom left) and open this form again to choose its key");
+          if (!vaultKey.value) return void (err.textContent = "Choose the key it logs in with");
+        }
         try {
           const id = await this.be.saveServer(next, loginSecret, sudoSecret);
+          if (auth.value === "vaultkey") await this.be.serverSetKey(id, Number(vaultKey.value));
           this.selected = { kind: "server", id };
           close();
           await this.refreshTree();

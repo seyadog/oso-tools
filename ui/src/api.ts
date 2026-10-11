@@ -7,7 +7,7 @@ export interface Server {
   host: string;
   port: number;
   user: string;
-  auth: "agent" | "key" | "password";
+  auth: "agent" | "key" | "password" | "vaultkey";
   key_path: string;
   parent: number | null;
   jump: number | null;
@@ -21,6 +21,8 @@ export interface Server {
   proxy: number | null;
   /** `tailscale:<account>`: the network it is on (oso asks before connecting on another account). */
   network: string | null;
+  /** The secret id of the key it logs in with, when that is a key of the vault (only in what `tree` returns, with the vault unlocked). */
+  vault_key?: number | null;
   /** Its own profile (null: its folder's, else every profile). */
   profile: string | null;
   /** Where it ended up: its own or its folder's (only in what `tree` returns). */
@@ -120,6 +122,41 @@ export interface SecretMeta {
   updated: number;
 }
 
+export interface KeyFile {
+  path: string;
+  name: string;
+  algorithm: string;
+  fingerprint: string;
+  comment: string;
+  encrypted: boolean;
+  /** Why it cannot go into the vault, or "". */
+  unsupported: string;
+}
+export interface HostEntry {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
+  identity_file: string | null;
+  proxy_jump: string | null;
+}
+export interface ImportPreview {
+  keys: KeyFile[];
+  hosts: HostEntry[];
+  skipped: string[];
+}
+export interface ImportRequest {
+  keys: { path: string; passphrase: string | null }[];
+  hosts: string[];
+}
+export interface ImportResult {
+  keys_added: string[];
+  hosts_added: string[];
+  problems: string[];
+  /** The files that were imported (for the question about deleting them). */
+  originals: string[];
+}
+
 export interface TunnelStatus {
   server_id: number;
   forward_id: number;
@@ -172,6 +209,13 @@ export interface Backend {
   proxySave(p: Proxy): Promise<number>;
   proxyDelete(id: number): Promise<void>;
   profileSetProxy(profile: string, proxy: number | null): Promise<void>;
+  /** What `~/.ssh` has that could come in (read only). */
+  importPreview(): Promise<ImportPreview>;
+  importApply(req: ImportRequest): Promise<ImportResult>;
+  /** Deletes imported key files: only ever called after the person said yes. Returns the names deleted. */
+  importDeleteOriginals(paths: string[]): Promise<string[]>;
+  /** The server logs in with this key of the vault (null: unlink). */
+  serverSetKey(serverId: number, secret: number | null): Promise<void>;
   secretList(): Promise<SecretMeta[]>;
   /** `value` null keeps the saved one of an existing secret. */
   secretSave(meta: SecretMeta, value: string | null): Promise<number>;

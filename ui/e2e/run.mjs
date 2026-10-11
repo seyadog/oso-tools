@@ -479,6 +479,61 @@ await page.evaluate(async () => {
   await window.oso.refreshTree();
 });
 
+// keys from the vault: a server form that picks one, and the import from ~/.ssh
+await page.evaluate(async () => {
+  await window.oso.be.secretSave({ id: 0, name: "deploy key", kind: "ssh_key", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "PRIVATE");
+});
+await page.click('.row[data-kind="server"]:has-text("web-1")');
+await page.evaluate(() => window.oso.editSelected());
+await settle(300);
+await page.click('.select[data-name="auth"] .sel-btn');
+await page.click('.select[data-name="auth"] .sel-item[data-value="vaultkey"]');
+await settle(100);
+check("a key from the vault can be chosen for a server", (await page.$('.select[data-name="vault-key"]')) !== null && (await page.$('input[name="login"]')) !== null && !(await page.isVisible('input[name="login"]')));
+await page.click("#modal-bg button.primary");
+await settle(250);
+check("it asks for the key before saving", (await page.textContent("#modal-bg .err")).includes("Choose the key"));
+await page.click('.select[data-name="vault-key"] .sel-btn');
+await page.click('.select[data-name="vault-key"] .sel-item:has-text("deploy key")');
+await page.click("#modal-bg button.primary");
+await settle(300);
+const web1 = await page.evaluate(async () => (await window.oso.be.tree()).servers.find((x) => x.name === "web-1"));
+check("and the server is saved with it", web1.auth === "vaultkey" && typeof web1.vault_key === "number");
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  const w = (await be.tree()).servers.find((x) => x.name === "web-1");
+  await be.saveServer({ ...w, auth: "agent" }, null, null);
+  await window.oso.refreshTree();
+});
+await page.click(".side-foot .vault");
+await settle(300);
+await page.click('[data-act="import-ssh"]');
+await settle(400);
+check("the import lists the keys and hosts it found", (await page.$$(".irow")).length === 5 && (await page.textContent("#modal-bg")).includes("id_ed25519") && (await page.textContent("#modal-bg")).includes("via bastion"));
+check("a key it cannot take is shown and cannot be ticked", await page.$eval('[data-key="id_old"] input[type=checkbox]', (c) => c.disabled));
+check("a key with a passphrase asks for it", (await page.$('[data-pass="id_work"]')) !== null);
+await shot("9e-import");
+await page.click('[data-act="do-import"]');
+await settle(500);
+check("a wrong passphrase is told in words and the rest is imported", (await page.textContent("#toast")).includes("wrong passphrase") && (await page.textContent("#toast")).includes("Imported 1 key and 2 hosts."));
+check("the question about the originals is there, and nothing was deleted", (await page.textContent("#modal-bg")).includes("Delete the original key files?") && (await page.evaluate(() => globalThis.__osoMock.deletedOriginals.length)) === 0);
+await page.keyboard.press("Escape");
+await settle(200);
+check("keeping them (Escape) deletes nothing", (await page.evaluate(() => globalThis.__osoMock.deletedOriginals.length)) === 0);
+await settle(200);
+await page.keyboard.press("Escape");
+await settle(200);
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  for (const n of ["bastion", "app"]) {
+    const t = (await be.tree()).servers.find((x) => x.name === n);
+    if (t) await be.deleteNode("server", t.id);
+  }
+  for (const m of await be.secretList()) if (m.kind === "ssh_key") await be.secretDelete(m.id);
+  await window.oso.refreshTree();
+});
+await clearAll();
+
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

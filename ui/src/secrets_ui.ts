@@ -6,6 +6,8 @@ import { icon } from "./icons";
 
 export interface Ctx {
   be: Backend;
+  /** Opens the import window (keys and hosts of ~/.ssh). */
+  importSsh(): void;
   /** Profiles that exist: id and name. */
   profiles(): { id: string; name: string }[];
   /** The profile the window is showing. */
@@ -118,6 +120,11 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       }
       secretsDialog(ctx);
     };
+    const imp = el("button", { class: "btn", type: "button", "data-act": "import-ssh" }, "Import from ~/.ssh…");
+    imp.onclick = () => {
+      close();
+      ctx.importSsh();
+    };
     const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
     lock.onclick = () => {
       close();
@@ -138,7 +145,7 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     };
     const done = el("button", { class: "btn primary", type: "button" }, "Done");
     done.onclick = close;
-    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, sudo, lock, change, done));
+    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
   });
 }
 

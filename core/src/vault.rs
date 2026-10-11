@@ -421,6 +421,13 @@ impl Vault {
         self.state.as_ref().map(|st| st.data.secrets.values().map(Secret::meta).collect()).unwrap_or_default()
     }
 
+    /// The SSH keys, as `(name, private key text)`, without counting as activity (the agent signs with them: a
+    /// stream of logins must not keep the vault from locking itself when it is idle).
+    pub fn ssh_keys(&self) -> Vec<(u64, String, Zeroizing<String>)> {
+        let Some(st) = self.state.as_ref() else { return vec![] };
+        st.data.secrets.values().filter(|s| s.kind == SecretKind::SshKey).map(|s| (s.id, s.name.clone(), Zeroizing::new(s.value.clone()))).collect()
+    }
+
     /// One secret's description (no value).
     pub fn meta(&self, id: u64) -> Option<SecretMeta> {
         self.state.as_ref()?.data.secrets.get(&id).map(Secret::meta)
