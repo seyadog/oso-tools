@@ -355,6 +355,13 @@ await page.click('.profile-bar button[data-act="view-all"]');
 await settle(200);
 await shot("9b-profiles");
 await page.evaluate(async () => {
+  await window.oso.be.setActiveProfile("work");
+  await window.oso.openServer(0);
+});
+await settle(400);
+check("a local terminal says which profile it was born in", (await page.$$eval(".tab", (ts) => ts.map((t) => t.textContent))).some((t) => t.includes("Local · Work")));
+await clearAll();
+await page.evaluate(async () => {
   const be = window.oso.be;
   await be.setActiveProfile("work");
   const web = (await be.tree()).servers.find((x) => x.name === "web-1");

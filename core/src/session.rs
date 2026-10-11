@@ -71,6 +71,11 @@ pub struct SpawnOpts {
     /// If set, the child gets exactly this environment instead of ours (used by the background server).
     pub env: Option<Vec<(String, String)>>,
     pub tap: Option<Tap>,
+    /// Typed once at each `sudo` password prompt (the local terminal's sudo password). Never again until the user
+    /// types something, so a wrong one is not tried three times in a row.
+    pub sudo_fill: Option<String>,
+    /// The background server gives the session its token and `OSO_*` variables (see `daemon`).
+    pub agent: bool,
 }
 
 pub struct PtySession {
@@ -92,7 +97,7 @@ impl PtySession {
     /// belongs to it appears. `login_expected` says the first generic `Password:` prompt is the login
     /// (password auth) rather than a later `su`.
     pub fn spawn_with(opts: SpawnOpts) -> Result<Self> {
-        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env, tap } = opts;
+        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env, tap, sudo_fill, agent: _ } = opts;
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -131,6 +136,9 @@ impl PtySession {
                 let mut buf = [0u8; 16 * 1024];
                 let mut fills: Vec<Option<Autofill>> = fills.into_iter().map(Some).collect();
                 let mut login_phase = login_expected;
+                let mut sudo_fill = sudo_fill;
+                // false once the sudo password was typed for a prompt, until the user types
+                let mut sudo_armed = true;
                 // The prompt line last acted on, so the same text is not handled twice.
                 let mut last_seen: Option<(u16, String)> = None;
                 while let Ok(n) = reader.read(&mut buf) {
@@ -151,6 +159,7 @@ impl PtySession {
                     };
                     if typed.swap(false, Ordering::Relaxed) {
                         last_seen = None;
+                        sudo_armed = true;
                     }
                     if last_seen.as_ref() == Some(&line) {
                         continue;
@@ -182,11 +191,24 @@ impl PtySession {
                             }
                         }
                         Some(Prompt::Sudo) => {
+                            // only the real `[sudo]` prompt of this computer is answered by itself, never a bare `Password:`
+                            let sudo_line = line.1.trim_start().starts_with("[sudo]");
                             last_seen = Some(line);
-                            sudo_flag.store(true, Ordering::Relaxed);
+                            if let (true, true, Some(pw)) = (sudo_armed, sudo_line, sudo_fill.as_ref()) {
+                                sudo_armed = false;
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(format!("{pw}\r").as_bytes());
+                                    let _ = w.flush();
+                                }
+                            } else {
+                                sudo_flag.store(true, Ordering::Relaxed);
+                            }
                         }
                         None => {}
                     }
+                }
+                if let Some(mut pw) = sudo_fill.take() {
+                    pw.zeroize();
                 }
             });
         }
@@ -295,7 +317,7 @@ enum Backend {
 impl Session {
     #[cfg(all(test, unix))]
     pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
-        let opts = SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None };
+        let opts = SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false };
         Self::spawn_with(opts, None)
     }
 
@@ -405,7 +427,7 @@ fn classify_prompt(line: &str, login_phase: bool) -> Option<Prompt> {
     if !t.ends_with(':') {
         return None;
     }
-    if t.starts_with("[sudo] password for") {
+    if t.starts_with("[sudo] password for") || t.starts_with("[sudo] contraseña para") {
         return Some(Prompt::Sudo);
     }
     if t.contains("passphrase for") || t.ends_with("'s password:") {
@@ -504,8 +526,48 @@ mod tests {
         assert!(!s.sudo_prompt());
     }
 
+    /// Runs `script` (which asks for sudo passwords the way sudo does) with a sudo password to type, and waits for `want`.
+    #[cfg(unix)]
+    fn with_sudo_fill(script: &str, want: &str) -> String {
+        let argv = vec!["sh".to_string(), "-c".into(), script.into()];
+        let opts = SpawnOpts { argv, rows: 24, cols: 100, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: Some("local-pw".into()), agent: false };
+        let mut s = Session::spawn_with(opts, None).unwrap();
+        wait_for(&mut s, want)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_local_sudo_password_is_typed_at_the_english_prompt() {
+        let text = with_sudo_fill("printf '[sudo] password for alice: '; read p; echo \"got:$p\"", "got:");
+        assert!(text.contains("got:local-pw"), "{text:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn and_at_the_spanish_one() {
+        let text = with_sudo_fill("printf '[sudo] contraseña para alice: '; read p; echo \"got:$p\"", "got:");
+        assert!(text.contains("got:local-pw"), "{text:?}");
+    }
+
+    /// A wrong password must not be tried again and again (the account could be locked): one try per command.
+    #[test]
+    #[cfg(unix)]
+    fn it_is_typed_once_per_command_not_at_every_retry() {
+        let script = "printf '[sudo] password for alice: '; read p; echo \"first:$p\"; printf '[sudo] password for alice: '; read -t 2 q; echo \"second:[$q]\"";
+        let text = with_sudo_fill(script, "second:");
+        assert!(text.contains("first:local-pw") && text.contains("second:[]"), "{text:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_bare_password_prompt_is_not_answered_with_the_sudo_password() {
+        let text = with_sudo_fill("printf 'Password: '; read -t 2 p; echo \"got:[$p]\"", "got:");
+        assert!(text.contains("got:[]"), "{text:?}");
+    }
+
     #[test]
     fn classifies_prompts() {
+        assert_eq!(classify_prompt("[sudo] contraseña para alice: ", false), Some(Prompt::Sudo));
         assert_eq!(classify_prompt("user@host's password: ", true), Some(Prompt::Login));
         assert_eq!(classify_prompt("enter passphrase for key '/home/u/.ssh/id':", false), Some(Prompt::Login));
         assert_eq!(classify_prompt("(user@host) password: ", true), Some(Prompt::Login), "keyboard-interactive login");

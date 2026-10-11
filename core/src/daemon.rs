@@ -53,6 +53,12 @@ enum Req {
         env: Vec<(String, String)>,
         fills: Vec<Fill>,
         login_expected: bool,
+        /// Typed at each `sudo` prompt of this session.
+        #[serde(default)]
+        sudo_fill: Option<String>,
+        /// Give the session a token and the `OSO_*` variables (a terminal of oso where an agent may run).
+        #[serde(default)]
+        agent: bool,
     },
     Attach { sid: u64, rows: u16, cols: u16 },
     Input { sid: u64, data: String },
@@ -161,6 +167,8 @@ struct Sent {
 }
 
 struct Hosted {
+    /// The secret that proves a request comes from inside this session (see `session_for_token`).
+    token: Option<String>,
     pty: Arc<Mutex<PtySession>>,
     meta: Value,
     subs: Subs,
@@ -180,6 +188,13 @@ struct Server {
     /// Leave once there has been nothing to keep for a while (always, except in tests).
     idle_exit: bool,
     socket: PathBuf,
+}
+
+/// 32 random bytes as hex, or `None` if the system has no randomness (then the session simply gets no token).
+fn random_token() -> Option<String> {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).ok()?;
+    Some(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Runs the server until it is told to stop or has been idle for a while.
@@ -297,7 +312,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
     };
     match req {
         Req::Hello { .. } => reply(Ev::Hello { proto: PROTO, version: env!("CARGO_PKG_VERSION").into() }),
-        Req::Spawn { req, argv, rows, cols, cwd, env, fills, login_expected } => {
+        Req::Spawn { req, argv, rows, cols, cwd, mut env, fills, login_expected, sudo_fill, agent } => {
             if argv.is_empty() {
                 return reply(Ev::Failed { req, error: "empty command".into() });
             }
@@ -306,6 +321,14 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                 st.next_sid += 1;
                 st.next_sid
             };
+            let token = if agent { random_token() } else { None };
+            if let Some(t) = &token {
+                // the variables are set by the server, never taken from the client: a client cannot claim another session
+                env.retain(|(k, _)| !k.starts_with("OSO_PANE") && k != "OSO_TOKEN" && k != "OSO_SOCKET");
+                env.push(("OSO_PANE".into(), sid.to_string()));
+                env.push(("OSO_TOKEN".into(), t.clone()));
+                env.push(("OSO_SOCKET".into(), server.socket.to_string_lossy().into_owned()));
+            }
             let subs: Subs = Arc::new(Mutex::new(vec![]));
             let tap = {
                 let subs = Arc::clone(&subs);
@@ -324,10 +347,13 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                 cwd: cwd.map(PathBuf::from),
                 env: Some(env),
                 tap: Some(tap),
+                sudo_fill,
+                agent,
             };
             match PtySession::spawn_with(opts) {
                 Ok(pty) => {
                     let hosted = Hosted {
+                        token,
                         pty: Arc::new(Mutex::new(pty)),
                         meta: Value::Null,
                         subs,
@@ -606,6 +632,7 @@ impl Daemon {
         let argv = opts.argv.clone();
         let cwd = opts.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
         let login_expected = opts.login_expected;
+        let (sudo_fill, agent) = (opts.sudo_fill.take(), opts.agent);
         let ev = self.shared.ask(|req| Req::Spawn {
             req,
             argv,
@@ -615,6 +642,8 @@ impl Daemon {
             env,
             fills: std::mem::take(&mut fills),
             login_expected,
+            sudo_fill,
+            agent,
         })?;
         match ev {
             Ev::Spawned { sid, .. } => Ok(self.attach_with(sid, rows, cols, sink.map(|make| make(sid)))),
@@ -809,6 +838,8 @@ mod tests {
             cwd: None,
             env: None,
             tap: None,
+            sudo_fill: None,
+            agent: false,
         }
     }
 
@@ -937,6 +968,40 @@ mod tests {
         opts.env = Some(vec![("OSO_TEST_VAR".into(), "from-the-client".into()), ("PATH".into(), "/usr/bin:/bin".into())]);
         let mut s = Session::spawn_with(opts, Some(&d)).unwrap();
         assert!(wait_for(&mut s, "v=from-the-client"), "the session gets the client's environment, not the server's");
+    }
+
+    #[test]
+    fn an_agent_session_gets_its_own_token_and_variables_from_the_server() {
+        let path = start("token");
+        let d = Daemon::connect_at(&path).ok().unwrap();
+        let mut opts = sh("echo \"pane=$OSO_PANE tok=$OSO_TOKEN sock=$OSO_SOCKET\"; sleep 1");
+        // a client cannot choose its own token
+        opts.env = Some(vec![("OSO_TOKEN".into(), "forged".into()), ("PATH".into(), "/usr/bin:/bin".into())]);
+        opts.agent = true;
+        let mut s = Session::spawn_with(opts, Some(&d)).unwrap();
+        assert!(wait_for(&mut s, "sock="));
+        let text = s.with_screen(|sc| sc.contents());
+        let tok = text.split("tok=").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+        assert_eq!(tok.len(), 64, "{text}");
+        assert!(tok.chars().all(|c| c.is_ascii_hexdigit()) && tok != "forged");
+        assert!(text.contains("pane=1 ") || text.contains("pane="), "{text}");
+        assert!(text.contains(path.to_str().unwrap()), "the socket path is given: {text}");
+        // two sessions never share a token
+        let mut o2 = sh("echo \"tok=$OSO_TOKEN\"; sleep 1");
+        o2.agent = true;
+        let mut s2 = Session::spawn_with(o2, Some(&d)).unwrap();
+        assert!(wait_for(&mut s2, "tok="));
+        let t2 = s2.with_screen(|sc| sc.contents());
+        assert!(!t2.contains(&tok));
+    }
+
+    #[test]
+    fn a_plain_session_gets_no_token() {
+        let path = start("notoken");
+        let d = Daemon::connect_at(&path).ok().unwrap();
+        let mut s = Session::spawn_with(sh("echo \"tok=[$OSO_TOKEN]\"; sleep 1"), Some(&d)).unwrap();
+        assert!(wait_for(&mut s, "tok="));
+        assert!(s.with_screen(|sc| sc.contents()).contains("tok=[]"));
     }
 
     #[test]

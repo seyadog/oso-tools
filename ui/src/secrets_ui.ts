@@ -103,6 +103,21 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       close();
       secretForm(ctx, null, () => secretsDialog(ctx));
     };
+    const sudo = el("button", { class: "btn", type: "button", "data-act": "local-sudo", title: "Typed by itself at the password question of sudo in a terminal of this computer" }, "This computer's sudo password");
+    sudo.onclick = async () => {
+      const { promptBox } = await import("./dom");
+      close();
+      const pw = await promptBox("sudo password of this computer", "", "password", "Typed at sudo's question in your local terminals, once per command. Leave empty to remove it.");
+      if (pw != null) {
+        try {
+          await ctx.be.vaultSet(0, true, pw || null);
+          toast(pw ? "Saved" : "Removed");
+        } catch (e) {
+          toast((e as Error).message);
+        }
+      }
+      secretsDialog(ctx);
+    };
     const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
     lock.onclick = () => {
       close();
@@ -123,7 +138,7 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     };
     const done = el("button", { class: "btn primary", type: "button" }, "Done");
     done.onclick = close;
-    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, lock, change, done));
+    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Everything here is encrypted, names included. It never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, sudo, lock, change, done));
   });
 }
 

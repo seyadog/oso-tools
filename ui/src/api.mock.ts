@@ -186,7 +186,8 @@ export function mockBackend(): Backend {
       const s = servers.find((x) => x.id === serverId);
       if (serverId && !s) throw new Error("This server no longer exists");
       if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
-      return make(s?.name ?? "Local", serverId);
+      const local = activeProfile === "default" ? "Local" : `Local · ${profiles.find((p) => p.id === activeProfile)?.name ?? activeProfile}`;
+      return make(s?.name ?? local, serverId);
     },
     reconnect: async (sid) => {
       const old = sessions.get(sid);

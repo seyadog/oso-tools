@@ -97,6 +97,12 @@ pub fn ssh_argv(store: &Store, s: &Server) -> Vec<String> {
     a
 }
 
+/// The environment a local terminal starts with: the one this program has, minus what only oso may set.
+pub fn client_env() -> Vec<(String, String)> {
+    const OURS: [&str; 5] = ["OSO", "OSO_PROFILE", "OSO_PANE", "OSO_TOKEN", "OSO_SOCKET"];
+    std::env::vars().filter(|(k, _)| !OURS.contains(&k.as_str())).collect()
+}
+
 /// What is needed to open a session for `id` (a server, or `LOCAL`).
 pub struct Plan {
     pub title: String,
@@ -134,7 +140,7 @@ pub fn needs_vault(store: &Store, id: u64) -> bool {
 pub fn opts_for(store: &Store, vault: &mut Vault, id: u64, argv: Vec<String>, rows: u16, cols: u16, use_vault: bool) -> SpawnOpts {
     let login_expected = id != LOCAL && store.server(id).is_some_and(|s| s.auth == Auth::Password);
     let fills = if use_vault && id != LOCAL { autofills(store, vault, id) } else { vec![] };
-    SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None }
+    SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false }
 }
 
 /// The command, title and secrets to open `id`. `unlocked` says whether the saved secrets may be used.

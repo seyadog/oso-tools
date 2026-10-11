@@ -161,9 +161,45 @@ impl Engine {
         if use_vault && server_id != LOCAL && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
             return Err(OpenError::VaultLocked);
         }
-        let plan = connect::plan(&self.store, &mut self.vault, server_id, rows, cols, use_vault).ok_or(OpenError::NoSuchServer)?;
+        let mut plan = connect::plan(&self.store, &mut self.vault, server_id, rows, cols, use_vault).ok_or(OpenError::NoSuchServer)?;
+        if server_id == LOCAL {
+            self.prepare_local(&mut plan, use_vault);
+        }
         let title = plan.title.clone();
         self.spawn(plan.opts, title, server_id).map_err(|e| OpenError::Other(format!("{e:#}")))
+    }
+
+    /// A terminal of this computer is born inside the active profile: its environment says so, and (when the vault is
+    /// unlocked) carries the secrets the profile fills in, and the sudo password is typed at sudo's prompt.
+    fn prepare_local(&mut self, plan: &mut connect::Plan, use_vault: bool) {
+        let profile = self.active_profile.clone();
+        let mut env = connect::client_env();
+        env.push(("OSO".into(), "1".into()));
+        env.push(("OSO_PROFILE".into(), profile.clone()));
+        let unlocked = use_vault && self.vault.is_unlocked();
+        if unlocked {
+            for (name, value) in self.vault.env_for(&profile, true) {
+                env.retain(|(k, _)| *k != name);
+                env.push((name, value.to_string()));
+            }
+            plan.opts.sudo_fill = self.vault.get(LOCAL, Kind::Sudo);
+        }
+        plan.opts.env = Some(env);
+        plan.opts.agent = self.agent_ok();
+        let name = self.store.profiles.iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or(profile.clone());
+        if profile != DEFAULT_PROFILE {
+            plan.title = format!("{} · {name}", plan.title);
+        }
+        if self.vault.exists() && !unlocked {
+            plan.title.push_str(" · vault locked");
+        }
+    }
+
+    /// Does the background server in use know about tokens (an older one, still running, does not)?
+    pub fn agent_ok(&self) -> bool {
+        let v = self.daemon.as_ref().map(|d| d.server_version.as_str()).unwrap_or("");
+        let mut parts = v.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (0, 2)
     }
 
     fn spawn(&mut self, opts: SpawnOpts, title: String, server_id: u64) -> Result<SessionInfo> {
@@ -1024,5 +1060,61 @@ mod tests {
         assert_eq!(e.store.server(sid).unwrap().profile.as_deref(), Some("default"));
         assert_eq!(e.vault.meta(key).unwrap().profile.as_deref(), Some("default"));
         assert!(e.profile_save("", "").is_err() && e.profile_save("", "Default").is_err());
+    }
+
+    fn api_key(name: &str, var: &str, profile: Option<&str>, visible: bool) -> SecretMeta {
+        SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, profile: profile.map(str::to_string), env_var: Some(var.into()), agent_visible: visible, notes: String::new(), updated: 0 }
+    }
+
+    #[test]
+    fn a_local_terminal_gets_the_variables_of_its_profile_and_no_others() {
+        let (mut e, log) = engine("local-env");
+        e.vault_unlock("m").unwrap();
+        let work = e.profile_save("", "Work").unwrap();
+        e.secret_save(api_key("a", "SHARED_KEY", None, true), Some("shared-v")).unwrap();
+        e.secret_save(api_key("b", "WORK_KEY", Some(&work), true), Some("work-v")).unwrap();
+        e.secret_save(api_key("c", "DEFAULT_KEY", Some("default"), true), Some("default-v")).unwrap();
+        e.secret_save(api_key("d", "HIDDEN_KEY", None, false), Some("hidden-v")).unwrap();
+        e.set_active_profile(&work).unwrap();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        assert_eq!(s.title, "Local · Work");
+        e.write(s.sid, b"echo [$OSO/$OSO_PROFILE] s=$SHARED_KEY w=$WORK_KEY d=$DEFAULT_KEY h=$HIDDEN_KEY .\r");
+        assert!(wait_for(&log, s.sid, "[1/work] s=shared-v w=work-v d= h= ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // and the other way round
+        e.set_active_profile("default").unwrap();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        assert_eq!(s.title, "Local");
+        e.write(s.sid, b"echo [$OSO_PROFILE] w=$WORK_KEY d=$DEFAULT_KEY .\r");
+        assert!(wait_for(&log, s.sid, "[default] w= d=default-v ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+    }
+
+    #[test]
+    fn with_the_vault_locked_the_terminal_opens_without_secrets_and_says_so() {
+        let (mut e, log) = engine("local-locked");
+        e.vault_unlock("m").unwrap();
+        e.secret_save(api_key("a", "SOME_KEY", None, true), Some("some-v")).unwrap();
+        e.vault_lock();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        assert_eq!(s.title, "Local · vault locked");
+        e.write(s.sid, b"echo [$OSO] k=$SOME_KEY .\r");
+        assert!(wait_for(&log, s.sid, "[1] k= ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+    }
+
+    #[test]
+    fn a_local_terminal_has_a_token_that_is_not_shown_anywhere_else() {
+        let (mut e, log) = engine("local-token");
+        assert!(e.agent_ok(), "the server of this version knows tokens");
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        e.write(s.sid, b"echo pane=$OSO_PANE tok=$OSO_TOKEN.\r");
+        assert!(wait_for(&log, s.sid, &format!("pane={} tok=", s.sid)), "{:?}", text_of(&log, s.sid));
+        std::thread::sleep(Duration::from_millis(300));
+        let text = text_of(&log, s.sid);
+        // the typed line shows `$OSO_TOKEN`; the answer shows 64 hex digits, then the dot
+        let answered = text.split("tok=").skip(1).any(|t| t.len() > 64 && t[..64].chars().all(|c| c.is_ascii_hexdigit()) && t[64..].starts_with('.'));
+        assert!(answered, "{text:?}");
+        e.close(s.sid);
     }
 }
