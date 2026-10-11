@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { Backend, FileDrag, Folder, Forward, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { Backend, FileDrag, Folder, Forward, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -12,7 +12,23 @@ export function mockBackend(): Backend {
     { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [] },
   ];
   const config = new Map<string, string>();
-  const secrets = new Map<string, string>();
+  // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
+  const vaultSecrets = new Map<number, { meta: SecretMeta; value: string }>([[900, { meta: { id: 900, name: "db-1 (login)", kind: "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: "db-secret-pw" }]]);
+  const links = new Map<string, number>([["3:l", 900]]);
+  let nextSecret = 901;
+  const setLink = (serverId: number, sudo: boolean, secret: string | null, label: string) => {
+    const key = `${serverId}:${sudo ? "s" : "l"}`;
+    const cur = links.get(key);
+    if (secret && cur) vaultSecrets.get(cur)!.value = secret;
+    else if (secret) {
+      const id = nextSecret++;
+      vaultSecrets.set(id, { meta: { id, name: `${label} (${sudo ? "sudo" : "login"})`, kind: sudo ? "sudo" : "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: secret });
+      links.set(key, id);
+    } else if (cur) {
+      vaultSecrets.delete(cur);
+      links.delete(key);
+    }
+  };
   const sessions = new Map<number, { info: SessionInfo; line: string; dead: boolean }>();
   let handler: (e: SessionEvent) => void = () => {};
   const vault = { exists: true, unlocked: false };
@@ -65,17 +81,46 @@ export function mockBackend(): Backend {
     vaultLock: async () => void (vault.unlocked = false),
     vaultReveal: async (id, sudo) => {
       if (!vault.unlocked) throw new Error("the vault is locked");
-      return secrets.get(`${id}:${sudo ? "s" : "l"}`) ?? (id === 3 && !sudo ? "db-secret-pw" : null);
+      const at = links.get(`${id}:${sudo ? "s" : "l"}`);
+      return at ? vaultSecrets.get(at)!.value : null;
     },
     vaultSet: async (id, sudo, secret) => {
       if (!vault.unlocked) throw new Error("the vault is locked");
-      const s = servers.find((x) => x.id === id)!;
-      if (secret) secrets.set(`${id}:${sudo ? "s" : "l"}`, secret);
-      else secrets.delete(`${id}:${sudo ? "s" : "l"}`);
-      if (sudo) s.has_sudo = !!secret;
-      else s.has_secret = !!secret;
+      const s = servers.find((x) => x.id === id);
+      setLink(id, sudo, secret, s?.name ?? "this computer");
+      if (s && sudo) s.has_sudo = !!secret;
+      else if (s) s.has_secret = !!secret;
     },
     vaultChangeMaster: async () => {},
+    secretList: async () => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      return [...vaultSecrets.values()].map((x) => ({ ...x.meta }));
+    },
+    secretSave: async (meta, value) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      if (!meta.name.trim()) throw new Error("a secret needs a name");
+      const cur = vaultSecrets.get(meta.id);
+      if (!cur && !value) throw new Error("a secret needs a value");
+      const id = cur ? meta.id : nextSecret++;
+      const updated = value || !cur ? Math.floor(Date.now() / 1000) : cur.meta.updated;
+      vaultSecrets.set(id, { meta: { ...meta, id, name: meta.name.trim(), updated }, value: value || cur!.value });
+      return id;
+    },
+    secretDelete: async (id) => {
+      vaultSecrets.delete(id);
+      for (const [k, v] of [...links]) {
+        if (v !== id) continue;
+        links.delete(k);
+        const s = servers.find((x) => x.id === Number(k.split(":")[0]));
+        if (s) k.endsWith(":s") ? (s.has_sudo = false) : (s.has_secret = false);
+      }
+    },
+    secretReveal: async (id) => {
+      if (!vault.unlocked) throw new Error("the vault is locked");
+      const x = vaultSecrets.get(id);
+      if (!x) throw new Error("this secret no longer exists");
+      return x.value;
+    },
     saveServer: async (s, login, sudo) => {
       if ((login || sudo) && !vault.unlocked) throw new Error("unlock the vault to save a password");
       const id = s.id || next++;

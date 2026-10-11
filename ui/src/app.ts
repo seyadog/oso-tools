@@ -10,6 +10,7 @@ import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { secretsDialog } from "./secrets_ui";
 import { tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
@@ -835,7 +836,7 @@ export class App {
 
   private renderFoot() {
     clear(this.footEl);
-    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: "Passwords in the vault" });
+    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: "Secrets in the vault" });
     v.append(icon(this.vault.unlocked ? "unlock" : "lock", 16), this.vault.unlocked ? "Vault · unlocked" : this.vault.exists ? "Vault · locked" : "Create the vault");
     v.onclick = () => void this.vaultDialog();
     this.footEl.append(v, this.ibtn("tunnel", `Tunnels: port forwards  (${this.keyText("tunnels.open")})`, () => this.openTunnels(), false, this.tunnelsUp ? "live" : ""), this.ibtn("terminal", "Local terminal", () => void this.openServer(LOCAL)), this.ibtn("settings", `Settings  (${this.keyText("settings")})`, () => this.settingsDialog()));
@@ -1347,91 +1348,10 @@ export class App {
     });
   }
 
-  /** The vault as a password manager: every host with its saved passwords, to read, copy, change or remove. */
+  /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    let clipTimer = 0;
-    const copy = (text: string) => {
-      void navigator.clipboard?.writeText(text);
-      clearTimeout(clipTimer);
-      clipTimer = window.setTimeout(() => void navigator.clipboard?.writeText("").catch(() => {}), 30000);
-      toast("Copied. The clipboard is cleared in 30 seconds.");
-    };
-    openModal((close) => {
-      const list = el("div", { class: "vault-list" });
-      const filter = el("input", { type: "search", placeholder: "Search hosts", autocomplete: "off", spellcheck: "false" });
-      const shown = new Map<string, string>();
-      const draw = () => {
-        clear(list);
-        const q = filter.value.trim().toLowerCase();
-        const servers = this.tree.servers.filter((s) => !q || `${s.name} ${s.host} ${s.user}`.toLowerCase().includes(q));
-        if (!servers.length) list.append(el("div", { class: "empty" }, "No host matches."));
-        for (const s of servers) {
-          const cell = (label: string, sudo: boolean, has: boolean) => {
-            const key = `${s.id}:${sudo}`;
-            const box = el("div", { class: "secret" }, el("span", { class: "lbl" }, label));
-            if (!has) {
-              const add = el("button", { class: "link", type: "button" }, "add");
-              add.onclick = () => void edit(sudo);
-              box.append(el("span", { class: "none" }, "—"), add);
-              return box;
-            }
-            const text = el("span", { class: "pw" }, shown.get(key) ?? "••••••••••");
-            const eye = this.ibtn(shown.has(key) ? "eye-off" : "eye", shown.has(key) ? "Hide" : "Show", async () => {
-              if (shown.has(key)) shown.delete(key);
-              else shown.set(key, (await this.be.vaultReveal(s.id, sudo).catch(() => null)) ?? "");
-              draw();
-            });
-            const cp = this.ibtn("copy", "Copy", async () => {
-              const v = await this.be.vaultReveal(s.id, sudo).catch(() => null);
-              if (v) copy(v);
-            });
-            const ed = this.ibtn("edit", "Change", () => void edit(sudo));
-            const rm = this.ibtn("trash", "Remove", async () => {
-              if (await confirmBox("Remove this password?", `${label} of ${s.name} will be deleted from the vault.`, "Remove")) {
-                await this.be.vaultSet(s.id, sudo, null);
-                shown.delete(key);
-                await this.refreshTree();
-              }
-              await this.vaultDialog();
-            });
-            box.append(text, eye, cp, ed, rm);
-            return box;
-          };
-          const edit = async (sudo: boolean) => {
-            const v = await promptBox(`${sudo ? "sudo password" : s.auth === "key" ? "Key passphrase" : "Password"} of ${s.name}`, "", "password");
-            if (v == null) return;
-            await this.be.vaultSet(s.id, sudo, v || null);
-            shown.delete(`${s.id}:${sudo}`);
-            await this.refreshTree();
-            await this.vaultDialog();
-          };
-          list.append(el("div", { class: "vrow" }, el("div", { class: "who" }, el("span", { class: "dot", style: `background:${serverColor(s.id)}` }), el("span", { class: "txt" }, el("b", {}, s.name), el("small", {}, `${s.user ? s.user + "@" : ""}${s.host}`))), cell(s.auth === "key" ? "Passphrase" : "Password", false, s.has_secret), cell("sudo", true, s.has_sudo)));
-        }
-      };
-      filter.oninput = draw;
-      draw();
-      const lock = el("button", { class: "btn", type: "button" }, "Lock the vault");
-      lock.onclick = () => {
-        close();
-        void this.lockVault();
-      };
-      const change = el("button", { class: "btn", type: "button" }, "Change master password");
-      change.onclick = async () => {
-        const pw = await promptBox("New master password", "", "password", "Everything in the vault is encrypted again under it.");
-        if (!pw) return;
-        try {
-          await this.be.vaultChangeMaster(pw);
-          toast("Master password changed");
-        } catch (e) {
-          toast((e as Error).message);
-        }
-        await this.vaultDialog();
-      };
-      const done = el("button", { class: "btn primary", type: "button" }, "Done");
-      done.onclick = close;
-      return el("div", { class: "wide" }, el("h2", {}, "Vault"), el("div", { class: "hint", style: "margin:0 0 10px" }, "Passwords saved for your hosts. They never leave this computer unencrypted."), filter, list, el("div", { class: "actions" }, lock, change, done));
-    });
+    secretsDialog({ be: this.be, profiles: () => [], activeProfile: () => "", lockVault: () => this.lockVault() });
   }
 
   async lockVault() {

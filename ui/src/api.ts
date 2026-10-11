@@ -50,6 +50,21 @@ export type SessionEvent =
   | { sid: number; kind: "sudo"; on: boolean }
   | { sid: number; kind: "lost" };
 
+export type SecretKind = "password" | "sudo" | "ssh_key" | "api_key" | "token" | "totp";
+/** What a secret is, without its value: lists never carry the value. */
+export interface SecretMeta {
+  /** 0 for one that is not saved yet. */
+  id: number;
+  name: string;
+  kind: SecretKind;
+  profile: string | null;
+  env_var: string | null;
+  agent_visible: boolean;
+  notes: string;
+  /** Unix seconds of the last change. */
+  updated: number;
+}
+
 export interface TunnelStatus {
   server_id: number;
   forward_id: number;
@@ -87,6 +102,11 @@ export interface Backend {
   vaultReveal(serverId: number, sudo: boolean): Promise<string | null>;
   vaultSet(serverId: number, sudo: boolean, secret: string | null): Promise<void>;
   vaultChangeMaster(master: string): Promise<void>;
+  secretList(): Promise<SecretMeta[]>;
+  /** `value` null keeps the saved one of an existing secret. */
+  secretSave(meta: SecretMeta, value: string | null): Promise<number>;
+  secretDelete(id: number): Promise<void>;
+  secretReveal(id: number): Promise<string>;
   saveServer(s: Server, login: string | null, sudo: string | null): Promise<number>;
   addFolder(name: string, parent: number | null): Promise<number>;
   renameFolder(id: number, name: string): Promise<void>;

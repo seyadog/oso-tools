@@ -7,7 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use oso_core::daemon::Stream;
 use oso_core::engine::{Emit, Engine, OpenError, SessionInfo, TransferStatus, TunnelStatus, VaultStatus};
 use oso_core::store::{Forward, NodeId, Server, Store};
-use oso_core::vault::Vault;
+use oso_core::vault::{SecretMeta, Vault};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,6 +101,26 @@ fn vault_set(state: State<AppState>, server_id: u64, sudo: bool, secret: Option<
 #[tauri::command]
 fn vault_change_master(state: State<AppState>, master: String) -> Res<()> {
     engine!(state).vault_change_master(&master).map_err(err)
+}
+
+#[tauri::command]
+fn secret_list(state: State<AppState>) -> Res<Vec<SecretMeta>> {
+    engine!(state).secret_list().map_err(err)
+}
+
+#[tauri::command]
+fn secret_save(state: State<AppState>, meta: SecretMeta, value: Option<String>) -> Res<u64> {
+    engine!(state).secret_save(meta, value.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+fn secret_delete(state: State<AppState>, id: u64) -> Res<()> {
+    engine!(state).secret_delete(id).map_err(err)
+}
+
+#[tauri::command]
+fn secret_reveal(state: State<AppState>, id: u64) -> Res<String> {
+    engine!(state).secret_reveal(id).map_err(err)
 }
 
 #[tauri::command]
@@ -325,6 +345,10 @@ fn main() {
             vault_reveal,
             vault_set,
             vault_change_master,
+            secret_list,
+            secret_save,
+            secret_delete,
+            secret_reveal,
             save_server,
             add_folder,
             rename_folder,

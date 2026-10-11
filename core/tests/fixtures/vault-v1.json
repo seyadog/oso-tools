@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "kdf": {
+    "m_kib": 8,
+    "t": 1,
+    "p": 1
+  },
+  "salt": "da/Gi974MHh//ujLEEiZVA==",
+  "nonce": "1lW3Char7pMEq0rNY8ViMstO22+g4jWr",
+  "ciphertext": "ZlR8VPmsUM3k2ueVrbJWWLLAAGk4R1Aere7Zm/21vxRMoQMfDFrBltbK8jMsBQ14NKN6rU7nkltUOEVAa0CE7Bpy4TqR/6Ap8aFOw4cYgIAKztzcmy6VU/4Am15OKe6pfwEGv2tOwuISR8fm/Fvzdk4EkhpiRxT9EhdEC2DyL5OaI+lvG24et15z2zofFSEvL7LOGRuP"
+}

@@ -291,25 +291,36 @@ await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 check("the same host opens twice when you double-click it twice", (await state()).tabs === 2);
 
-// the vault as a password manager
+// the vault as a list of named, typed secrets
 await page.click(".side-foot .vault");
 await settle(300);
-check("the vault opens and lists the hosts with their passwords", (await page.$$(".vrow")).length === 3 && (await page.textContent(".vault-list")).includes("••••"));
-await page.click('.vrow:has-text("db-1") button[title="Show"]');
+check("the vault opens and lists its secrets, hidden", (await page.$$(".srow")).length === 1 && (await page.textContent(".vault-list")).includes("••••") && (await page.textContent(".vault-list")).includes("db-1 (login)"));
+check("the list says the type of each secret", (await page.textContent(".vault-list")).includes("Password"));
+await page.click('.srow:has-text("db-1") button[title="Show"]');
 await settle(200);
-check("a password can be shown", (await page.textContent(".vault-list")).includes("db-secret-pw"));
+check("a secret can be shown", (await page.textContent(".vault-list")).includes("db-secret-pw"));
 await shot("9-vault");
-await page.click('.vrow:has-text("web-1") .link');
+await page.click('[data-act="new-secret"]');
 await settle(200);
-await page.fill("#modal-bg input", "web-pw-1");
-await page.keyboard.press("Enter");
-await settle(400);
-check("a password can be added to a host that had none", (await page.$$('.vrow:has-text("web-1") .pw')).length === 1);
-await page.click('.vrow:has-text("web-1") button[title="Remove"]');
+await page.fill('input[name="name"]', "anthropic-work");
+await page.click('.select[data-name="kind"] .sel-btn');
+await page.click('.select[data-name="kind"] .sel-item[data-value="api_key"]');
+await settle(100);
+check("an API key is offered to agents by default", await page.$eval("#agent-visible", (c) => c.checked));
+await page.fill('input[name="value"]', "sk-trap-value-1");
+await page.fill('input[name="env"]', "ANTHROPIC_API_KEY");
+await page.click("#modal-bg button.primary");
+await settle(300);
+check("a new secret appears in the list with its variable", (await page.textContent(".vault-list")).includes("anthropic-work") && (await page.textContent(".vault-list")).includes("$ANTHROPIC_API_KEY"));
+await page.click('.select[data-name="kind-filter"] .sel-btn');
+await page.click('.select[data-name="kind-filter"] .sel-item[data-value="api_key"]');
+await settle(150);
+check("the list can be filtered by type", (await page.$$(".srow")).length === 1 && !(await page.textContent(".vault-list")).includes("db-1"));
+await page.click('.srow:has-text("anthropic-work") button[title="Delete"]');
 await settle(200);
 await page.click("#modal-bg button.primary");
-await settle(400);
-check("and removed again", (await page.$$('.vrow:has-text("web-1") .pw')).length === 0);
+await settle(300);
+check("and a secret can be deleted", (await page.$$(".srow")).length === 0);
 await page.keyboard.press("Escape");
 await settle(150);
 

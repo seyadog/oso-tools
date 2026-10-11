@@ -7,7 +7,7 @@ use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
 use crate::store::{Auth, Forward, ForwardKind, NodeId, Server, Store};
-use crate::vault::{Kind, UnlockError, Vault};
+use crate::vault::{Kind, SecretMeta, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::Value;
@@ -270,7 +270,14 @@ impl Engine {
         self.vault.unlock(master).map_err(|e| match e {
             UnlockError::WrongPassword => "Wrong master password".to_string(),
             UnlockError::Other(m) => m,
-        })
+        })?;
+        // an old vault was migrated by number: name its secrets after their servers
+        let names: HashMap<u64, String> = self.store.servers.iter().map(|s| (s.id, s.name.clone())).chain([(LOCAL, "this computer".to_string())]).collect();
+        self.vault.relabel_hosts(|id| names.get(&id).cloned()).map_err(|e| format!("{e:#}"))
+    }
+
+    fn host_label(&self, server_id: u64) -> String {
+        if server_id == LOCAL { "this computer".into() } else { self.store.server(server_id).map(|s| s.name.clone()).unwrap_or_else(|| format!("server {server_id}")) }
     }
 
     pub fn vault_lock(&mut self) {
@@ -285,18 +292,56 @@ impl Engine {
         Ok(self.vault.get(server_id, if sudo { Kind::Sudo } else { Kind::Login }))
     }
 
-    /// Saves (or, with `None`, removes) a secret of a server and keeps the server's flags in step.
+    /// Saves (or, with `None`, removes) a secret of a server (`LOCAL`: of this computer) and keeps the server's flags in step.
     pub fn vault_set(&mut self, server_id: u64, sudo: bool, secret: Option<&str>) -> Result<()> {
         if !self.vault.is_unlocked() {
             bail!("the vault is locked");
         }
-        if self.store.server(server_id).is_none() {
+        if server_id != LOCAL && self.store.server(server_id).is_none() {
             bail!("this server no longer exists");
         }
         let secret = secret.filter(|s| !s.is_empty());
-        self.vault.set(server_id, if sudo { Kind::Sudo } else { Kind::Login }, secret)?;
+        let label = self.host_label(server_id);
+        self.vault.set(server_id, if sudo { Kind::Sudo } else { Kind::Login }, secret, &label)?;
         self.set_flags(server_id, |s| if sudo { s.has_sudo = secret.is_some() } else { s.has_secret = secret.is_some() });
         self.store.save()
+    }
+
+    // ---------------------------------------------------------------- secrets
+
+    /// Every secret's description, never its value.
+    pub fn secret_list(&self) -> Result<Vec<SecretMeta>> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        Ok(self.vault.list())
+    }
+
+    /// Creates (`meta.id == 0`) or changes a secret; `None` keeps the value of an existing one. (The window offers
+    /// "agents may see it" switched on for an API key and off for the rest.)
+    pub fn secret_save(&mut self, meta: SecretMeta, value: Option<&str>) -> Result<u64> {
+        self.vault.save_secret(meta, value)
+    }
+
+    /// Deletes a secret and keeps the flags of the servers that used it in step.
+    pub fn secret_delete(&mut self, id: u64) -> Result<()> {
+        let touched = self.vault.delete_secret(id)?;
+        for server in touched {
+            let links = self.vault.links(server);
+            self.set_flags(server, |s| {
+                s.has_secret = links.login.is_some();
+                s.has_sudo = links.sudo.is_some();
+            });
+        }
+        self.store.save()
+    }
+
+    /// A secret's value, to show or copy (the window clears the clipboard after 30 seconds).
+    pub fn secret_reveal(&mut self, id: u64) -> Result<String> {
+        if !self.vault.is_unlocked() {
+            bail!("the vault is locked");
+        }
+        self.vault.reveal(id).ok_or_else(|| anyhow!("this secret no longer exists"))
     }
 
     pub fn vault_change_master(&mut self, new_master: &str) -> Result<()> {
@@ -336,19 +381,20 @@ impl Engine {
             self.store.update_server(s);
             id
         };
+        let name = self.host_label(id);
         if let Some(l) = login {
             let secret = (!l.is_empty()).then_some(l);
-            self.vault.set(id, Kind::Login, secret)?;
+            self.vault.set(id, Kind::Login, secret, &name)?;
             self.set_flags(id, |s| s.has_secret = secret.is_some());
         }
         if let Some(p) = sudo {
             let secret = (!p.is_empty()).then_some(p);
-            self.vault.set(id, Kind::Sudo, secret)?;
+            self.vault.set(id, Kind::Sudo, secret, &name)?;
             self.set_flags(id, |s| s.has_sudo = secret.is_some());
         }
         // A server that no longer logs in with a secret should not keep one.
         if self.store.server(id).is_some_and(|s| s.auth == Auth::Agent && s.has_secret) && self.vault.is_unlocked() {
-            self.vault.set(id, Kind::Login, None)?;
+            self.vault.set(id, Kind::Login, None, &name)?;
             self.set_flags(id, |s| s.has_secret = false);
         }
         self.store.save()?;
@@ -563,6 +609,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::SecretKind;
     use crate::daemon::Daemon;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -729,5 +776,60 @@ mod tests {
         // reloading from disk finds what is left
         let again = Store::load_from(e.store_path()).unwrap();
         assert_eq!(again.servers.len(), 1);
+    }
+
+    #[test]
+    fn an_old_vault_keeps_its_servers_flags_right_and_names_its_secrets() {
+        let (mut e, _log) = engine("migrate");
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/vault-v1.json");
+        std::fs::copy(fixture, e.store_path().parent().unwrap().join("vault.json")).unwrap();
+        let ids: Vec<u64> = ["web", "db", "cache"].iter().map(|n| e.save_server(Server { auth: Auth::Password, ..server(n) }, None, None).unwrap()).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        for (id, login, sudo) in [(1, true, true), (2, true, false), (3, false, true)] {
+            e.set_flags(id, |s| {
+                s.has_secret = login;
+                s.has_sudo = sudo;
+            });
+        }
+        e.vault_unlock("fixture-master").unwrap();
+        for (id, login, sudo) in [(1, true, true), (2, true, false), (3, false, true)] {
+            let s = e.store.server(id).unwrap();
+            assert_eq!((s.has_secret, s.has_sudo), (login, sudo));
+            assert_eq!(e.vault_reveal(id, false).unwrap().is_some(), login);
+            assert_eq!(e.vault_reveal(id, true).unwrap().is_some(), sudo);
+        }
+        let names: Vec<String> = e.secret_list().unwrap().into_iter().map(|m| m.name).collect();
+        assert!(names.contains(&"web (login)".to_string()) && names.contains(&"cache (sudo)".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn secrets_have_names_and_types_and_their_list_has_no_values() {
+        let (mut e, _log) = engine("secrets");
+        assert!(e.secret_list().is_err(), "locked");
+        e.vault_unlock("master").unwrap();
+        let meta = |name: &str, kind| SecretMeta { id: 0, name: name.into(), kind, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: 0 };
+        let key = e.secret_save(SecretMeta { env_var: Some("ANTHROPIC_API_KEY".into()), agent_visible: true, ..meta("anthropic", SecretKind::ApiKey) }, Some("TRAP-API-VALUE")).unwrap();
+        assert!(e.secret_list().unwrap().iter().find(|m| m.id == key).unwrap().agent_visible);
+        let tok = e.secret_save(meta("gh", SecretKind::Token), Some("TRAP-TOKEN-VALUE")).unwrap();
+        assert!(!e.secret_list().unwrap().iter().find(|m| m.id == tok).unwrap().agent_visible);
+        let id = e.save_server(server("web"), Some("TRAP-LOGIN"), Some("TRAP-SUDO")).unwrap();
+        let json = serde_json::to_string(&e.secret_list().unwrap()).unwrap();
+        assert!(!json.contains("TRAP-"), "{json}");
+        assert_eq!(e.secret_reveal(key).unwrap(), "TRAP-API-VALUE");
+        // deleting the secret a server logs in with takes the server's flag down
+        let login = e.vault.links(id).login.unwrap();
+        e.secret_delete(login).unwrap();
+        let s = e.store.server(id).unwrap();
+        assert!(!s.has_secret && s.has_sudo);
+        assert!(e.secret_reveal(login).is_err());
+    }
+
+    #[test]
+    fn this_computers_sudo_password_is_a_secret_of_server_zero() {
+        let (mut e, _log) = engine("local-sudo");
+        e.vault_unlock("master").unwrap();
+        e.vault_set(LOCAL, true, Some("local-pw")).unwrap();
+        assert_eq!(e.vault_reveal(LOCAL, true).unwrap().as_deref(), Some("local-pw"));
+        assert!(e.secret_list().unwrap().iter().any(|m| m.name == "this computer (sudo)"));
     }
 }

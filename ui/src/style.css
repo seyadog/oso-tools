@@ -268,3 +268,11 @@ textarea { width: 100%; background: var(--bg-2); border: 1px solid var(--line-2)
 textarea:focus { outline: none; border-color: var(--accent); }
 .pane.filedrop .frame { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
 .pane.filedrop::after { content: "Drop to upload"; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 8px 16px; border-radius: 8px; background: var(--accent); color: var(--on-accent); font-weight: 600; pointer-events: none; z-index: 8; }
+
+/* Secrets */
+.filters { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }
+.filters .select { min-width: 150px; }
+.srow { grid-template-columns: 1fr auto; }
+.srow .secret { justify-content: flex-end; }
+.srow .secret .pw { flex: none; width: 110px; }
+.srow .old { color: var(--yellow, #e5c07b); font-size: 11.5px; margin: 0 6px; white-space: nowrap; }
