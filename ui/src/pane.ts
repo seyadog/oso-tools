@@ -48,6 +48,7 @@ export class Pane {
   readonly dot: HTMLElement;
   readonly num: HTMLElement;
   readonly banner: HTMLElement;
+  private keyCard: HTMLElement | null = null;
   readonly term: Terminal;
   private fit = new FitAddon();
   private termEl: HTMLElement;
@@ -171,6 +172,13 @@ export class Pane {
     if (screen) this.term.write(b64.decode(screen));
   }
 
+  /** A card over the terminal that explains something and offers buttons; `null` takes it away. */
+  showCard(card: HTMLElement | null) {
+    this.keyCard?.remove();
+    this.keyCard = card;
+    if (card) this.root.querySelector(".frame")!.append(card);
+  }
+
   /** The strip at the bottom of a terminal that is not connected (`null`: the usual one). */
   setBanner(text: string | null) {
     this.banner.textContent = text ?? this.bannerDefault;
@@ -186,12 +194,14 @@ export class Pane {
     return new Promise((resolve) => this.term.write("", resolve));
   }
 
-  /** The last `n` lines of the terminal as text (what is on screen and the end of the scroll-back). */
+  /** The last `n` lines of the terminal as text, counting only what came after the last reconnection. */
   tail(n: number): string {
     const b = this.term.buffer.active;
     const out: string[] = [];
-    for (let i = Math.max(0, b.length - n); i < b.length; i++) out.push(b.getLine(i)?.translateToString(true) ?? "");
-    return out.join("\n");
+    const end = b.baseY + b.cursorY + 1; // below the cursor the screen is empty
+    for (let i = Math.max(0, end - n); i < end; i++) out.push(b.getLine(i)?.translateToString(true) ?? "");
+    const mark = out.map((l) => l.includes("──── reconnected")).lastIndexOf(true);
+    return out.slice(mark + 1).join("\n");
   }
 
   /** The line the cursor is on (what a prompt looks like when the shell is waiting). */

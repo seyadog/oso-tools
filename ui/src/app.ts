@@ -5,6 +5,7 @@ import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openM
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
+import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
@@ -317,6 +318,8 @@ export class App {
     const pane = this.panes.get(sid);
     void (pane ? pane.written() : Promise.resolve()).then(() => {
       if (!this.ws.tabs.get(sid)?.dead) return;
+      const warn = pane ? parseHostKeyWarning(pane.tail(40)) : null;
+      if (pane && warn) this.showKeyWarning(sid, pane, warn.host, warn.fingerprint);
       const why = fatalReason(pane?.tail(6) ?? "");
       if (why) return this.stopRetry(sid, `${why} Enter: try again · Alt+W: close`);
       const before = this.retry.get(sid)?.attempt ?? 0;
@@ -324,6 +327,37 @@ export class App {
       if (verdict.retry) this.scheduleRetry(sid, verdict.attempt);
       else this.stopRetry(sid);
     });
+  }
+
+  /** A server shows a different key than the saved one: explain it in plain words and offer the fix. */
+  private showKeyWarning(sid: Id, pane: Pane, host: string | null, fingerprint: string | null) {
+    const tab = this.ws.tabs.get(sid);
+    const server = tab ? this.tree.servers.find((s) => s.id === tab.serverId) : undefined;
+    const name = host ?? (server ? (server.port === 22 ? server.host : `[${server.host}]:${server.port}`) : null);
+    const forget = el("button", { class: "btn primary", type: "button" }, "I reinstalled it: forget the old key");
+    const leave = el("button", { class: "btn", type: "button" }, "Leave it");
+    const card = el(
+      "div",
+      { class: "keycard", role: "alertdialog" },
+      el("h3", {}, "This server's key changed"),
+      el("p", {}, "The key it shows now is not the one saved from the last time. That happens when a server is reinstalled or its address now belongs to another machine."),
+      el("p", { class: "warn" }, "If you were not expecting it, do not connect: someone may be listening in between you and the server."),
+      fingerprint ? el("p", { class: "fp" }, "New fingerprint: ", el("code", {}, fingerprint)) : "",
+      el("div", { class: "actions" }, leave, name ? forget : ""),
+    );
+    leave.onclick = () => pane.showCard(null);
+    forget.onclick = async () => {
+      if (!name) return;
+      try {
+        await this.be.forgetHostKey(name);
+      } catch (e) {
+        return void toast(`Could not forget the key: ${(e as Error).message}`, 6000);
+      }
+      pane.showCard(null);
+      toast(`Old key of ${name} forgotten. Connecting: you will be asked to accept its new key.`, 6000);
+      void this.reconnect(sid);
+    };
+    pane.showCard(card);
   }
 
   /** The connection is gone: say so on the terminal, count down, and connect again. */
@@ -403,6 +437,7 @@ export class App {
         pane.sid = info.sid;
         pane.joinOld = true;
         pane.setBanner(null);
+        pane.showCard(null);
         this.panes.set(info.sid, pane);
       }
       const buffered = this.early.get(info.sid);

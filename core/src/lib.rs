@@ -4,6 +4,7 @@
 pub mod connect;
 pub mod daemon;
 pub mod engine;
+pub mod known_hosts;
 pub mod session;
 pub mod settings;
 pub mod store;

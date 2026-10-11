@@ -185,6 +185,11 @@ fn fill_sudo(state: State<AppState>, sid: u64, server_id: u64) -> Res<()> {
 }
 
 #[tauri::command]
+fn forget_host_key(host: String) -> Res<String> {
+    oso_core::known_hosts::forget(&host, None).map_err(err)
+}
+
+#[tauri::command]
 fn read_config(name: String) -> Res<Option<String>> {
     let path = config_path(&name)?;
     match std::fs::read_to_string(path) {
@@ -279,6 +284,7 @@ fn main() {
             close_session,
             set_meta,
             fill_sudo,
+            forget_host_key,
             read_config,
             write_config,
         ])

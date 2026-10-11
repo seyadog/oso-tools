@@ -30,8 +30,10 @@ export function mockBackend(): Backend {
 
   // For the tests: make a session end the way a dropped connection does.
   const knobs = { failNext: 0 };
+  const forgotten: string[] = [];
   (globalThis as unknown as { __osoMock: unknown }).__osoMock = {
     knobs,
+    forgotten,
     lose: (sid: number, code = 255, text = "") => {
       const s = sessions.get(sid);
       if (!s) return;
@@ -149,6 +151,10 @@ export function mockBackend(): Backend {
       if (s) s.info.meta = meta;
     },
     fillSudo: async () => {},
+    forgetHostKey: async (host) => {
+      forgotten.push(host);
+      return `Host ${host} found: line 1`;
+    },
     readConfig: async (name) => config.get(name) ?? null,
     writeConfig: async (name, text) => void config.set(name, text),
     onSession: (f) => void (handler = f),

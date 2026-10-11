@@ -35,6 +35,7 @@ export function tauriBackend(): Backend {
     close: (sid) => call("close_session", { sid }),
     setMeta: (sid, meta) => call("set_meta", { sid, meta }),
     fillSudo: (sid, serverId) => call("fill_sudo", { sid, serverId }),
+    forgetHostKey: (host) => call("forget_host_key", { host }),
     readConfig: (name) => call("read_config", { name }),
     writeConfig: (name, text) => call("write_config", { name, text }),
     onSession: (f) => void listen<SessionEvent>("session", (e) => f(e.payload)),

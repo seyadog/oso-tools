@@ -70,6 +70,7 @@ export interface Backend {
   close(sid: number): Promise<void>;
   setMeta(sid: number, meta: Record<string, unknown>): Promise<void>;
   fillSudo(sid: number, serverId: number): Promise<void>;
+  forgetHostKey(host: string): Promise<string>;
   readConfig(name: string): Promise<string | null>;
   writeConfig(name: string, text: string): Promise<void>;
   onSession(f: (e: SessionEvent) => void): void;

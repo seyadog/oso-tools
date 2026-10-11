@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 
 const URL = "http://localhost:1420/";
 const vite = spawn("npx", ["vite", "--port", "1420", "--strictPort"], { stdio: "pipe" });
+process.on("exit", () => vite.kill());
 await new Promise((res, rej) => {
   const t = setTimeout(() => rej(new Error("vite did not start")), 15000);
   vite.stdout.on("data", (d) => String(d).includes("Local") && (clearTimeout(t), res()));
@@ -446,6 +447,26 @@ await page.keyboard.type("exit");
 await page.keyboard.press("Enter");
 await settle(600);
 check("typing exit closes the terminal and nothing reconnects", (await state()).terms === 0);
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
+// 13d. a changed server key is explained, and the old key can be forgotten
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(400);
+sid1 = await activeSid();
+const warning = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\nThe fingerprint for the ED25519 key sent by the remote host is\r\nSHA256:abcDEF123.\r\nOffending ECDSA key in /home/u/.ssh/known_hosts:3\r\nHost key for web1.example.com has changed and you have requested strict checking.\r\nHost key verification failed.\r\n";
+await page.evaluate(([sid, w]) => { window.oso.since.set(sid, Date.now() - 60000); window.__osoMock.lose(sid, 255, w); }, [sid1, warning]);
+await settle(600);
+const cardText = await page.$eval(".pane.show .keycard", (c) => c.textContent).catch(() => "");
+check("a changed key shows a card that explains it, with the new fingerprint", cardText.includes("key changed") && cardText.includes("SHA256:abcDEF123") && cardText.includes("someone may be listening"), cardText);
+check("a changed key is not retried by itself", (await page.$$(".tab.retrying")).length === 0);
+await page.click(".keycard button:has-text('forget the old key')");
+await settle(800);
+check("forgetting asks the engine to remove that host's key, and connects again", JSON.stringify(await page.evaluate(() => window.__osoMock.forgotten)) === JSON.stringify(["web1.example.com"]) && (await page.$$(".keycard")).length === 0 && (await state()).terms === 1 && (await page.evaluate(() => window.oso.ws.tabsHere()[0].dead)) === false);
+await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");

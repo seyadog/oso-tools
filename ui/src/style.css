@@ -214,3 +214,11 @@ kbd { background: var(--bg-2); border: 1px solid var(--line-2); border-bottom-wi
 
 /* a terminal waiting to connect again */
 .tab.retrying .dot { background: var(--amber) !important; }
+
+/* the card that explains a changed server key */
+.keycard { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); width: min(520px, 90%); z-index: 5; padding: 16px 18px; background: var(--bg-2); border: 1px solid var(--red); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.5); line-height: 1.5; }
+.keycard h3 { margin: 0 0 8px; color: var(--red); font-size: 15px; }
+.keycard p { margin: 6px 0; color: var(--fg); }
+.keycard .warn { color: var(--amber); }
+.keycard .fp code { font-size: 12px; word-break: break-all; color: var(--dim); }
+.keycard .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
