@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="oso">
+  <rect width="100" height="100" rx="22" fill="#232327"/>
+  <!-- shield with ears -->
+  <path d="M18 30 L18 22 Q18 13 27 13 Q35 13 36 21 L64 21 Q65 13 73 13 Q82 13 82 22 L82 52 Q82 76 50 90 Q18 76 18 52 Z" fill="#a096ff"/>
+  <path d="M50 21 L64 21 Q65 13 73 13 Q82 13 82 22 L82 52 Q82 76 50 90 Z" fill="#8b7ff2"/>
+  <!-- inner ears -->
+  <path d="M23 24 Q23 18 27.5 18 Q31.5 18 31.5 22.5 Z" fill="#8b7ff2"/>
+  <path d="M77 24 Q77 18 72.5 18 Q68.5 18 68.5 22.5 Z" fill="#6f62e6"/>
+  <!-- eyes -->
+  <path d="M30 43 L44 46 L42 51 L31 48 Z" fill="#1d1d20" stroke="#1d1d20" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M70 43 L56 46 L58 51 L69 48 Z" fill="#1d1d20" stroke="#1d1d20" stroke-width="1.2" stroke-linejoin="round"/>
+  <!-- snout with keyhole nose -->
+  <path d="M50 53 L62 64 L50 80 L38 64 Z" fill="#e4e4e8" stroke="#e4e4e8" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="50" cy="61" r="3.3" fill="#1d1d20"/>
+  <path d="M48.4 62.5 L51.6 62.5 L52.6 69 L47.4 69 Z" fill="#1d1d20"/>
+</svg>

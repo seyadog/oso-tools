@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src-tauri/icons/icon.png" width="160" alt="oso, a brown bear sleeping on its back">
+  <img src="branding/oso.svg" width="160" alt="oso, a bear-shaped shield with a keyhole nose">
 </p>
 
 # oso

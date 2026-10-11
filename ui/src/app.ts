@@ -698,7 +698,7 @@ export class App {
     if (s.groups.length === 0) this.stage.append(this.homeView());
   }
 
-  /** What an empty screen shows: how it works (and the logo, to be replaced later). */
+  /** What an empty screen shows: how it works (and the logo). */
   private homeView(): HTMLElement {
     const k = (t: string) => el("kbd", {}, t);
     const ka = (action: string) => k(this.keyText(action) || "—");
