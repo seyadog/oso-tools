@@ -9,6 +9,7 @@ import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
 const LOCAL = 0;
@@ -43,6 +44,9 @@ export class App {
   private since = new Map<Id, number>();
   /** Terminals waiting to be connected again by themselves: which try they are on and the clock running. */
   private retry = new Map<Id, { attempt: number; timer: number }>();
+  /** Terminals that will say when they are done, and the ones that already did (until you look at them). */
+  private watches = new Map<Id, Watch>();
+  private alerts = new Set<Id>();
 
   snippets: { name: string; command: string }[] = [];
 
@@ -80,6 +84,7 @@ export class App {
     this.vault = await this.be.vaultStatus();
 
     window.addEventListener("keydown", (e) => this.onKey(e), true);
+    window.setInterval(() => this.watchTick(), 1000);
     window.addEventListener("resize", () => this.layout());
     new ResizeObserver(() => this.layout()).observe(this.stage);
     this.ws.onChange(() => {
@@ -269,6 +274,7 @@ export class App {
         onClose: (s) => void this.closeSession(s),
         onFocus: (s) => this.focusSession(s),
         onTitlePointerDown: (e, s) => this.startDrag(e, s, false),
+        onWatch: (s) => this.toggleWatch(s),
       });
       p.attach(this.stage);
       this.panes.set(sid, p);
@@ -292,11 +298,15 @@ export class App {
         pane.snapshot(e.replay, e.screen);
         if (e.exit != null) this.sessionEnded(e.sid, e.exit, true);
         break;
-      case "output":
+      case "output": {
         pane.output(e.data);
+        const w = this.watches.get(e.sid);
+        if (w) noteOutput(w, Date.now());
         break;
+      }
       case "exit":
         this.sessionEnded(e.sid, e.code);
+        this.watchEnded(e.sid, e.code);
         break;
       case "lost":
         this.sessionEnded(e.sid, 255);
@@ -327,6 +337,49 @@ export class App {
       if (verdict.retry) this.scheduleRetry(sid, verdict.attempt);
       else this.stopRetry(sid);
     });
+  }
+
+  // ------------------------------------------------------------ "tell me when it is done"
+
+  /** Mod+A and the bell: this terminal will say when its command is done (once), even if you are elsewhere. */
+  toggleWatch(sid: Id | null = this.ws.screen.active) {
+    const tab = sid == null ? undefined : this.ws.tabs.get(sid);
+    if (sid == null || !tab) return;
+    if (tab.dead) return toast("This terminal is not connected");
+    if (this.watches.has(sid)) {
+      this.watches.delete(sid);
+      toast("Not watching this terminal");
+    } else {
+      this.watches.set(sid, startWatch(Date.now()));
+      toast("Watching: you will be told when this terminal is done (once)");
+    }
+    this.alerts.delete(sid);
+    this.render();
+  }
+
+  private watchTick() {
+    const now = Date.now();
+    for (const [sid, w] of this.watches) {
+      const pane = this.panes.get(sid);
+      const v = pane ? verdict(w, now, pane.cursorLine()) : null;
+      if (v) this.tellDone(sid, v === "prompt" ? "Done: the terminal is back at its prompt" : `Went quiet: nothing printed for ${Math.round((now - w.lastOutput) / 1000)} s`);
+    }
+  }
+
+  private watchEnded(sid: Id, code: number) {
+    if (this.watches.has(sid)) this.tellDone(sid, code === 0 ? "The session ended" : "The connection ended");
+  }
+
+  /** It is done: a toast, a mark on its tab, and a desktop notification if you are not looking at it. */
+  private tellDone(sid: Id, what: string) {
+    this.watches.delete(sid);
+    const tab = this.ws.tabs.get(sid);
+    if (!tab) return;
+    const looking = document.hasFocus() && this.ws.screen.group && leaves(this.ws.screen.group.tree).includes(sid) && this.ws.screen.active === sid;
+    if (!looking) this.alerts.add(sid);
+    toast(`${tab.title}: ${what}`, 6000);
+    if (!looking) void this.be.notify(tab.title, what).catch(() => {});
+    this.render();
   }
 
   /** A server shows a different key than the saved one: explain it in plain words and offer the fix. */
@@ -410,6 +463,8 @@ export class App {
       }
       return;
     }
+    const w = this.watches.get(sid);
+    if (w) noteInput(w, Date.now());
     const team = this.ws.broadcastTeam(sid);
     if (team) {
       for (const id of team) if (!this.ws.tabs.get(id)?.dead) void this.be.write(id, data);
@@ -429,6 +484,8 @@ export class App {
       this.ws.rekey(sid, info.sid);
       this.since.delete(sid);
       this.since.set(info.sid, Date.now());
+      this.alerts.delete(sid);
+      this.watches.delete(sid);
       const r = this.retry.get(sid);
       if (r) clearInterval(r.timer);
       this.retry.delete(sid);
@@ -467,6 +524,8 @@ export class App {
     const pane = this.panes.get(sid);
     this.stopRetry(sid);
     this.since.delete(sid);
+    this.watches.delete(sid);
+    this.alerts.delete(sid);
     this.ws.closeTab(sid);
     pane?.dispose();
     this.panes.delete(sid);
@@ -489,8 +548,8 @@ export class App {
   // ------------------------------------------------------------ rendering
 
   render() {
-    this.renderTopbar();
     this.layout();
+    this.renderTopbar();
     this.renderSidebar();
     this.renderFoot();
     requestAnimationFrame(() => this.focusActive());
@@ -515,12 +574,14 @@ export class App {
       if (!rect) continue;
       pane.root.classList.toggle("mosaic", mosaic);
       pane.root.classList.toggle("active", tab.sid === s.active);
+      if (tab.sid === s.active) this.alerts.delete(tab.sid);
       pane.root.classList.toggle("dead", tab.dead);
       const bc = ws.broadcasting && !tab.dead;
       pane.root.classList.toggle("broadcast", bc);
       pane.badge.style.display = bc ? "" : "none";
       pane.setTitle(tab.title);
       pane.setNumber(here.indexOf(tab.sid) + 1);
+      pane.setWatching(this.watches.has(tab.sid));
       pane.setColor(serverColor(tab.serverId));
       Object.assign(pane.root.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px` });
       pane.forceRefit();
@@ -558,7 +619,7 @@ export class App {
       el("div", { class: "g-grid" },
         el("section", {}, el("h3", {}, "Open"), row([k("double-click")], "a host in the list: opens a new terminal (as many times as you want)"), row([ka("search")], "search a host by name and open it"), row([ka("tab.new")], "another terminal of the same host"), row([ka("sudo.fill")], "types the saved sudo password")),
         el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of this tab, on or off")),
-        el("section", {}, el("h3", {}, "Groups"), row([ka("group.save")], "save this tab (its servers and arrangement) as a group"), row(["Groups on the left"], "double-click one: all its terminals open together, even typing the command you chose in each"), row(["right-click a tab"], "save it as a group, rename it or close it")),
+        el("section", {}, el("h3", {}, "Groups"), row([ka("watch.toggle")], "after you start a long command: tells you when the terminal is done, even if you are elsewhere"), row([ka("group.save")], "save this tab (its servers and arrangement) as a group"), row(["Groups on the left"], "double-click one: all its terminals open together, even typing the command you chose in each"), row(["right-click a tab"], "save it as a group, rename it or close it")),
         el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
         el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
       ),
@@ -594,6 +655,13 @@ export class App {
         el("span", {}, t.title),
       );
       if (ids.length > 1) tab.append(count);
+      const watching = ids.some((id) => this.watches.has(id));
+      const alerted = ids.some((id) => this.alerts.has(id));
+      if (watching || alerted) {
+        const m = el("span", { class: `wm${alerted ? " done" : ""}`, title: alerted ? "A terminal of this tab finished" : "Watching: it will tell you when it is done" });
+        m.append(icon("bell", 13));
+        tab.append(m);
+      }
       if (g.broadcast && ids.length > 1) {
         const m = el("span", { class: "bcm", title: "Typing goes to every terminal of this tab" });
         m.append(icon("broadcast", 13));
@@ -631,6 +699,7 @@ export class App {
       this.ibtn("split-right", `New terminal to the right  (${this.keyText("split.right")})`, () => this.run("split.right")),
       this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
       this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this tab"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
+      this.ibtn("bell", `Tell me when this terminal is done  (${this.keyText("watch.toggle")})`, () => this.toggleWatch(), ws.screen.active != null && this.watches.has(ws.screen.active)),
       this.ibtn("save", "Save this tab as a group", () => void this.saveAsGroup()),
       this.ibtn("snippet", "Snippets: saved commands", () => this.snippetsDialog()),
       el("span", { class: "sep" }),
@@ -1529,6 +1598,8 @@ export class App {
         return void (ws.screen.active != null && this.renameTab(ws.screen.active));
       case "broadcast.toggle":
         return this.toggleBroadcast();
+      case "watch.toggle":
+        return this.toggleWatch();
       case "group.save":
         return void this.saveAsGroup();
       case "search":

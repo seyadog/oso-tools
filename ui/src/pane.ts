@@ -14,6 +14,7 @@ export interface PaneHandlers {
   onClose(sid: number): void;
   onFocus(sid: number): void;
   onTitlePointerDown(e: PointerEvent, sid: number): void;
+  onWatch(sid: number): void;
 }
 
 // The terminal version's colours: the soft pastels over the dark of the window.
@@ -48,6 +49,7 @@ export class Pane {
   readonly dot: HTMLElement;
   readonly num: HTMLElement;
   readonly banner: HTMLElement;
+  readonly watchBtn: HTMLElement;
   private keyCard: HTMLElement | null = null;
   readonly term: Terminal;
   private fit = new FitAddon();
@@ -72,17 +74,20 @@ export class Pane {
     close.append(icon("close", 14));
     this.dot = el("span", { class: "dot" });
     this.num = el("span", { class: "num" });
-    const title = el("div", { class: "title" }, this.num, this.dot, this.titleText, this.badge, close);
+    this.watchBtn = el("button", { class: "w", type: "button", title: "Tell me when this terminal is done" });
+    this.watchBtn.append(icon("bell", 14));
+    const title = el("div", { class: "title" }, this.num, this.dot, this.titleText, this.badge, this.watchBtn, close);
     this.termEl = el("div", { class: "term" });
     this.banner = el("div", { class: "dead-banner" }, this.bannerDefault);
     const frame = el("div", { class: "frame" }, title, this.termEl, this.banner);
     this.root = el("div", { class: "pane" }, frame);
 
     title.addEventListener("pointerdown", (e) => {
-      if ((e.target as HTMLElement).closest(".x")) return;
+      if ((e.target as HTMLElement).closest(".x, .w")) return;
       this.h.onTitlePointerDown(e, this.sid);
     });
     close.onclick = () => this.h.onClose(this.sid);
+    this.watchBtn.onclick = () => this.h.onWatch(this.sid);
     this.root.addEventListener("pointerdown", () => this.h.onFocus(this.sid), true);
 
     this.term = new Terminal({
@@ -131,6 +136,11 @@ export class Pane {
 
   setNumber(n: number) {
     this.num.textContent = String(n);
+  }
+
+  setWatching(on: boolean) {
+    this.watchBtn.classList.toggle("on", on);
+    this.watchBtn.title = on ? "Watching: it will tell you when this terminal is done (click to stop)" : "Tell me when this terminal is done";
   }
 
   setColor(c: string) {

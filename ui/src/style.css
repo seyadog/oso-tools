@@ -222,3 +222,12 @@ kbd { background: var(--bg-2); border: 1px solid var(--line-2); border-bottom-wi
 .keycard .warn { color: var(--amber); }
 .keycard .fp code { font-size: 12px; word-break: break-all; color: var(--dim); }
 .keycard .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+/* "tell me when it is done" */
+.pane .title .w { opacity: .35; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; }
+.pane .title:hover .w { opacity: .8; }
+.pane .title .w.on { opacity: 1; color: var(--accent); }
+.pane .title .w:hover { background: var(--hover); }
+.tab .wm { color: var(--accent); display: inline-flex; }
+.tab .wm.done { color: var(--green); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }

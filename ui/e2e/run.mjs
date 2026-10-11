@@ -472,6 +472,39 @@ await settle(300);
 await page.keyboard.press("Control+n");
 await settle(400);
 
+// 13e. "tell me when it is done"
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(400);
+sid1 = await activeSid();
+await page.keyboard.press("Alt+a");
+await settle(200);
+check("Alt+A switches the watch on: a mark on the tab and on the bell", (await page.$$(".tab .wm")).length === 1 && (await page.$$('.tools .ib.on[title^="Tell me"]')).length === 1);
+await page.keyboard.press("Control+n");
+await settle(400);
+await page.evaluate((sid) => window.__osoMock.say(sid, "\r\nBuilding...\r\nfinished ok\r\nweb-1:~$ "), sid1);
+await settle(1200);
+check("it stays quiet while the output is fresh", (await page.evaluate(() => window.__osoMock.notices.length)) === 0);
+await page.waitForFunction(() => window.__osoMock.notices.length === 1, null, { timeout: 6000 });
+const notice = await page.evaluate(() => window.__osoMock.notices[0]);
+check("when output stops at a prompt it says so, with a desktop notice for the tab you were not looking at", notice[0] === "web-1" && notice[1].startsWith("Done"), JSON.stringify(notice));
+check("the tab that finished is marked until you look at it", (await page.$$(".tab .wm.done")).length === 1 && (await page.$eval("#toast", (t) => t.textContent)).startsWith("web-1: Done"));
+await page.keyboard.press("Alt+1");
+await settle(300);
+check("looking at it clears the mark, and the watch is over (it speaks once)", (await page.$$(".tab .wm")).length === 0);
+// a session that ends while watched
+await page.keyboard.press("Alt+a");
+await page.keyboard.press("Alt+2");
+await settle(200);
+await page.evaluate((sid) => window.__osoMock.lose(sid, 255, "\r\nConnection closed\r\n"), sid1);
+await settle(500);
+check("a watched terminal whose connection ends says so", (await page.evaluate(() => window.__osoMock.notices.length)) === 2);
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
 // 14. the main key: one setting changes every shortcut at once
 await page.keyboard.press("Control+,");
 await settle(250);

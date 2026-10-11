@@ -189,6 +189,25 @@ fn forget_host_key(host: String) -> Res<String> {
     oso_core::known_hosts::forget(&host, None).map_err(err)
 }
 
+/// A desktop notification (the ones of the desktop itself, through `notify-send`). Quietly nothing if there is none.
+#[tauri::command]
+fn notify(title: String, body: String) {
+    let cut = |s: String| s.chars().take(200).collect::<String>();
+    let child = std::process::Command::new("notify-send")
+        .args(["--app-name=oso", "--icon=oso", "--"])
+        .arg(cut(title))
+        .arg(cut(body))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
+}
+
 #[tauri::command]
 fn read_config(name: String) -> Res<Option<String>> {
     let path = config_path(&name)?;
@@ -285,6 +304,7 @@ fn main() {
             set_meta,
             fill_sudo,
             forget_host_key,
+            notify,
             read_config,
             write_config,
         ])
