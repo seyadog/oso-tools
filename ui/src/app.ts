@@ -6,6 +6,7 @@ import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
 import { Pane } from "./pane";
+import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
 import { Place, Workspace } from "./workspace";
 
@@ -37,6 +38,10 @@ export class App {
   /** True for an instant after a drag ended, so the click that follows it does nothing. */
   private justDragged = false;
   private saveTimer = 0;
+  /** When each session started (to tell a connection that dropped from one that never worked). */
+  private since = new Map<Id, number>();
+  /** Terminals waiting to be connected again by themselves: which try they are on and the clock running. */
+  private retry = new Map<Id, { attempt: number; timer: number }>();
 
   snippets: { name: string; command: string }[] = [];
 
@@ -84,6 +89,7 @@ export class App {
     // What was left running, and where it was.
     const live = await this.be.restore(this.guessRows(), this.guessCols()).catch(() => [] as SessionInfo[]);
     this.measure();
+    live.forEach((s) => this.since.set(s.sid, Date.now() - 60000));
     const saved = await this.readJson<ReturnType<Workspace["save"]>>("workspace.json");
     this.ws.restore(
       saved,
@@ -241,6 +247,7 @@ export class App {
   }
 
   private addSession(info: SessionInfo, place?: Place) {
+    this.since.set(info.sid, Date.now());
     this.ws.addTab({ sid: info.sid, title: info.title, serverId: info.server_id }, place);
     this.focusArea = "terminal";
     this.ensurePane(info.sid);
@@ -282,7 +289,7 @@ export class App {
     switch (e.kind) {
       case "snapshot":
         pane.snapshot(e.replay, e.screen);
-        if (e.exit != null) this.sessionEnded(e.sid, e.exit);
+        if (e.exit != null) this.sessionEnded(e.sid, e.exit, true);
         break;
       case "output":
         pane.output(e.data);
@@ -300,16 +307,73 @@ export class App {
   }
 
   /** A clean exit closes the terminal, like a browser tab; a failure stays to show the error. */
-  private sessionEnded(sid: Id, code: number) {
+  private sessionEnded(sid: Id, code: number, atStart = false) {
     if (code === 0) return void this.closeSession(sid, false);
     this.ws.setDead(sid, true);
+    const tab = this.ws.tabs.get(sid);
+    // a session found already ended when the window opened waits for you: it may have died long ago
+    if (!tab || atStart) return;
+    // what the terminal printed last decides (a refused login must not be retried): wait until it is drawn
+    const pane = this.panes.get(sid);
+    void (pane ? pane.written() : Promise.resolve()).then(() => {
+      if (!this.ws.tabs.get(sid)?.dead) return;
+      const why = fatalReason(pane?.tail(6) ?? "");
+      if (why) return this.stopRetry(sid, `${why} Enter: try again · Alt+W: close`);
+      const before = this.retry.get(sid)?.attempt ?? 0;
+      const verdict = worthRetrying(code, Date.now() - (this.since.get(sid) ?? 0), before, tab.serverId === LOCAL);
+      if (verdict.retry) this.scheduleRetry(sid, verdict.attempt);
+      else this.stopRetry(sid);
+    });
+  }
+
+  /** The connection is gone: say so on the terminal, count down, and connect again. */
+  private scheduleRetry(sid: Id, attempt: number) {
+    this.retry.get(sid) && clearInterval(this.retry.get(sid)!.timer);
+    const pane = this.panes.get(sid);
+    const end = Date.now() + retryDelay(attempt) * 1000;
+    const paint = () => pane?.setBanner(`Connection lost: trying again in ${Math.max(0, Math.ceil((end - Date.now()) / 1000))} s (try ${attempt + 1} of ${MAX_TRIES}) · Enter: now · Esc: stop`);
+    const timer = window.setInterval(() => {
+      if (Date.now() >= end) {
+        clearInterval(timer);
+        void this.autoReconnect(sid, attempt);
+      } else paint();
+    }, 500);
+    this.retry.set(sid, { attempt, timer });
+    paint();
+    this.renderTopbar();
+  }
+
+  private stopRetry(sid: Id, message: string | null = null) {
+    const r = this.retry.get(sid);
+    if (r) clearInterval(r.timer);
+    this.retry.delete(sid);
+    this.panes.get(sid)?.setBanner(message);
+    if (r) this.renderTopbar();
+  }
+
+  /** The timer ran out: connect again (never asking for the vault: that waits for you). */
+  private async autoReconnect(sid: Id, attempt: number) {
+    const tab = this.ws.tabs.get(sid);
+    if (!tab || !tab.dead) return this.stopRetry(sid);
+    const ok = await this.reconnect(sid, true, true);
+    if (ok === "vault") return this.stopRetry(sid, "Connection lost. The vault is locked: unlock it and press Enter to connect again");
+    if (ok === "error") return this.stopRetry(sid);
+    // the new session carries on the count: if it dies at once, the next try is the one after this
+    const now = this.ws.tabs.get(ok);
+    if (now) this.retry.set(ok, { attempt: attempt + 1, timer: 0 });
   }
 
   private onTerminalData(sid: Id, data: string) {
     const tab = this.ws.tabs.get(sid);
     if (!tab) return;
     if (tab.dead) {
-      if (data === "\r") void this.reconnect(sid);
+      if (data === "\r") {
+        this.stopRetry(sid);
+        void this.reconnect(sid);
+      } else if (data === "\x1b" && this.retry.has(sid)) {
+        this.stopRetry(sid);
+        toast("Not reconnecting. Enter connects again");
+      }
       return;
     }
     const team = this.ws.broadcastTeam(sid);
@@ -320,28 +384,41 @@ export class App {
     void this.be.write(sid, data);
   }
 
-  async reconnect(sid: Id, useVault = true): Promise<void> {
+  /**
+   * The same connection again in the terminal that ended, keeping what it showed. Returns the new session's id,
+   * or why not: `vault` (it needs the vault unlocked and `auto` does not ask) or `error`.
+   */
+  async reconnect(sid: Id, useVault = true, auto = false): Promise<Id | "vault" | "error"> {
     const pane = this.panes.get(sid);
     try {
       const info = await this.be.reconnect(sid, pane?.term.rows ?? 24, pane?.term.cols ?? 80, useVault);
       this.ws.rekey(sid, info.sid);
+      this.since.delete(sid);
+      this.since.set(info.sid, Date.now());
+      const r = this.retry.get(sid);
+      if (r) clearInterval(r.timer);
+      this.retry.delete(sid);
       if (pane) {
         this.panes.delete(sid);
         pane.sid = info.sid;
+        pane.joinOld = true;
+        pane.setBanner(null);
         this.panes.set(info.sid, pane);
-        pane.term.reset();
       }
       const buffered = this.early.get(info.sid);
       this.early.delete(info.sid);
       buffered?.forEach((e) => this.onSession(e));
+      return info.sid;
     } catch (e) {
       if (e instanceof VaultLockedError) {
+        if (auto) return "vault";
         const c = await this.unlockDialog(true);
         if (c === "unlocked") return this.reconnect(sid, true);
         if (c === "without") return this.reconnect(sid, false);
-        return;
+        return "error";
       }
       toast(`Could not reconnect: ${(e as Error).message}`);
+      return "error";
     }
   }
 
@@ -353,6 +430,8 @@ export class App {
 
   async closeSession(sid: Id, kill = true) {
     const pane = this.panes.get(sid);
+    this.stopRetry(sid);
+    this.since.delete(sid);
     this.ws.closeTab(sid);
     pane?.dispose();
     this.panes.delete(sid);
@@ -474,7 +553,7 @@ export class App {
       count.append(icon("grid", 12), String(ids.length));
       const tab = el(
         "div",
-        { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
+        { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}${t.dead && this.retry.has(g.active) ? " retrying" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
         el("span", { class: "num" }, String(i + 1)),
         el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
         el("span", {}, t.title),
@@ -826,6 +905,7 @@ export class App {
     const fit = failed.size ? withoutPanes(use, failed) : use;
     const live = opened.filter(Boolean);
     if (!fit || !live.length) return;
+    live.forEach((o) => this.since.set(o.sid, Date.now()));
     this.ws.addGroup(
       live.map((o) => ({ sid: o.sid, title: o.title, serverId: o.server_id })),
       fit.shape,

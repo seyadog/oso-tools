@@ -393,6 +393,64 @@ await settle(300);
 await page.keyboard.press("Control+n");
 await settle(400);
 
+// 13c. a dropped connection is connected again by itself, keeping what was on screen
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(400);
+let sid1 = await activeSid();
+await page.keyboard.type("echo before-the-drop");
+await page.keyboard.press("Enter");
+await settle(300);
+await page.evaluate((sid) => { window.oso.since.set(sid, Date.now() - 60000); window.__osoMock.lose(sid, 255, "\r\nConnection to web1.example.com closed by remote host.\r\n"); }, sid1);
+await settle(400);
+check("a dropped connection shows a countdown to reconnect", /trying again in \d s \(try 1 of 8\)/.test(await page.$eval(".pane.show .dead-banner", (b) => b.textContent)) && (await page.$$(".tab.retrying")).length === 1);
+await page.waitForFunction(() => window.oso.ws.tabsHere().every((t) => !t.dead) && window.oso.ws.tabsHere().length === 1, null, { timeout: 6000 });
+let sid2 = await activeSid();
+await settle(500);
+const afterText = await termText(sid2);
+check("it connects again on its own, in the same terminal", sid2 !== sid1 && (await state()).tabs === 1 && afterText.includes("Welcome to web-1"));
+check("what the terminal showed before is still in the scroll-back, with a line where it reconnected", afterText.includes("before-the-drop") && afterText.includes("reconnected"), afterText);
+await page.keyboard.type("echo after");
+await page.keyboard.press("Enter");
+await settle(300);
+check("and you can type in it", (await termText(sid2)).includes("after\n"));
+
+// while the network is still down it keeps trying, with longer waits
+await page.evaluate((sid) => { window.__osoMock.knobs.failNext = 1; window.oso.since.set(sid, Date.now() - 60000); window.__osoMock.lose(sid); }, sid2);
+await page.waitForFunction(() => /try 2 of 8/.test(document.querySelector(".pane.show .dead-banner")?.textContent ?? ""), null, { timeout: 8000 });
+check("when the first try fails, the second is announced with a longer wait", /in [34] s \(try 2 of 8\)/.test(await page.$eval(".pane.show .dead-banner", (b) => b.textContent)));
+await page.waitForFunction(() => window.oso.ws.tabsHere().every((t) => !t.dead), null, { timeout: 8000 });
+check("and the second one gets through", (await state()).tabs === 1);
+
+// Esc stops it
+sid2 = await activeSid();
+await page.evaluate((sid) => { window.oso.since.set(sid, Date.now() - 60000); window.__osoMock.lose(sid); }, sid2);
+await settle(300);
+await page.keyboard.press("Escape");
+await settle(3000);
+check("Esc stops the retries: the terminal stays ended, and Enter connects", (await page.evaluate(() => window.oso.ws.tabsHere()[0].dead)) && (await page.$eval(".pane.show .dead-banner", (b) => b.textContent)).includes("Enter: reconnect"));
+await page.keyboard.press("Enter");
+await settle(500);
+check("Enter connects again at once", await page.evaluate(() => window.oso.ws.tabsHere().every((t) => !t.dead)));
+
+// a refused login is never retried (a wrong password could lock the account)
+sid2 = await activeSid();
+await page.evaluate((sid) => { window.oso.since.set(sid, Date.now() - 60000); window.__osoMock.lose(sid, 255, "\r\nweb-1: Permission denied (publickey,password).\r\n"); }, sid2);
+await settle(3500);
+check("a refused login is not retried", (await page.evaluate(() => window.oso.ws.tabsHere()[0].dead)) && (await page.$eval(".pane.show .dead-banner", (b) => b.textContent)).includes("did not accept the login"));
+// the user ending a session is not a drop
+await page.keyboard.press("Enter");
+await settle(500);
+sid2 = await activeSid();
+await page.keyboard.type("exit");
+await page.keyboard.press("Enter");
+await settle(600);
+check("typing exit closes the terminal and nothing reconnects", (await state()).terms === 0);
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
 // 14. the main key: one setting changes every shortcut at once
 await page.keyboard.press("Control+,");
 await settle(250);

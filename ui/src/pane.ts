@@ -56,6 +56,9 @@ export class Pane {
   private lastSize = "";
   /** When output last arrived (ms since the epoch), 0 if none yet. */
   lastOutputAt = 0;
+  /** The next snapshot is of a new session in the same place: keep what is on screen and scroll-back above it. */
+  joinOld = false;
+  private bannerDefault = "Session ended — Enter: reconnect · Alt+W: close";
 
   constructor(
     public sid: number,
@@ -70,7 +73,7 @@ export class Pane {
     this.num = el("span", { class: "num" });
     const title = el("div", { class: "title" }, this.num, this.dot, this.titleText, this.badge, close);
     this.termEl = el("div", { class: "term" });
-    this.banner = el("div", { class: "dead-banner" }, "Session ended — Enter: reconnect · Alt+W: close");
+    this.banner = el("div", { class: "dead-banner" }, this.bannerDefault);
     const frame = el("div", { class: "frame" }, title, this.termEl, this.banner);
     this.root = el("div", { class: "pane" }, frame);
 
@@ -156,14 +159,39 @@ export class Pane {
   /** The screen as the background server holds it: scroll-back first, then the exact screen. */
   snapshot(replay: string, screen: string) {
     this.lastOutputAt = Date.now();
-    this.term.reset();
-    if (replay) this.term.write(b64.decode(replay));
+    if (this.joinOld) {
+      // push what was on screen into the scroll-back, with a line that says where the new connection starts
+      this.joinOld = false;
+      const at = new Date().toTimeString().slice(0, 5);
+      this.term.write(`\r\n\x1b[2m──── reconnected ${at} ────\x1b[0m` + "\r\n".repeat(this.term.rows));
+    } else {
+      this.term.reset();
+      if (replay) this.term.write(b64.decode(replay));
+    }
     if (screen) this.term.write(b64.decode(screen));
+  }
+
+  /** The strip at the bottom of a terminal that is not connected (`null`: the usual one). */
+  setBanner(text: string | null) {
+    this.banner.textContent = text ?? this.bannerDefault;
   }
 
   output(data: string) {
     this.lastOutputAt = Date.now();
     this.term.write(b64.decode(data));
+  }
+
+  /** Resolves when everything written to the emulator so far has been drawn into its buffer. */
+  written(): Promise<void> {
+    return new Promise((resolve) => this.term.write("", resolve));
+  }
+
+  /** The last `n` lines of the terminal as text (what is on screen and the end of the scroll-back). */
+  tail(n: number): string {
+    const b = this.term.buffer.active;
+    const out: string[] = [];
+    for (let i = Math.max(0, b.length - n); i < b.length; i++) out.push(b.getLine(i)?.translateToString(true) ?? "");
+    return out.join("\n");
   }
 
   /** The line the cursor is on (what a prompt looks like when the shell is waiting). */

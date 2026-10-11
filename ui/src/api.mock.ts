@@ -28,6 +28,20 @@ export function mockBackend(): Backend {
     return info;
   };
 
+  // For the tests: make a session end the way a dropped connection does.
+  const knobs = { failNext: 0 };
+  (globalThis as unknown as { __osoMock: unknown }).__osoMock = {
+    knobs,
+    lose: (sid: number, code = 255, text = "") => {
+      const s = sessions.get(sid);
+      if (!s) return;
+      s.dead = true;
+      if (text) emit(sid, text);
+      queueMicrotask(() => handler({ sid, kind: "exit", code }));
+    },
+    say: (sid: number, text: string) => emit(sid, text),
+  };
+
   return {
     tree: async () => ({ folders: structuredClone(folders), servers: structuredClone(servers) }) as TreeData,
     vaultStatus: async () => ({ ...vault }),
@@ -85,7 +99,16 @@ export function mockBackend(): Backend {
       const old = sessions.get(sid);
       if (!old) throw new Error("no such session");
       sessions.delete(sid);
-      return make(old.info.title, old.info.server_id, old.info.meta);
+      const info = make(old.info.title, old.info.server_id, old.info.meta);
+      if (knobs.failNext > 0) {
+        knobs.failNext--;
+        setTimeout(() => {
+          const n = sessions.get(info.sid);
+          if (n) n.dead = true;
+          handler({ sid: info.sid, kind: "exit", code: 255 });
+        }, 60);
+      }
+      return info;
     },
     restore: async () => [...sessions.values()].map((s) => s.info),
     write: async (sid, data) => {

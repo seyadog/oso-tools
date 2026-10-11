@@ -211,3 +211,6 @@ kbd { background: var(--bg-2); border: 1px solid var(--line-2); border-bottom-wi
 .group-pane .who .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .group-pane input { flex: 1; min-width: 0; }
 .group-check { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
+
+/* a terminal waiting to connect again */
+.tab.retrying .dot { background: var(--amber) !important; }
