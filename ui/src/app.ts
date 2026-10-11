@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
@@ -10,6 +10,7 @@ import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { accountsSection } from "./accounts_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
 import { secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel } from "./tunnels";
@@ -56,6 +57,7 @@ export class App {
   /** Which servers are production, kept for those the profile filter hides while their terminal is open. */
   private prod = new Map<number, boolean>();
   private tunnelStatus = new Map<string, TunnelStatus>();
+  private accountsView: AccountsView | null = null;
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
@@ -98,6 +100,7 @@ export class App {
     this.groups = parseGroups(await this.be.readConfig("groups.json").catch(() => null));
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
+    void this.refreshAccounts();
 
     window.addEventListener("keydown", (e) => this.onKey(e), true);
     window.setInterval(() => this.watchTick(), 1000);
@@ -268,6 +271,12 @@ export class App {
     if (this.ws.tabs.size) this.render();
   }
 
+  /** Who is logged in to GitHub and Tailscale (asked of the tools themselves; hidden if they are not installed). */
+  async refreshAccounts() {
+    this.accountsView = await this.be.accounts().catch(() => null);
+    this.renderSidebar();
+  }
+
   /** Is this a production machine? (Its tab and terminal are drawn in red.) */
   private isProd(serverId: number): boolean {
     return this.prod.get(serverId) === true;
@@ -300,8 +309,47 @@ export class App {
         if (choice === "without") return this.openServer(serverId, false, place);
         return;
       }
+      const m = /^network:(.*)\|(.*)$/.exec((e as Error).message);
+      if (m) return this.networkQuestion(serverId, m[1], m[2], useVault, place);
       toast(`Could not open: ${(e as Error).message}`);
     }
+  }
+
+  /** The server is on a Tailscale account other than the one in use: switch, connect anyway, or give up. */
+  private networkQuestion(serverId: number, wanted: string, current: string, useVault: boolean, place?: Place): Promise<void> {
+    const name = this.tree.servers.find((s) => s.id === serverId)?.name ?? "This server";
+    return new Promise((resolve) => {
+      let done = false;
+      const go = async (f: () => Promise<void>) => {
+        done = true;
+        try {
+          await f();
+        } catch (e) {
+          toast((e as Error).message, 6000);
+          return resolve();
+        }
+        await this.openServer(serverId, useVault, place);
+        resolve();
+      };
+      openModal(
+        (close) => {
+          const sw = el("button", { class: "btn primary", type: "button", "data-act": "network-switch" }, `Switch to ${wanted}`);
+          const any = el("button", { class: "btn", type: "button", "data-act": "network-anyway" }, "Connect anyway");
+          const no = el("button", { class: "btn", type: "button" }, "Cancel");
+          sw.onclick = () => {
+            close();
+            void go(() => this.be.accountUse("tailscale", wanted).then(() => this.refreshAccounts()));
+          };
+          any.onclick = () => {
+            close();
+            void go(() => this.be.networkAccept(serverId));
+          };
+          no.onclick = close;
+          return el("div", {}, el("h2", {}, `Switch to ${wanted}?`), el("div", {}, `${name} is reached on the Tailscale account ${wanted}, and ${current} is the one in use. Connecting now could go the wrong way or not at all.`), el("div", { class: "actions" }, no, any, sw));
+        },
+        () => !done && resolve(),
+      );
+    });
   }
 
   private addSession(info: SessionInfo, place?: Place) {
@@ -945,6 +993,7 @@ export class App {
     if (!this.filter) {
       this.renderGroups();
       this.renderTunnels();
+      if (this.accountsView) accountsSection(this.treeEl, this.accountsView, this.be, () => this.refreshAccounts());
     } else if (this.groups.length) {
       const q = this.filter;
       for (const g of this.groups.filter((g) => g.name.toLowerCase().includes(q))) {
@@ -1468,7 +1517,7 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1482,6 +1531,7 @@ export class App {
       const profile = makeSelect(profileOptions(this.tree.profiles, "Its folder's, or every profile"), s.profile ?? "", { "data-name": "profile" });
       const envKind = makeSelect([["", "Not said"], ["production", "Production"], ["staging", "Staging"], ["dev", "Development"]], s.env_kind ?? "", { "data-name": "env-kind" });
       const proxy = makeSelect([["", "Direct"], ...this.tree.proxies.map((p): [string, string] => [String(p.id), p.name])], s.proxy == null ? "" : String(s.proxy), { "data-name": "proxy" });
+      const network = el("input", { value: s.network ?? "", name: "network", autocomplete: "off", spellcheck: "false", placeholder: "tailscale:work-tailnet (optional)" });
       const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false", placeholder: "nginx + API node, logs in /var/log/acme" }, s.notes);
       const tunnelsBtn = el("button", { class: "btn", type: "button", "data-act": "server-tunnels" }, s.forwards.length ? `Tunnels (${s.forwards.length})…` : "Tunnels…");
       tunnelsBtn.onclick = () => {
@@ -1503,7 +1553,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Host", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -1513,7 +1563,7 @@ export class App {
         if (!host.value.trim()) return void (err.textContent = "The host is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
-        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim() };
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null };
         const loginSecret = auth.value === "agent" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {

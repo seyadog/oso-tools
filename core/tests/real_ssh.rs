@@ -89,6 +89,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             notes: String::new(),
             env_kind: None,
             proxy: None,
+            network: None,
         },
         None,
         None,

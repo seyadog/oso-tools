@@ -1,19 +1,29 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, Backend, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
   const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true, profile: null }];
-  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null }];
+  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null, gh_user: null, tailscale_account: null }];
+  const tools: AccountsView = {
+    github: { installed: true, error: null, accounts: [{ id: "github.com/me", name: "me", detail: "github.com", active: true }, { id: "github.com/work-user", name: "work-user", detail: "github.com", active: false }] },
+    tailscale: { installed: true, error: null, accounts: [{ id: "4ab1", name: "me@corp.example.com", detail: "corp.example.com", active: true }, { id: "9fe2", name: "me@gmail.com", detail: "home.ts.net", active: false }] },
+  };
+  const networkOk = new Set<number>();
+  const use = (tool: "github" | "tailscale", id: string) => {
+    const t = tools[tool];
+    if (!t.accounts.some((a) => a.id === id || a.name === id || a.detail === id)) throw new Error(`${tool === "github" ? "GitHub" : "Tailscale"}: no such account`);
+    t.accounts.forEach((a) => (a.active = a.id === id || a.name === id || a.detail === id));
+  };
   const proxies: Proxy[] = [];
   let activeProfile = "default";
   let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
@@ -96,7 +106,7 @@ export function mockBackend(): Backend {
       }
       const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       if (!slug || profiles.some((p) => p.id === slug)) throw new Error(`there is already a profile called "${name}"`);
-      profiles.push({ id: slug, name: name.trim(), proxy: null });
+      profiles.push({ id: slug, name: name.trim(), proxy: null, gh_user: null, tailscale_account: null });
       return slug;
     },
     profileDelete: async (id) => {
@@ -106,7 +116,28 @@ export function mockBackend(): Backend {
       folders.forEach((f) => f.profile === id && (f.profile = "default"));
       if (activeProfile === id) activeProfile = "default";
     },
-    setActiveProfile: async (id) => void (activeProfile = id),
+    setActiveProfile: async (id) => {
+      activeProfile = id;
+      const p = profiles.find((x) => x.id === id)!;
+      const problems: string[] = [];
+      for (const [tool, want] of [["github", p.gh_user], ["tailscale", p.tailscale_account]] as const) {
+        if (!want) continue;
+        try {
+          use(tool, want);
+        } catch (e) {
+          problems.push((e as Error).message);
+        }
+      }
+      return problems;
+    },
+    accounts: async () => structuredClone(tools),
+    accountUse: async (tool, id) => use(tool, id),
+    profileSetAccounts: async (profile, gh, ts) => {
+      const p = profiles.find((x) => x.id === profile)!;
+      p.gh_user = gh || null;
+      p.tailscale_account = ts || null;
+    },
+    networkAccept: async (id) => void networkOk.add(id),
     setViewAll: async (all) => void (viewAll = all),
     proxySave: async (p) => {
       if (!p.name.trim()) throw new Error("a proxy needs a name");
@@ -202,6 +233,11 @@ export function mockBackend(): Backend {
     open: async (serverId, _rows, _cols, useVault = true) => {
       const s = servers.find((x) => x.id === serverId);
       if (serverId && !s) throw new Error("This server no longer exists");
+      const wanted = s?.network?.startsWith("tailscale:") ? s.network.slice(10) : "";
+      if (wanted && !networkOk.delete(serverId)) {
+        const now = tools.tailscale.accounts.find((a) => a.active);
+        if (!now || ![now.id, now.name, now.detail].includes(wanted)) throw new Error(`network:${wanted}|${now?.name ?? "none"}`);
+      }
       if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
       const local = activeProfile === "default" ? "Local" : `Local · ${profiles.find((p) => p.id === activeProfile)?.name ?? activeProfile}`;
       return make(s?.name ?? local, serverId);

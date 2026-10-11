@@ -4,6 +4,7 @@
 import { Backend, Profile, Proxy } from "./api";
 import { clear, confirmBox, el, field, makeSelect, openModal, promptBox, toast } from "./dom";
 import { icon } from "./icons";
+import { accountChoices } from "./accounts_ui";
 
 /** The drop-down of a server or a folder: no profile of its own, or one of them. */
 export function profileOptions(profiles: Profile[], none: string): [string, string][] {
@@ -34,7 +35,13 @@ export function profilesDialog(be: Backend, profiles: () => Profile[], proxies: 
             toast((e as Error).message);
           }
         };
+        const accts = btn("key", "GitHub and Tailscale accounts of this profile", () => {
+          close();
+          void profileAccountsDialog(be, p, onChange, () => profilesDialog(be, profiles, proxies, onChange));
+        });
+        accts.setAttribute("data-act", "profile-accounts");
         acts.append(
+          accts,
           px,
           btn("edit", "Rename", async () => {
             const n = await promptBox("Rename profile", p.name);
@@ -91,6 +98,35 @@ export function profilesDialog(be: Backend, profiles: () => Profile[], proxies: 
     };
     return el("div", {}, el("h2", {}, "Profiles"), el("div", { class: "hint", style: "margin:0 0 10px" }, "A profile keeps a set of hosts, secrets and accounts together. Switch it from the top of the host list."), list, form, el("div", { class: "actions" }, prox, done));
   });
+}
+
+/** The accounts a profile puts in use when it becomes the active one. */
+async function profileAccountsDialog(be: Backend, p: Profile, onChange: () => Promise<void>, again: () => void) {
+  const view = await be.accounts().catch(() => null);
+  openModal((close) => {
+    const gh = makeSelect(accountChoices(view?.github, p.gh_user), p.gh_user ?? "", { "data-name": "gh-user" });
+    const ts = makeSelect(accountChoices(view?.tailscale, p.tailscale_account), p.tailscale_account ?? "", { "data-name": "ts-account" });
+    const form = el("form", {}, el("h2", {}, `Accounts of ${p.name}`), el("div", { class: "hint", style: "margin:0 0 10px" }, "Switching to this profile also switches these. oso does not keep their tokens: the tools themselves do. Leave one alone to not touch it."));
+    if (view?.github.installed) form.append(field("GitHub (gh)", gh));
+    if (view?.tailscale.installed) form.append(field("Tailscale", ts));
+    if (!view?.github.installed && !view?.tailscale.installed) form.append(el("div", { class: "empty" }, "Neither `gh` nor `tailscale` is installed."));
+    if (view?.tailscale.error) form.append(el("div", { class: "hint" }, view.tailscale.error));
+    const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
+    const no = el("button", { class: "btn", type: "button" }, "Cancel");
+    no.onclick = close;
+    form.append(el("div", { class: "actions" }, no, ok));
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await be.profileSetAccounts(p.id, view?.github.installed ? gh.value || null : p.gh_user, view?.tailscale.installed ? ts.value || null : p.tailscale_account);
+        await onChange();
+        close();
+      } catch (x) {
+        toast((x as Error).message);
+      }
+    };
+    return form;
+  }, again);
 }
 
 /** Saved proxies: a server can connect through one, and a profile's local terminals can go out through one. */
@@ -174,7 +210,8 @@ export function profileBar(be: Backend, state: () => { profiles: Profile[]; prox
   const bar = el("div", { class: "profile-bar" });
   const sel = makeSelect(profiles.map((p): [string, string] => [p.id, p.name]), active, { "data-name": "active-profile", title: "Active profile" });
   sel.onchange = async () => {
-    await be.setActiveProfile(sel.value);
+    const problems = await be.setActiveProfile(sel.value);
+    if (problems.length) toast(problems.join(" · "), 8000);
     await changed();
   };
   const eye = el("button", { class: `ib${all ? " on" : ""}`, type: "button", title: all ? "Showing every profile's hosts" : "Show every profile's hosts", "aria-pressed": String(all), "data-act": "view-all" });

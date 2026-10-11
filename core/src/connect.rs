@@ -341,6 +341,7 @@ mod tests {
             notes: String::new(),
             env_kind: None,
             proxy: None,
+            network: None,
         }
     }
 

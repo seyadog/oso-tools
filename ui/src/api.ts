@@ -19,6 +19,8 @@ export interface Server {
   env_kind: "production" | "staging" | "dev" | null;
   /** Id of the saved proxy its connection leaves through. */
   proxy: number | null;
+  /** `tailscale:<account>`: the network it is on (oso asks before connecting on another account). */
+  network: string | null;
   /** Its own profile (null: its folder's, else every profile). */
   profile: string | null;
   /** Where it ended up: its own or its folder's (only in what `tree` returns). */
@@ -47,6 +49,26 @@ export interface Profile {
   name: string;
   /** Id of the proxy its local terminals go out through. */
   proxy: number | null;
+  /** The GitHub account (`host/login`) to use while it is active. */
+  gh_user: string | null;
+  /** The Tailscale account to be on while it is active. */
+  tailscale_account: string | null;
+}
+export interface Account {
+  id: string;
+  name: string;
+  detail: string;
+  active: boolean;
+}
+export interface ToolAccounts {
+  /** False when the program is not installed (the window hides it). */
+  installed: boolean;
+  accounts: Account[];
+  error: string | null;
+}
+export interface AccountsView {
+  github: ToolAccounts;
+  tailscale: ToolAccounts;
 }
 export interface Proxy {
   /** 0 for one that is not saved yet. */
@@ -138,7 +160,13 @@ export interface Backend {
   /** Adds a profile (`id` empty) or renames one; returns its id. */
   profileSave(id: string, name: string): Promise<string>;
   profileDelete(id: string): Promise<void>;
-  setActiveProfile(id: string): Promise<void>;
+  /** Switches the profile and the accounts it asks for; returns what could not be switched, in words. */
+  setActiveProfile(id: string): Promise<string[]>;
+  accounts(): Promise<AccountsView>;
+  accountUse(tool: "github" | "tailscale", id: string): Promise<void>;
+  profileSetAccounts(profile: string, ghUser: string | null, tailscaleAccount: string | null): Promise<void>;
+  /** "Connect anyway": the next open of this server skips the network question. */
+  networkAccept(serverId: number): Promise<void>;
   setViewAll(all: boolean): Promise<void>;
   setFolderProfile(id: number, profile: string | null): Promise<void>;
   proxySave(p: Proxy): Promise<number>;

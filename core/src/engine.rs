@@ -2,6 +2,7 @@
 //! and the sessions (kept alive by the background server). The Tauri commands are thin wrappers over this, so it
 //! is tested without a screen.
 
+use crate::accounts::{self, AccountsView, Runner};
 use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
@@ -39,6 +40,8 @@ pub enum OpenError {
     /// The server (or a hop) has a saved secret and the vault is locked.
     VaultLocked,
     NoSuchServer,
+    /// The server is on the Tailscale account `wanted` and `current` is the one in use: ask before connecting.
+    Network { wanted: String, current: String },
     Other(String),
 }
 
@@ -106,13 +109,17 @@ pub struct Engine {
     /// The profile the window works in, and whether the sidebar shows every profile's hosts.
     active_profile: String,
     view_all: bool,
+    /// How `gh` and `tailscale` are run (the tests give canned answers).
+    pub runner: Box<dyn Runner>,
+    /// Servers whose network question was answered "connect anyway", once.
+    network_ok: std::collections::HashSet<u64>,
 }
 
 impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default() }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -161,6 +168,9 @@ impl Engine {
         if server_id != LOCAL {
             if let Some(why) = connect::proxy_problem(&self.store, server_id) {
                 return Err(OpenError::Other(why));
+            }
+            if let Some((wanted, current)) = self.network_mismatch(server_id) {
+                return Err(OpenError::Network { wanted, current });
             }
         }
         if use_vault && server_id != LOCAL && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
@@ -514,6 +524,81 @@ impl Engine {
             self.set_active_profile(DEFAULT_PROFILE)?;
         }
         Ok(())
+    }
+
+    // ---------------------------------------------------------------- accounts
+
+    /// The accounts of GitHub and Tailscale and which is active. A tool that is not installed says so (`installed: false`).
+    pub fn accounts(&self) -> AccountsView {
+        AccountsView { github: accounts::github(&*self.runner), tailscale: accounts::tailscale(&*self.runner) }
+    }
+
+    /// Switches the account of a tool (`github` or `tailscale`).
+    pub fn account_use(&mut self, tool: &str, id: &str) -> Result<()> {
+        match tool {
+            "github" => accounts::github_switch(&*self.runner, id),
+            "tailscale" => accounts::tailscale_switch(&*self.runner, id),
+            _ => Err("unknown tool".into()),
+        }
+        .map_err(|m| anyhow!("{m}"))
+    }
+
+    /// The accounts a profile asks for (`None`: leave the tool alone).
+    pub fn profile_set_accounts(&mut self, profile: &str, gh_user: Option<String>, tailscale_account: Option<String>) -> Result<()> {
+        let clean = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
+        p.gh_user = clean(gh_user);
+        p.tailscale_account = clean(tailscale_account);
+        self.store.save()
+    }
+
+    /// Makes `id` the active profile and puts the accounts it asks for in use. A switch that fails is reported in the
+    /// answer, and does not stop the others.
+    pub fn switch_profile(&mut self, id: &str) -> Result<Vec<String>> {
+        self.set_active_profile(id)?;
+        let p = self.store.profiles.iter().find(|p| p.id == id).cloned().unwrap_or_default();
+        let mut problems = vec![];
+        if let Some(user) = p.gh_user.as_deref() {
+            let view = accounts::github(&*self.runner);
+            if !view.installed {
+                problems.push("GitHub: `gh` is not installed".to_string());
+            } else if !accounts::is_active(&view, user) {
+                let id = view.accounts.iter().find(|a| [&a.id, &a.name].iter().any(|x| x.eq_ignore_ascii_case(user))).map(|a| a.id.clone()).unwrap_or_else(|| user.to_string());
+                if let Err(e) = accounts::github_switch(&*self.runner, &id) {
+                    problems.push(e);
+                }
+            }
+        }
+        if let Some(acct) = p.tailscale_account.as_deref() {
+            let view = accounts::tailscale(&*self.runner);
+            if !view.installed {
+                problems.push("Tailscale: `tailscale` is not installed".to_string());
+            } else if !accounts::is_active(&view, acct) {
+                if let Err(e) = accounts::tailscale_switch(&*self.runner, acct) {
+                    problems.push(e);
+                }
+            }
+        }
+        Ok(problems)
+    }
+
+    /// For a server on `tailscale:<account>`: `(wanted, in use)` when they differ. Once the question was answered
+    /// "connect anyway" (`network_accept`), the next open goes through.
+    fn network_mismatch(&mut self, server_id: u64) -> Option<(String, String)> {
+        let wanted = self.store.server(server_id)?.network.as_deref()?.strip_prefix("tailscale:")?.trim().to_string();
+        if wanted.is_empty() || self.network_ok.remove(&server_id) {
+            return None;
+        }
+        let view = accounts::tailscale(&*self.runner);
+        if !view.installed || accounts::is_active(&view, &wanted) {
+            return None;
+        }
+        Some((wanted, accounts::active_name(&view).unwrap_or_else(|| "none".into())))
+    }
+
+    /// "Connect anyway" for the next open of this server.
+    pub fn network_accept(&mut self, server_id: u64) {
+        self.network_ok.insert(server_id);
     }
 
     // ---------------------------------------------------------------- proxies
@@ -926,6 +1011,7 @@ mod tests {
             notes: String::new(),
             env_kind: None,
             proxy: None,
+            network: None,
         }
     }
 
@@ -1260,5 +1346,86 @@ mod tests {
         assert!(e.tunnels.contains_key(&(id, saved.id)), "only name and auto changed");
         e.set_forwards(id, vec![Forward { bind_port: 5434, ..saved }]).unwrap();
         assert!(e.tunnels.is_empty(), "a different port is a different tunnel");
+    }
+
+    use crate::accounts::testing::{Fake, TS_LIST, TS_STATUS};
+
+    const GH_TWO: &str = r#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"me"},{"state":"success","active":false,"host":"github.com","login":"work-user"}]}}"#;
+
+    /// An engine whose `gh` and `tailscale` are canned; returns the log of what was run.
+    fn engine_with_tools(name: &str, answers: Vec<(&'static str, Option<(bool, &'static str, &'static str)>)>) -> (Engine, Log, Arc<Mutex<Vec<String>>>) {
+        let (mut e, log) = engine(name);
+        let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+        e.runner = Box::new(Fake { answers, calls: Arc::clone(&calls) });
+        (e, log, calls)
+    }
+
+    #[test]
+    fn switching_profile_switches_the_accounts_it_asks_for_and_only_those() {
+        let (mut e, _log, calls) = engine_with_tools(
+            "accounts",
+            vec![("gh auth status", Some((true, GH_TWO, ""))), ("gh auth switch", Some((true, "", ""))), ("tailscale status", Some((true, TS_STATUS, ""))), ("tailscale switch --list", Some((true, TS_LIST, ""))), ("tailscale switch 9fe2", Some((true, "", "")))],
+        );
+        let work = e.profile_save("", "Work").unwrap();
+        e.profile_set_accounts(&work, Some("work-user".into()), Some("9fe2".into())).unwrap();
+        let problems = e.switch_profile(&work).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let ran = calls.lock().unwrap().join("\n");
+        assert!(ran.contains("gh auth switch --hostname github.com --user work-user"), "{ran}");
+        assert!(ran.contains("tailscale switch 9fe2"), "{ran}");
+        assert_eq!(e.active_profile(), "work");
+        // a profile that asks for nothing touches nothing
+        calls.lock().unwrap().clear();
+        assert!(e.switch_profile("default").unwrap().is_empty());
+        assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock().unwrap());
+        // an account that is already in use is left alone
+        e.profile_set_accounts("default", Some("me".into()), Some("corp.example.com".into())).unwrap();
+        calls.lock().unwrap().clear();
+        e.switch_profile("default").unwrap();
+        assert!(!calls.lock().unwrap().iter().any(|c| c.contains("switch 9") || c.contains("auth switch") || c.starts_with("tailscale switch ") && !c.contains("--list")), "{:?}", calls.lock().unwrap());
+    }
+
+    #[test]
+    fn a_switch_that_fails_is_reported_and_the_other_still_happens() {
+        let (mut e, _log, calls) = engine_with_tools(
+            "accounts-fail",
+            vec![("gh auth status", Some((true, GH_TWO, ""))), ("gh auth switch", Some((false, "", "no such user\n"))), ("tailscale status", Some((true, TS_STATUS, ""))), ("tailscale switch --list", Some((true, TS_LIST, ""))), ("tailscale switch 9fe2", Some((true, "", "")))],
+        );
+        let work = e.profile_save("", "Work").unwrap();
+        e.profile_set_accounts(&work, Some("work-user".into()), Some("9fe2".into())).unwrap();
+        let problems = e.switch_profile(&work).unwrap();
+        assert_eq!(problems, vec!["GitHub: no such user".to_string()]);
+        assert!(calls.lock().unwrap().iter().any(|c| c == "tailscale switch 9fe2"), "Tailscale was switched anyway");
+        assert_eq!(e.active_profile(), "work", "the profile changed anyway");
+    }
+
+    #[test]
+    fn a_tool_that_is_missing_is_a_note_not_a_failure() {
+        let (mut e, _log, _calls) = engine_with_tools("accounts-missing", vec![("gh", None), ("tailscale", None)]);
+        let work = e.profile_save("", "Work").unwrap();
+        e.profile_set_accounts(&work, Some("me".into()), None).unwrap();
+        let problems = e.switch_profile(&work).unwrap();
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("not installed"));
+        let v = e.accounts();
+        assert!(!v.github.installed && !v.tailscale.installed, "hidden in the window");
+    }
+
+    #[test]
+    fn a_server_on_another_tailscale_account_asks_before_connecting() {
+        let (mut e, _log, calls) = engine_with_tools("network", vec![("tailscale status", Some((true, TS_STATUS, ""))), ("tailscale switch --list", Some((true, TS_LIST, "")))]);
+        let on_home = e.save_server(Server { network: Some("tailscale:home.ts.net".into()), auth: Auth::Agent, ..server("nas") }, None, None).unwrap();
+        let on_corp = e.save_server(Server { network: Some("tailscale:corp.example.com".into()), auth: Auth::Agent, ..server("api") }, None, None).unwrap();
+        let plain = e.save_server(Server { auth: Auth::Agent, ..server("plain") }, None, None).unwrap();
+        calls.lock().unwrap().clear();
+        assert_eq!(e.open(on_home, 24, 80, true).err(), Some(OpenError::Network { wanted: "home.ts.net".into(), current: "me@corp.example.com".into() }));
+        assert!(!calls.lock().unwrap().iter().any(|c| c.starts_with("ssh")), "nothing was launched");
+        // "connect anyway" lets exactly one open through
+        e.network_accept(on_home);
+        assert!(!matches!(e.open(on_home, 24, 80, true).err(), Some(OpenError::Network { .. })));
+        assert!(matches!(e.open(on_home, 24, 80, true).err(), Some(OpenError::Network { .. })));
+        // the right account, or no network declared: no question
+        assert!(!matches!(e.open(on_corp, 24, 80, true).err(), Some(OpenError::Network { .. })));
+        assert!(!matches!(e.open(plain, 24, 80, true).err(), Some(OpenError::Network { .. })));
     }
 }

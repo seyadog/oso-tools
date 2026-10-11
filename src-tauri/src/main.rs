@@ -49,6 +49,7 @@ fn open_err(e: OpenError) -> String {
     match e {
         OpenError::VaultLocked => "vault_locked".into(),
         OpenError::NoSuchServer => "This server no longer exists".into(),
+        OpenError::Network { wanted, current } => format!("network:{wanted}|{current}"),
         OpenError::Other(m) => m,
     }
 }
@@ -113,9 +114,31 @@ fn profile_delete(state: State<AppState>, id: String) -> Res<()> {
     engine!(state).profile_delete(&id).map_err(err)
 }
 
+/// Switches the profile and the accounts it asks for; the answer lists what could not be switched.
 #[tauri::command]
-fn set_active_profile(state: State<AppState>, id: String) -> Res<()> {
-    engine!(state).set_active_profile(&id).map_err(err)
+fn set_active_profile(state: State<AppState>, id: String) -> Res<Vec<String>> {
+    engine!(state).switch_profile(&id).map_err(err)
+}
+
+#[tauri::command]
+fn accounts(state: State<AppState>) -> Res<oso_core::accounts::AccountsView> {
+    Ok(engine!(state).accounts())
+}
+
+#[tauri::command]
+fn account_use(state: State<AppState>, tool: String, id: String) -> Res<()> {
+    engine!(state).account_use(&tool, &id).map_err(err)
+}
+
+#[tauri::command]
+fn profile_set_accounts(state: State<AppState>, profile: String, gh_user: Option<String>, tailscale_account: Option<String>) -> Res<()> {
+    engine!(state).profile_set_accounts(&profile, gh_user, tailscale_account).map_err(err)
+}
+
+#[tauri::command]
+fn network_accept(state: State<AppState>, server_id: u64) -> Res<()> {
+    engine!(state).network_accept(server_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -389,6 +412,10 @@ fn main() {
             profile_save,
             profile_delete,
             set_active_profile,
+            accounts,
+            account_use,
+            profile_set_accounts,
+            network_accept,
             set_view_all,
             set_folder_profile,
             proxy_save,

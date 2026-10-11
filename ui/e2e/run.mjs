@@ -433,6 +433,52 @@ await page.evaluate(async () => {
 });
 await clearAll();
 
+// accounts of GitHub and Tailscale, and the network question
+check("the accounts of the tools that exist are listed", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: me") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com"));
+await page.click('.row.acct:has-text("work-user") button');
+await settle(300);
+check("another account can be used", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: work-user"));
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.accountUse("github", "github.com/me");
+  const st = (await be.tree()).servers.find((x) => x.name === "staging");
+  await be.saveServer({ ...st, network: "tailscale:home.ts.net" }, null, null);
+  await window.oso.refreshTree();
+  await window.oso.refreshAccounts();
+});
+await page.dblclick('.row[data-kind="server"] >> text=staging');
+await settle(400);
+check("a server on another Tailscale account asks first", (await page.textContent("#modal-bg")).includes("Switch to home.ts.net?") && (await state()).tabs === 0);
+await page.click('[data-act="network-anyway"]');
+await settle(500);
+check("connect anyway opens it", (await state()).tabs === 1);
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=staging');
+await settle(400);
+await page.click('[data-act="network-switch"]');
+await settle(600);
+check("switching changes the account and then opens it", (await state()).tabs === 1 && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@gmail.com"));
+await clearAll();
+// a profile that asks for accounts puts them in use
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.profileSave("", "Client");
+  await be.profileSetAccounts("client", "github.com/work-user", "4ab1");
+  await be.setActiveProfile("client");
+  await window.oso.refreshTree();
+  await window.oso.refreshAccounts();
+});
+await settle(200);
+check("switching profile switches its accounts", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: work-user") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com"));
+await shot("9d-accounts");
+await page.evaluate(async () => {
+  const be = window.oso.be;
+  await be.setActiveProfile("default");
+  const st = (await be.tree()).servers.find((x) => x.name === "staging");
+  await be.saveServer({ ...st, network: null }, null, null);
+  await window.oso.refreshTree();
+});
+
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
 await page.dblclick('.row[data-kind="server"] >> text=web-1');

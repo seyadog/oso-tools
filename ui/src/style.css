@@ -293,3 +293,8 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .row.tunnel.up .tdot { background: #82e682; }
 .row.tunnel.failed .tdot { background: var(--red); }
 .row.tunnel.failed small { color: var(--red); }
+
+/* Accounts */
+.row.acct-head { cursor: default; }
+.row.acct { padding-left: 24px; cursor: default; }
+.btn.small { padding: 2px 10px; font-size: 12px; }

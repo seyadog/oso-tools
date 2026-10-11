@@ -104,6 +104,9 @@ pub struct Server {
     /// The saved proxy this server (or, if it is the first hop, everything behind it) is reached through.
     #[serde(default)]
     pub proxy: Option<u64>,
+    /// The network it is reached on, as `tailscale:<account>`; oso asks before connecting on another account.
+    #[serde(default)]
+    pub network: Option<String>,
 }
 
 /// What a machine is used for. Production is shown in red and an agent always has to ask before touching it.
@@ -183,6 +186,12 @@ pub struct Profile {
     /// The proxy local terminals of this profile go out through (their `HTTP_PROXY` and friends; nothing else changes).
     #[serde(default)]
     pub proxy: Option<u64>,
+    /// The GitHub account (`host/login`) `gh` should use while this profile is active.
+    #[serde(default)]
+    pub gh_user: Option<String>,
+    /// The Tailscale account (id, tailnet or account name) to be on while this profile is active.
+    #[serde(default)]
+    pub tailscale_account: Option<String>,
 }
 
 impl Profile {
@@ -581,6 +590,7 @@ mod tests {
             notes: String::new(),
             env_kind: None,
             proxy: None,
+            network: None,
         }
     }
 
