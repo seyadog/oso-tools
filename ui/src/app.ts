@@ -137,6 +137,35 @@ export class App {
         await this.be.writeConfig("selftest.out", report.join("\n"));
         return;
       }
+      if (want === "features") {
+        // groups, broadcast and the "done" watch, with local terminals in the real window
+        await this.openServer(LOCAL);
+        this.ws.prepareSplit("right");
+        await this.openServer(LOCAL);
+        const sh = this.ws.shape()!;
+        this.groups = [{ id: 1, name: "selftest", broadcast: false, shape: sh.shape, panes: [{ server: LOCAL, name: "Local", command: "echo group-ok-$((6*7))" }, { server: LOCAL, name: "Local", command: "" }] }];
+        for (const id of [...this.ws.tabs.keys()]) await this.closeSession(id);
+        await this.openGroup(this.groups[0]);
+        await wait(4000);
+        const sids = this.ws.tabsHere().map((t) => t.sid);
+        report.push(`group: ${this.ws.screen.groups.length} tab, ${sids.length} terminals, mosaic ${this.ws.screen.mode}`);
+        report.push(`start command typed: ${text(sids[0]).includes("group-ok-42")}`);
+        this.ws.setBroadcast(true);
+        this.onTerminalData(sids[0], "echo bc-$((1+1))\r");
+        await wait(1500);
+        report.push(`broadcast reached both: ${sids.every((s) => text(s).includes("bc-2"))}`);
+        this.ws.setBroadcast(false);
+        this.ws.focus(sids[0]);
+        this.toggleWatch(sids[0]);
+        report.push(`watching: ${this.watches.has(sids[0])}`);
+        this.onTerminalData(sids[0], "sleep 3; echo watch-done\r");
+        await wait(12000);
+        report.push(`watch spoke and switched itself off: ${!this.watches.has(sids[0])}`);
+        report.push(`tunnels: ${JSON.stringify(await this.be.tunnels())} transfers: ${JSON.stringify(await this.be.transfers())}`);
+        report.push(`terminal 1 last lines: ${JSON.stringify(text(sids[0]).trim().split("\n").slice(-3))}`);
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
       if (want === "mosaic") {
         await this.openServer(LOCAL);
         this.ws.prepareSplit("right");

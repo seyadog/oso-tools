@@ -24,7 +24,13 @@ Servers, folders and the vault live in `~/.config/oso` (`servers.json`, `vault.j
 - **Tabs and mosaic:** every terminal is born as a tab (numbered 1, 2, 3…). Drag a tab down onto the screen and it joins the one you are looking at, side by side: the two become *one* tab (it shows a ▦ and the count). Drag a terminal by its title up to the tab bar and it is a tab again. Hosts from the left list can be dragged onto the screen too. `Alt+V` / `Alt+H` open the next terminal inside the current tab (right / below); `Alt+M` joins every tab in one mosaic, and again sets them apart. New terminals inside a mosaic tile automatically (beside if the box is wide, below if tall, never too small).
 - **Placing terminals:** `Alt+V` / `Alt+H` open a new one to the right / below. Drag a terminal by its title (or a tab from the bar) to the edge of another: it docks there and takes half; in the middle it trades places. Drag the line between two to resize. `Alt+arrows` move the keyboard between terminals, `Alt+Shift+arrows` move the terminal itself.
 - **Closing:** the **×** on a terminal, or `Alt+W`. A session that ended cleanly closes itself; one that failed stays with `Enter: reconnect`.
-- **Broadcast:** `Alt+B` / `⇉ all`: what you type goes to every terminal of the tab.
+- **Broadcast:** `Alt+B` (or the broadcast icon): what you type goes to every terminal of *this tab*, on or off. It belongs to the tab: other tabs are not touched, and a tab keeps it across restarts.
+- **Groups:** arrange some terminals in a tab, then `Alt+G` (the save icon, or right-click the tab → *Save as group*). A group keeps which server each terminal is, how they are arranged, whether broadcast is on, and an optional command per terminal. Groups are listed on the left; double-click one and all its terminals open together as one tab. The commands are typed only once the terminal shows a prompt, never at a password question. Saved in `~/.config/oso/groups.json`.
+- **Reconnecting:** if a connection drops (wifi, a laptop that slept), the terminal counts down and connects again by itself, with growing waits (2 s up to 1 min, 8 tries), keeping what it showed and marking where it reconnected. `Enter` connects at once, `Esc` stops. It never retries after a refused login (a wrong password could lock the account). A new connection is a new shell: programs that ran on the server are gone (use `tmux` on the server to keep them).
+- **Changed server key:** if a server shows a different key than the saved one, oso says what that means in plain words, shows the new fingerprint and offers to forget the old key (`ssh-keygen -R`).
+- **Tell me when it is done:** after you start a long command, `Alt+A` (the bell). When the terminal is back at its prompt (or has been silent for 20 s, or its connection ended) you get a message, a desktop notification if you are looking elsewhere (`notify-send`), and a mark on the tab. It speaks once.
+- **Tunnels:** `Alt+T` (or the tunnel icon, bottom left). Port forwards per server, each with a switch: *local* (a port here that leads to something the server can reach, `ssh -L`), *remote* (`ssh -R`) and *SOCKS proxy* (`ssh -D`). They use the same login and jump hosts as a terminal, and stay on while oso is open. A failure is shown next to the tunnel in words (port in use, login refused…).
+- **Files:** drag files or folders from your file manager onto a terminal to upload them to its server, or `Alt+F` to type the paths (it also downloads). Uses `scp` with the same login and jump hosts; progress shows at the bottom right.
 - **Open a host:** double-click it in the list, the ▶ on it, drag it onto the screen, or `Alt+K` (type a few letters, Enter). Snippets (saved commands) are in the toolbar; Settings has the hotkeys.
 - **Servers:** the same host can be opened as many times as you want. Drag a server onto a folder to file it. Servers can go through a jump host. The vault (key icon, bottom left) is also a password viewer: read, copy, change or remove each saved password.
 - **Hotkeys:** `Ctrl+,` opens Settings. The **main key** (Alt by default) can be changed to Ctrl, Super or Ctrl+Alt there, and every shortcut that starts with it changes at once; any single shortcut can also be changed. The file is `~/.config/oso/hotkeys.json` (`{"modifier": "Super", "mode.toggle": "Super+M", "tab.close": null}`; `Mod+X` in an entry means "main key + X"). Keys are matched by position, so the same shortcuts work on every keyboard layout.
@@ -40,8 +46,9 @@ cargo install tauri-cli --version "^2" --locked
 cargo tauri dev            # the app
 cd ui && npm run dev       # the interface alone, in a browser, with the mock engine
 
-cargo test -p oso-core     # engine: servers, vault, sessions, background server
-cd ui && npm test          # tiling tree, tabs, hotkeys
+cargo test -p oso-core     # engine: servers, vault, sessions, background server; tunnels and file copies
+                           # run against a real sshd on a high port (skipped if sshd is not installed)
+cd ui && npm test          # tiling tree, tabs, groups, hotkeys, reconnect rules
 cd ui && npm run e2e       # the real interface in a real browser, driven like a person would
 ```
 
