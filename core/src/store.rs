@@ -36,6 +36,32 @@ impl Auth {
     }
 }
 
+/// Which way a port forward goes.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardKind {
+    /// A port on this computer that leads to `host:port` as the server sees it (`ssh -L`).
+    Local,
+    /// A port on the server that leads to `host:port` as this computer sees it (`ssh -R`).
+    Remote,
+    /// A SOCKS proxy on this computer that goes out through the server (`ssh -D`).
+    Dynamic,
+}
+
+/// A saved port forward of a server. Whether it is switched on is not saved: it is on while oso keeps it open.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Forward {
+    pub id: u64,
+    pub kind: ForwardKind,
+    /// The port that is opened (on this computer for local and dynamic, on the server for remote).
+    pub bind_port: u16,
+    /// Where it leads (not used by a dynamic one).
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Server {
     pub id: u64,
@@ -57,6 +83,9 @@ pub struct Server {
     /// A sudo/su password is saved in the vault.
     #[serde(default)]
     pub has_sudo: bool,
+    /// Port forwards (tunnels) kept for this server.
+    #[serde(default)]
+    pub forwards: Vec<Forward>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -344,6 +373,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            forwards: vec![],
         }
     }
 

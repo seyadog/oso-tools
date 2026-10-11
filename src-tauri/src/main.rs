@@ -5,8 +5,8 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use oso_core::daemon::Stream;
-use oso_core::engine::{Emit, Engine, OpenError, SessionInfo, VaultStatus};
-use oso_core::store::{NodeId, Server, Store};
+use oso_core::engine::{Emit, Engine, OpenError, SessionInfo, TransferStatus, TunnelStatus, VaultStatus};
+use oso_core::store::{Forward, NodeId, Server, Store};
 use oso_core::vault::Vault;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -189,6 +189,43 @@ fn forget_host_key(host: String) -> Res<String> {
     oso_core::known_hosts::forget(&host, None).map_err(err)
 }
 
+#[tauri::command]
+fn set_forwards(state: State<AppState>, server_id: u64, forwards: Vec<Forward>) -> Res<()> {
+    engine!(state).set_forwards(server_id, forwards).map_err(err)
+}
+
+#[tauri::command]
+fn tunnel_start(state: State<AppState>, server_id: u64, forward_id: u64, use_vault: bool) -> Res<()> {
+    engine!(state).tunnel_start(server_id, forward_id, use_vault).map_err(open_err)
+}
+
+#[tauri::command]
+fn tunnel_stop(state: State<AppState>, server_id: u64, forward_id: u64) -> Res<()> {
+    engine!(state).tunnel_stop(server_id, forward_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn tunnels(state: State<AppState>) -> Res<Vec<TunnelStatus>> {
+    Ok(engine!(state).tunnels())
+}
+
+#[tauri::command]
+fn transfer_start(state: State<AppState>, server_id: u64, upload: bool, local: Vec<String>, remote: String, use_vault: bool) -> Res<u64> {
+    engine!(state).transfer_start(server_id, upload, local, &remote, use_vault).map_err(open_err)
+}
+
+#[tauri::command]
+fn transfers(state: State<AppState>) -> Res<Vec<TransferStatus>> {
+    Ok(engine!(state).transfers())
+}
+
+#[tauri::command]
+fn transfer_clear(state: State<AppState>, id: u64) -> Res<()> {
+    engine!(state).transfer_clear(id);
+    Ok(())
+}
+
 /// A desktop notification (the ones of the desktop itself, through `notify-send`). Quietly nothing if there is none.
 #[tauri::command]
 fn notify(title: String, body: String) {
@@ -305,6 +342,13 @@ fn main() {
             fill_sudo,
             forget_host_key,
             notify,
+            set_forwards,
+            tunnel_start,
+            tunnel_stop,
+            tunnels,
+            transfer_start,
+            transfers,
+            transfer_clear,
             read_config,
             write_config,
         ])

@@ -1,15 +1,15 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { Backend, Folder, Server, SessionEvent, SessionInfo, TreeData, VaultLockedError, b64 } from "./api";
+import { Backend, FileDrag, Folder, Forward, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
   const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true }];
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, forwards: [] },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, forwards: [] },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, forwards: [] },
   ];
   const config = new Map<string, string>();
   const secrets = new Map<string, string>();
@@ -32,10 +32,19 @@ export function mockBackend(): Backend {
   const knobs = { failNext: 0 };
   const forgotten: string[] = [];
   const notices: [string, string][] = [];
+  const tunnelState = new Map<string, TunnelStatus>();
+  const transferList: TransferStatus[] = [];
+  const started: unknown[] = [];
+  let fileDrag: (e: FileDrag) => void = () => {};
+  let nextTransfer = 1;
   (globalThis as unknown as { __osoMock: unknown }).__osoMock = {
     knobs,
     forgotten,
     notices,
+    tunnelState,
+    started,
+    transferList,
+    drag: (e: FileDrag) => fileDrag(e),
     lose: (sid: number, code = 255, text = "") => {
       const s = sessions.get(sid);
       if (!s) return;
@@ -153,6 +162,45 @@ export function mockBackend(): Backend {
       if (s) s.info.meta = meta;
     },
     fillSudo: async () => {},
+    setForwards: async (serverId, forwards) => {
+      const s = servers.find((x) => x.id === serverId);
+      if (!s) throw new Error("this server no longer exists");
+      let id = Math.max(0, ...forwards.map((f) => f.id)) + 1;
+      s.forwards = forwards.map((f): Forward => ({ ...f, id: f.id || id++ }));
+      for (const k of [...tunnelState.keys()]) if (k.startsWith(`${serverId}:`) && !s.forwards.some((f) => k === `${serverId}:${f.id}`)) tunnelState.delete(k);
+    },
+    tunnelStart: async (serverId, forwardId, useVault = true) => {
+      const s = servers.find((x) => x.id === serverId);
+      if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
+      const key = `${serverId}:${forwardId}`;
+      started.push([serverId, forwardId]);
+      const busy = s?.forwards.find((f) => f.id === forwardId)?.bind_port === 1;
+      tunnelState.set(key, { server_id: serverId, forward_id: forwardId, state: "starting", message: "" });
+      setTimeout(() => {
+        const cur = tunnelState.get(key);
+        if (cur) tunnelState.set(key, busy ? { ...cur, state: "failed", message: "That port is already in use on this computer: pick another one." } : { ...cur, state: "up" });
+      }, 400);
+    },
+    tunnelStop: async (serverId, forwardId) => void tunnelState.delete(`${serverId}:${forwardId}`),
+    tunnels: async () => [...tunnelState.values()],
+    transferStart: async (serverId, upload, local, remote, useVault = true) => {
+      const s = servers.find((x) => x.id === serverId);
+      if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
+      const id = nextTransfer++;
+      const t: TransferStatus = { id, server_id: serverId, upload, what: local.length > 1 ? `${local.length} files` : (upload ? local[0] : remote).split("/").pop() ?? "", state: "running", percent: 10, message: "" };
+      started.push({ transfer: id, serverId, upload, local, remote });
+      transferList.push(t);
+      setTimeout(() => (t.percent = 60), 300);
+      setTimeout(() => {
+        t.state = remote.includes("nothing") ? "failed" : "done";
+        t.message = t.state === "failed" ? "scp: No such file or directory" : "";
+        t.percent = t.state === "done" ? 100 : null;
+      }, 700);
+      return id;
+    },
+    transfers: async () => transferList.map((t) => ({ ...t })),
+    transferClear: async (id) => void transferList.splice(transferList.findIndex((t) => t.id === id), 1),
+    onFileDrag: (f) => void (fileDrag = f),
     notify: async (title, body) => void notices.push([title, body]),
     forgetHostKey: async (host) => {
       forgotten.push(host);

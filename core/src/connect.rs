@@ -2,7 +2,7 @@
 //! prompt may be answered with. It has no interface in it, so any front end can use it.
 
 use crate::session::{Autofill, SpawnOpts};
-use crate::store::{Auth, Server, Store};
+use crate::store::{Auth, Forward, ForwardKind, Server, Store};
 use crate::vault::{Kind, Vault};
 use std::path::PathBuf;
 
@@ -129,18 +129,81 @@ pub fn needs_vault(store: &Store, id: u64) -> bool {
     store.server(id).is_some_and(wants) || store.jump_chain(id).into_iter().any(wants)
 }
 
-/// The command, title and secrets to open `id`. `unlocked` says whether the saved secrets may be used.
-pub fn plan(store: &Store, vault: &mut Vault, id: u64, rows: u16, cols: u16, use_vault: bool) -> Option<Plan> {
-    let (argv, title, login_expected) = if id == LOCAL {
-        (local_shell(), "Local".to_string(), false)
-    } else {
-        let server = store.server(id)?.clone();
-        (ssh_argv(store, &server), server.name.clone(), server.auth == Auth::Password)
-    };
+/// What is needed to run `argv` (an ssh or scp command for server `id`): the saved secrets are typed at the
+/// prompts they belong to. `login_expected` says the first generic `Password:` is the login.
+pub fn opts_for(store: &Store, vault: &mut Vault, id: u64, argv: Vec<String>, rows: u16, cols: u16, use_vault: bool) -> SpawnOpts {
+    let login_expected = id != LOCAL && store.server(id).is_some_and(|s| s.auth == Auth::Password);
     let fills = if use_vault && id != LOCAL { autofills(store, vault, id) } else { vec![] };
-    Some(Plan { title, opts: SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None } })
+    SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None }
 }
 
+/// The command, title and secrets to open `id`. `unlocked` says whether the saved secrets may be used.
+pub fn plan(store: &Store, vault: &mut Vault, id: u64, rows: u16, cols: u16, use_vault: bool) -> Option<Plan> {
+    let (argv, title) = if id == LOCAL {
+        (local_shell(), "Local".to_string())
+    } else {
+        let server = store.server(id)?.clone();
+        (ssh_argv(store, &server), server.name.clone())
+    };
+    Some(Plan { title, opts: opts_for(store, vault, id, argv, rows, cols, use_vault) })
+}
+
+/// `ssh` that only keeps `forward` open (no shell), through the same jump hosts and with the same login as a
+/// terminal of this server. `extra` goes before the target (options for tests).
+pub fn tunnel_argv(store: &Store, s: &Server, f: &Forward, extra: &[String]) -> Vec<String> {
+    let mut a = ssh_argv(store, s);
+    let target = a.pop().unwrap_or_default();
+    a.extend(["-N".into(), "-o".into(), "ExitOnForwardFailure=yes".into(), "-o".into(), "ControlPath=none".into()]);
+    let spec = match f.kind {
+        ForwardKind::Local => ["-L".to_string(), format!("127.0.0.1:{}:{}:{}", f.bind_port, f.host, f.port)],
+        ForwardKind::Remote => ["-R".to_string(), format!("127.0.0.1:{}:{}:{}", f.bind_port, f.host, f.port)],
+        ForwardKind::Dynamic => ["-D".to_string(), format!("127.0.0.1:{}", f.bind_port)],
+    };
+    a.extend(spec);
+    a.extend(extra.iter().cloned());
+    a.push(target);
+    a
+}
+
+/// Which way a file goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+/// `scp` for server `s` with the same login and jump hosts as a terminal. Up: `local` are paths on this computer
+/// and `remote` is the folder on the server (empty: its home). Down: `local[0]` is the folder here and `remote` the
+/// path on the server. `extra` goes before the files (options for tests).
+pub fn scp_argv(store: &Store, s: &Server, dir: Direction, local: &[String], remote: &str, extra: &[String]) -> Vec<String> {
+    let mut ssh = ssh_argv(store, s);
+    let target = ssh.pop().unwrap_or_default();
+    let mut a: Vec<String> = vec!["scp".into(), "-r".into(), "-o".into(), "ControlPath=none".into()];
+    let mut it = ssh.into_iter().skip(1);
+    while let Some(x) = it.next() {
+        // scp spells the port -P
+        if x == "-p" {
+            a.push("-P".into());
+        } else {
+            a.push(x);
+        }
+    }
+    a.extend(extra.iter().cloned());
+    let remote_spec = |path: &str| format!("{target}:{}", path.trim_start_matches("~/").trim_start_matches('~'));
+    match dir {
+        Direction::Up => {
+            a.push("--".into());
+            a.extend(local.iter().cloned());
+            a.push(remote_spec(remote));
+        }
+        Direction::Down => {
+            a.push("--".into());
+            a.push(remote_spec(remote));
+            a.push(local.first().cloned().unwrap_or_else(|| ".".into()));
+        }
+    }
+    a
+}
 
 #[cfg(test)]
 mod tests {
@@ -159,6 +222,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            forwards: vec![],
         }
     }
 
@@ -215,6 +279,59 @@ mod tests {
         let a = ssh_argv(&st, &st.server(id).unwrap().clone());
         let pc = a.iter().find(|x| x.starts_with("ProxyCommand=")).unwrap();
         assert!(pc.contains("-i '/k/my key'") || pc.contains("-i \"/k/my key\""), "{pc}");
+    }
+
+    fn forward(kind: ForwardKind) -> Forward {
+        Forward { id: 1, kind, bind_port: 5433, host: "db.internal".into(), port: 5432 }
+    }
+
+    #[test]
+    fn tunnel_keeps_the_forward_and_no_shell() {
+        let s = server(Auth::Key, "/k/id", "root");
+        let a = tunnel_argv(&Store::default(), &s, &forward(ForwardKind::Local), &[]);
+        assert_eq!(a.last().unwrap(), "root@h.example");
+        assert!(a.contains(&"-N".to_string()));
+        assert!(a.windows(2).any(|w| w == ["-L", "127.0.0.1:5433:db.internal:5432"]), "{a:?}");
+        assert!(a.windows(2).any(|w| w == ["-o", "ExitOnForwardFailure=yes"]));
+        assert!(a.windows(2).any(|w| w == ["-i", "/k/id"]), "same login as a terminal");
+        let r = tunnel_argv(&Store::default(), &s, &forward(ForwardKind::Remote), &[]);
+        assert!(r.windows(2).any(|w| w == ["-R", "127.0.0.1:5433:db.internal:5432"]), "{r:?}");
+        let d = tunnel_argv(&Store::default(), &s, &forward(ForwardKind::Dynamic), &["-o".into(), "X=1".into()]);
+        assert!(d.windows(2).any(|w| w == ["-D", "127.0.0.1:5433"]), "{d:?}");
+        assert_eq!(d[d.len() - 3..], ["-o".to_string(), "X=1".to_string(), "root@h.example".to_string()]);
+    }
+
+    #[test]
+    fn tunnel_goes_through_the_jump_hosts() {
+        let (st, t) = chain_store(Auth::Agent);
+        let a = tunnel_argv(&st, &t, &forward(ForwardKind::Local), &[]);
+        assert!(a.windows(2).any(|w| w == ["-J", "ops@bastion.example"]), "{a:?}");
+    }
+
+    #[test]
+    fn scp_up_and_down() {
+        let s = server(Auth::Key, "/k/id", "root");
+        let st = Store::default();
+        let up = scp_argv(&st, &s, Direction::Up, &["/tmp/a b.txt".into(), "/tmp/dir".into()], "~/backups", &[]);
+        assert_eq!(up[0], "scp");
+        assert!(up.contains(&"-r".to_string()));
+        assert!(up.windows(2).any(|w| w == ["-P", "2222"]), "scp spells the port -P: {up:?}");
+        assert!(!up.contains(&"-p".to_string()));
+        assert!(up.windows(2).any(|w| w == ["-i", "/k/id"]));
+        let at = up.iter().position(|x| x == "--").unwrap();
+        assert_eq!(up[at + 1..], ["/tmp/a b.txt", "/tmp/dir", "root@h.example:backups"]);
+        // home when no folder is given
+        let home = scp_argv(&st, &s, Direction::Up, &["/tmp/x".into()], "", &[]);
+        assert_eq!(home.last().unwrap(), "root@h.example:");
+        let down = scp_argv(&st, &s, Direction::Down, &["/home/me/Downloads".into()], "/var/log/syslog", &[]);
+        assert_eq!(down[down.len() - 2..], ["root@h.example:/var/log/syslog", "/home/me/Downloads"]);
+    }
+
+    #[test]
+    fn scp_goes_through_the_jump_hosts_too() {
+        let (st, t) = chain_store(Auth::Key);
+        let a = scp_argv(&st, &t, Direction::Up, &["/tmp/x".into()], "", &[]);
+        assert!(a.iter().any(|x| x.starts_with("ProxyCommand=")), "{a:?}");
     }
 
     #[test]

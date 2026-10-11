@@ -5,10 +5,12 @@ import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openM
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
+import { Transfers, filesDialog } from "./files_ui";
 import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
 import { MAX_TRIES, fatalReason, retryDelay, worthRetrying } from "./reconnect";
 import { Id, Rect, Side, autoSide, dockSide, dockZone, leaves } from "./tree";
+import { tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
@@ -47,6 +49,10 @@ export class App {
   /** Terminals that will say when they are done, and the ones that already did (until you look at them). */
   private watches = new Map<Id, Watch>();
   private alerts = new Set<Id>();
+  private transfers!: Transfers;
+  /** How many tunnels are on (the mark on the Tunnels button). */
+  private tunnelsUp = 0;
+  private fileOver: Pane | null = null;
 
   snippets: { name: string; command: string }[] = [];
 
@@ -77,6 +83,9 @@ export class App {
     this.stage.append(this.hint);
     this.buildSidebar();
     this.be.onSession((e) => this.onSession(e));
+    this.transfers = new Transfers(this.be);
+    this.be.onFileDrag((e) => this.onFileDrag(e));
+    window.setInterval(() => void this.pollTunnels(), 3000);
     await this.loadKeys();
     this.snippets = (await this.readJson<{ name: string; command: string }[]>("snippets.json")) ?? [];
     this.groups = parseGroups(await this.be.readConfig("groups.json").catch(() => null));
@@ -337,6 +346,60 @@ export class App {
       if (verdict.retry) this.scheduleRetry(sid, verdict.attempt);
       else this.stopRetry(sid);
     });
+  }
+
+  // ------------------------------------------------------------ tunnels and files
+
+  private tunnelCtx() {
+    return {
+      be: this.be,
+      servers: () => this.tree.servers,
+      refreshTree: () => this.refreshTree(),
+      unlock: (offer: boolean) => this.unlockDialog(offer),
+    };
+  }
+
+  openTunnels() {
+    tunnelsDialog(this.tunnelCtx(), () => void this.pollTunnels());
+  }
+
+  private async pollTunnels() {
+    try {
+      const up = (await this.be.tunnels()).filter((t) => t.state !== "failed").length;
+      if (up !== this.tunnelsUp) {
+        this.tunnelsUp = up;
+        this.renderFoot();
+      }
+    } catch {
+      /* the next one will do */
+    }
+  }
+
+  /** Files of the server of the terminal you are in (or of the one under the pointer when files were dropped). */
+  openFiles(sid: Id | null = this.ws.screen.active, dropped: string[] = []) {
+    const tab = sid == null ? undefined : this.ws.tabs.get(sid);
+    if (!tab) return toast("Open a terminal on a server first");
+    const server = this.tree.servers.find((s) => s.id === tab.serverId);
+    if (!server) return toast("Files go to a server: this terminal is on this computer");
+    filesDialog({ be: this.be, unlock: (o) => this.unlockDialog(o) }, this.transfers, { id: server.id, name: server.name }, dropped);
+  }
+
+  /** Files dragged from the file manager over the window: the terminal under them lights up; dropped, it asks where. */
+  private onFileDrag(e: { type: "over" | "drop" | "leave"; paths: string[]; x: number; y: number }) {
+    const under = (): Pane | null => {
+      const at = e.type === "leave" ? null : document.elementFromPoint(e.x, e.y);
+      if (!at) return null;
+      for (const p of this.panes.values()) if (p.root.classList.contains("show") && p.root.contains(at)) return p;
+      return null;
+    };
+    const pane = under();
+    if (this.fileOver && this.fileOver !== pane) this.fileOver.root.classList.remove("filedrop");
+    this.fileOver = e.type === "drop" || e.type === "leave" ? null : pane;
+    if (e.type === "over") return void pane?.root.classList.add("filedrop");
+    pane?.root.classList.remove("filedrop");
+    if (e.type !== "drop" || !e.paths.length) return;
+    if (!pane) return toast("Drop the files on a terminal: they go to its server");
+    this.openFiles(pane.sid, e.paths);
   }
 
   // ------------------------------------------------------------ "tell me when it is done"
@@ -619,6 +682,7 @@ export class App {
       el("div", { class: "g-grid" },
         el("section", {}, el("h3", {}, "Open"), row([k("double-click")], "a host in the list: opens a new terminal (as many times as you want)"), row([ka("search")], "search a host by name and open it"), row([ka("tab.new")], "another terminal of the same host"), row([ka("sudo.fill")], "types the saved sudo password")),
         el("section", {}, el("h3", {}, "Tabs or mosaic"), row(["drag a tab onto the screen"], "joins it to the one you are looking at, side by side (a mosaic)"), row(["drag a terminal up to the tab bar"], "it becomes a tab again"), row([ka("mode.toggle")], "join every tab into one mosaic, and back"), row([ka("split.right")], "new terminal to the right"), row([ka("split.down")], "new terminal below"), row([ka("broadcast.toggle")], "type in every terminal of this tab, on or off")),
+        el("section", {}, el("h3", {}, "Files and tunnels"), row(["drag files onto a terminal"], "uploads them to that terminal's server"), row([ka("files.open")], "copy files up or down, with the path typed"), row([ka("tunnels.open")], "port forwards with a switch each: open a port here that leads to something only the server can reach")),
         el("section", {}, el("h3", {}, "Groups"), row([ka("watch.toggle")], "after you start a long command: tells you when the terminal is done, even if you are elsewhere"), row([ka("group.save")], "save this tab (its servers and arrangement) as a group"), row(["Groups on the left"], "double-click one: all its terminals open together, even typing the command you chose in each"), row(["right-click a tab"], "save it as a group, rename it or close it")),
         el("section", {}, el("h3", {}, "Place terminals"), row(["drag a title"], "onto the edge of another terminal to dock it there"), row(["drag the line"], "between two terminals to resize them"), row([ka("focus.left"), " …"], "move between terminals"), row([ka("move.left"), " …"], "move this terminal")),
         el("section", {}, el("h3", {}, "Tabs"), row([ka("tab.1"), "…", ka("tab.9")], "go to that tab (like a browser; the last number goes to the last tab)"), row([ka("tab.prev"), " ", ka("tab.next")], "previous / next tab"), row([ka("tab.close")], "close this terminal")),
@@ -700,6 +764,7 @@ export class App {
       this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
       this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this tab"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
       this.ibtn("bell", `Tell me when this terminal is done  (${this.keyText("watch.toggle")})`, () => this.toggleWatch(), ws.screen.active != null && this.watches.has(ws.screen.active)),
+      this.ibtn("files", `Copy files to or from this server  (${this.keyText("files.open")})`, () => this.openFiles()),
       this.ibtn("save", "Save this tab as a group", () => void this.saveAsGroup()),
       this.ibtn("snippet", "Snippets: saved commands", () => this.snippetsDialog()),
       el("span", { class: "sep" }),
@@ -744,7 +809,7 @@ export class App {
     const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: "Passwords in the vault" });
     v.append(icon(this.vault.unlocked ? "unlock" : "lock", 16), this.vault.unlocked ? "Vault · unlocked" : this.vault.exists ? "Vault · locked" : "Create the vault");
     v.onclick = () => void this.vaultDialog();
-    this.footEl.append(v, this.ibtn("terminal", "Local terminal", () => void this.openServer(LOCAL)), this.ibtn("settings", `Settings  (${this.keyText("settings")})`, () => this.settingsDialog()));
+    this.footEl.append(v, this.ibtn("tunnel", `Tunnels: port forwards  (${this.keyText("tunnels.open")})`, () => this.openTunnels(), false, this.tunnelsUp ? "live" : ""), this.ibtn("terminal", "Local terminal", () => void this.openServer(LOCAL)), this.ibtn("settings", `Settings  (${this.keyText("settings")})`, () => this.settingsDialog()));
   }
 
   private visibleServers(): Server[] {
@@ -1383,7 +1448,7 @@ export class App {
 
   /** Add (`null`) or edit a server. Secrets go to the vault; blank leaves a saved one alone. */
   async serverForm(existing: Server | null) {
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, forwards: [] };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -1600,6 +1665,10 @@ export class App {
         return this.toggleBroadcast();
       case "watch.toggle":
         return this.toggleWatch();
+      case "files.open":
+        return this.openFiles();
+      case "tunnels.open":
+        return this.openTunnels();
       case "group.save":
         return void this.saveAsGroup();
       case "search":

@@ -13,6 +13,15 @@ export interface Server {
   jump: number | null;
   has_secret: boolean;
   has_sudo: boolean;
+  forwards: Forward[];
+}
+export interface Forward {
+  /** 0 for one that is not saved yet. */
+  id: number;
+  kind: "local" | "remote" | "dynamic";
+  bind_port: number;
+  host: string;
+  port: number;
 }
 export interface Folder {
   id: number;
@@ -40,6 +49,29 @@ export type SessionEvent =
   | { sid: number; kind: "exit"; code: number }
   | { sid: number; kind: "sudo"; on: boolean }
   | { sid: number; kind: "lost" };
+
+export interface TunnelStatus {
+  server_id: number;
+  forward_id: number;
+  state: "starting" | "up" | "failed";
+  message: string;
+}
+export interface TransferStatus {
+  id: number;
+  server_id: number;
+  upload: boolean;
+  what: string;
+  state: "running" | "done" | "failed";
+  percent: number | null;
+  message: string;
+}
+/** Files dragged from the desktop over the window (positions in the window's own pixels). */
+export interface FileDrag {
+  type: "over" | "drop" | "leave";
+  paths: string[];
+  x: number;
+  y: number;
+}
 
 export class VaultLockedError extends Error {
   constructor() {
@@ -72,6 +104,14 @@ export interface Backend {
   fillSudo(sid: number, serverId: number): Promise<void>;
   forgetHostKey(host: string): Promise<string>;
   notify(title: string, body: string): Promise<void>;
+  setForwards(serverId: number, forwards: Forward[]): Promise<void>;
+  tunnelStart(serverId: number, forwardId: number, useVault?: boolean): Promise<void>;
+  tunnelStop(serverId: number, forwardId: number): Promise<void>;
+  tunnels(): Promise<TunnelStatus[]>;
+  transferStart(serverId: number, upload: boolean, local: string[], remote: string, useVault?: boolean): Promise<number>;
+  transfers(): Promise<TransferStatus[]>;
+  transferClear(id: number): Promise<void>;
+  onFileDrag(f: (e: FileDrag) => void): void;
   readConfig(name: string): Promise<string | null>;
   writeConfig(name: string, text: string): Promise<void>;
   onSession(f: (e: SessionEvent) => void): void;

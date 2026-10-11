@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Backend, SessionEvent, VaultLockedError } from "./api";
 
 /** The commands of src-tauri, one for one. */
@@ -35,6 +36,20 @@ export function tauriBackend(): Backend {
     close: (sid) => call("close_session", { sid }),
     setMeta: (sid, meta) => call("set_meta", { sid, meta }),
     fillSudo: (sid, serverId) => call("fill_sudo", { sid, serverId }),
+    setForwards: (serverId, forwards) => call("set_forwards", { serverId, forwards }),
+    tunnelStart: (serverId, forwardId, useVault = true) => call("tunnel_start", { serverId, forwardId, useVault }),
+    tunnelStop: (serverId, forwardId) => call("tunnel_stop", { serverId, forwardId }),
+    tunnels: () => call("tunnels"),
+    transferStart: (serverId, upload, local, remote, useVault = true) => call("transfer_start", { serverId, upload, local, remote, useVault }),
+    transfers: () => call("transfers"),
+    transferClear: (id) => call("transfer_clear", { id }),
+    onFileDrag: (f) =>
+      void getCurrentWebview().onDragDropEvent((e) => {
+        const p = e.payload;
+        const scale = window.devicePixelRatio || 1;
+        if (p.type === "leave") return f({ type: "leave", paths: [], x: 0, y: 0 });
+        f({ type: p.type === "drop" ? "drop" : "over", paths: "paths" in p ? p.paths : [], x: p.position.x / scale, y: p.position.y / scale });
+      }),
     notify: (title, body) => call("notify", { title, body }),
     forgetHostKey: (host) => call("forget_host_key", { host }),
     readConfig: (name) => call("read_config", { name }),

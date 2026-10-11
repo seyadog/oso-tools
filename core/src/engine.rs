@@ -4,14 +4,16 @@
 
 use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
+use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
-use crate::store::{Auth, NodeId, Server, Store};
+use crate::store::{Auth, Forward, ForwardKind, NodeId, Server, Store};
 use crate::vault::{Kind, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use crate::daemon::Stream as SessionEvent;
 
@@ -43,17 +45,69 @@ pub enum OpenError {
 /// Where the events of every session go (the window).
 pub type Emit = Arc<dyn Fn(u64, Stream) + Send + Sync>;
 
+/// Where downloads go when no folder is given.
+pub fn downloads_dir() -> String {
+    let dirs = directories::UserDirs::new();
+    dirs.as_ref()
+        .and_then(|d| d.download_dir().map(|p| p.to_path_buf()).or_else(|| Some(d.home_dir().to_path_buf())))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".into())
+}
+
+/// How a tunnel is doing.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TunnelStatus {
+    pub server_id: u64,
+    pub forward_id: u64,
+    /// `starting`, `up` or `failed`.
+    pub state: &'static str,
+    pub message: String,
+}
+
+/// How a file copy is doing.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TransferStatus {
+    pub id: u64,
+    pub server_id: u64,
+    pub upload: bool,
+    /// What is being copied, for a sentence ("2 files", or the name).
+    pub what: String,
+    /// `running`, `done` or `failed`.
+    pub state: &'static str,
+    pub percent: Option<u8>,
+    pub message: String,
+}
+
+struct Tunnel {
+    job: Option<Job>,
+    up: bool,
+    failed: Option<String>,
+}
+
+struct Transfer {
+    server_id: u64,
+    upload: bool,
+    what: String,
+    job: Job,
+    end: Option<std::result::Result<(), String>>,
+}
+
 pub struct Engine {
     pub store: Store,
     pub vault: Vault,
     daemon: Option<Daemon>,
     sessions: HashMap<u64, crate::daemon::RemoteSession>,
     emit: Emit,
+    tunnels: HashMap<(u64, u64), Tunnel>,
+    transfers: HashMap<u64, Transfer>,
+    next_transfer: u64,
+    /// Extra options put before the target of every tunnel and copy (the tests use it to reach their own sshd).
+    pub ssh_extra: Vec<String>,
 }
 
 impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![] }
     }
 
     /// Connects to the background server, starting it if needed.
@@ -277,6 +331,7 @@ impl Engine {
             let old = self.store.server(s.id).context("this server no longer exists")?;
             s.has_secret = old.has_secret;
             s.has_sudo = old.has_sudo;
+            s.forwards = old.forwards.clone();
             let id = s.id;
             self.store.update_server(s);
             id
@@ -346,6 +401,153 @@ impl Engine {
             self.store.save()?;
         }
         Ok(ok)
+    }
+
+    // ---------------------------------------------------------------- tunnels
+
+    /// Saves the port forwards of a server (the list as the window has it; new ones have `id == 0`).
+    pub fn set_forwards(&mut self, server_id: u64, mut forwards: Vec<Forward>) -> Result<()> {
+        let mut s = self.store.server(server_id).context("this server no longer exists")?.clone();
+        let mut next = forwards.iter().map(|f| f.id).max().unwrap_or(0) + 1;
+        for f in &mut forwards {
+            if f.bind_port == 0 {
+                bail!("a tunnel needs a port");
+            }
+            let host = f.host.trim();
+            let bad_host = host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control() || c == ':');
+            if f.kind != ForwardKind::Dynamic && (bad_host || f.port == 0) {
+                bail!("a tunnel needs the name (or IPv4 address) and the port it leads to");
+            }
+            f.host = f.host.trim().to_string();
+            if f.id == 0 {
+                f.id = next;
+                next += 1;
+            }
+        }
+        // a tunnel that was removed or changed is switched off
+        let gone: Vec<u64> = s.forwards.iter().filter(|old| !forwards.contains(old)).map(|f| f.id).collect();
+        for id in gone {
+            self.tunnel_stop(server_id, id);
+        }
+        s.forwards = forwards;
+        self.store.update_server(s);
+        self.store.save()
+    }
+
+    /// Switches a tunnel on. It stays on while oso is open; `tunnels()` says how it is doing.
+    pub fn tunnel_start(&mut self, server_id: u64, forward_id: u64, use_vault: bool) -> std::result::Result<(), OpenError> {
+        let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
+        let fwd = server.forwards.iter().find(|f| f.id == forward_id).ok_or(OpenError::NoSuchServer)?.clone();
+        if use_vault && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
+            return Err(OpenError::VaultLocked);
+        }
+        self.tunnel_stop(server_id, forward_id);
+        let mut argv = connect::tunnel_argv(&self.store, &server, &fwd, &self.ssh_extra);
+        argv.insert(1, "-v".into());
+        let opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        let tunnel = match Job::spawn(opts) {
+            Ok(job) => Tunnel { job: Some(job), up: false, failed: None },
+            Err(e) => Tunnel { job: None, up: false, failed: Some(format!("{e:#}")) },
+        };
+        self.tunnels.insert((server_id, forward_id), tunnel);
+        Ok(())
+    }
+
+    pub fn tunnel_stop(&mut self, server_id: u64, forward_id: u64) {
+        if let Some(mut t) = self.tunnels.remove(&(server_id, forward_id)) {
+            if let Some(j) = t.job.as_mut() {
+                j.kill();
+            }
+        }
+    }
+
+    /// How every tunnel that was switched on is doing (a failed one stays listed until it is switched off).
+    pub fn tunnels(&mut self) -> Vec<TunnelStatus> {
+        let mut out = vec![];
+        for ((server_id, forward_id), t) in self.tunnels.iter_mut() {
+            let kind = self.store.server(*server_id).and_then(|s| s.forwards.iter().find(|f| f.id == *forward_id)).map(|f| f.kind);
+            if t.failed.is_none() {
+                if let Some(job) = t.job.as_mut() {
+                    let text = job.output();
+                    if job.poll().is_some() {
+                        t.failed = Some(jobs::problem(&text));
+                    } else if let Some(why) = jobs::stuck_at(&text).filter(|_| job.age() > Duration::from_secs(4)) {
+                        job.kill();
+                        t.failed = Some(why.to_string());
+                    } else if !t.up {
+                        let marker = if kind == Some(ForwardKind::Remote) { "remote forward success" } else { "Local forwarding listening on" };
+                        t.up = text.contains(marker);
+                    }
+                }
+            }
+            let (state, message) = match (&t.failed, t.up) {
+                (Some(m), _) => ("failed", m.clone()),
+                (None, true) => ("up", String::new()),
+                (None, false) => ("starting", String::new()),
+            };
+            out.push(TunnelStatus { server_id: *server_id, forward_id: *forward_id, state, message });
+        }
+        out.sort_by_key(|t| (t.server_id, t.forward_id));
+        out
+    }
+
+    // ---------------------------------------------------------------- files
+
+    /// Copies files to a server (`upload`, `local` are paths here and `remote` the folder there, empty for the
+    /// home folder) or one path from it (`local[0]` is the folder here). Returns an id for `transfers()`.
+    pub fn transfer_start(&mut self, server_id: u64, upload: bool, local: Vec<String>, remote: &str, use_vault: bool) -> std::result::Result<u64, OpenError> {
+        let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
+        if use_vault && connect::needs_vault(&self.store, server_id) && !self.vault.is_unlocked() {
+            return Err(OpenError::VaultLocked);
+        }
+        let local = if !upload && local.is_empty() { vec![downloads_dir()] } else { local };
+        if local.is_empty() || remote.contains('\n') || local.iter().any(|p| p.contains('\n') || p.is_empty()) {
+            return Err(OpenError::Other("nothing to copy".into()));
+        }
+        let dir = if upload { connect::Direction::Up } else { connect::Direction::Down };
+        let argv = connect::scp_argv(&self.store, &server, dir, &local, remote, &self.ssh_extra);
+        let opts = connect::opts_for(&self.store, &mut self.vault, server_id, argv, 24, 200, use_vault);
+        let job = Job::spawn(opts).map_err(|e| OpenError::Other(format!("{e:#}")))?;
+        let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string());
+        let what = if upload {
+            if local.len() == 1 { name(&local[0]) } else { format!("{} files", local.len()) }
+        } else {
+            name(remote)
+        };
+        let id = self.next_transfer;
+        self.next_transfer += 1;
+        self.transfers.insert(id, Transfer { server_id, upload, what, job, end: None });
+        Ok(id)
+    }
+
+    pub fn transfers(&mut self) -> Vec<TransferStatus> {
+        let mut out = vec![];
+        for (id, t) in self.transfers.iter_mut() {
+            if t.end.is_none() {
+                let text = t.job.output();
+                if let Some(code) = t.job.poll() {
+                    t.end = Some(if code == 0 { Ok(()) } else { Err(jobs::problem(&text)) });
+                } else if let Some(why) = jobs::stuck_at(&text).filter(|_| t.job.age() > Duration::from_secs(4)) {
+                    t.job.kill();
+                    t.end = Some(Err(why.to_string()));
+                }
+            }
+            let (state, message, percent) = match &t.end {
+                Some(Ok(())) => ("done", String::new(), Some(100)),
+                Some(Err(m)) => ("failed", m.clone(), None),
+                None => ("running", String::new(), jobs::percent(&t.job.screen())),
+            };
+            out.push(TransferStatus { id: *id, server_id: t.server_id, upload: t.upload, what: t.what.clone(), state, percent, message });
+        }
+        out.sort_by_key(|t| t.id);
+        out
+    }
+
+    /// Forgets a copy that is over (or stops one that is not).
+    pub fn transfer_clear(&mut self, id: u64) {
+        if let Some(mut t) = self.transfers.remove(&id) {
+            t.job.kill();
+        }
     }
 
     /// Puts a server through a jump host (`None`: direct).
@@ -436,6 +638,7 @@ mod tests {
             jump: None,
             has_secret: false,
             has_sudo: false,
+            forwards: vec![],
         }
     }
 
