@@ -651,7 +651,6 @@ impl Handler {
             return no("Say which secrets the command needs, by name (see oso_context).");
         }
         let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
-        let profile;
         let wanted: Vec<(String, String)> = {
             let e = self.engine();
             if !e.vault.is_unlocked() {
@@ -661,7 +660,6 @@ impl Handler {
                 Ok(s) => s,
                 Err(m) => return no(m),
             };
-            profile = e.active_profile().to_string();
             let list = e.vault.list();
             let mut out = vec![];
             for n in &names {

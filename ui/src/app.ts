@@ -221,6 +221,20 @@ export class App {
     };
     try {
       const want = ((await this.be.readConfig("selftest.flag")) ?? "").trim();
+      if (want === "metrics") {
+        // where everything is, in the real window: for finding out why something is drawn in the wrong place
+        await wait(1500);
+        const box = (sel: string) => {
+          const e = document.querySelector(sel) as HTMLElement | null;
+          if (!e) return `${sel}: none`;
+          const r = e.getBoundingClientRect();
+          return `${sel}: x=${Math.round(r.x)} y=${Math.round(r.y)} w=${Math.round(r.width)} h=${Math.round(r.height)} scrollTop=${e.scrollTop}`;
+        };
+        report.push(`window ${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio} doc.scrollTop=${document.documentElement.scrollTop} body.scrollTop=${document.body.scrollTop} scrollY=${window.scrollY} docH=${document.documentElement.scrollHeight}`);
+        for (const sel of ["#app", "#rail", "#side", "#main", "#topbar", "#stage", "#rpanel", "#rtoggle", ".profile-slot", ".tree"]) report.push(box(sel));
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
       if (want === "settings") {
         this.settingsDialog();
         await wait(500);
