@@ -31,7 +31,7 @@ describe("what the palette shows", () => {
     item("action", "settings", "Settings…", { keywords: "preferences" }),
     item("server", "1", "web-1", { sub: "root@web1.example.com" }),
     item("server", "2", "db-1", { sub: "admin@db1.example.com" }),
-    item("space", "9", "Acme API", { sub: "2 servers" }),
+    item("space", "9", "Example API", { sub: "2 servers" }),
     item("secret", "5", "STRIPE_KEY"),
     item("tab", "7", "tab 1 · web-1 · root"),
   ];

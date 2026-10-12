@@ -34,7 +34,6 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             has_sudo: false,
             has_totp: false,
             forwards: vec![],
-            profile: None,
             notes: String::new(),
             env_kind: None,
             proxy: None,
@@ -276,7 +275,7 @@ fn a_connection_leaves_through_the_proxy_of_its_server() {
     let target = greeter("hello-through-the-proxy");
     let bind = free_port();
     let (mut e, id) = engine_for(&sshd, vec![fwd(ForwardKind::Local, bind, "127.0.0.1", target)]);
-    let px = e.proxy_save(oso_core::store::Proxy { id: 0, name: "test".into(), kind: oso_core::store::ProxyKind::Http, host: "127.0.0.1".into(), port: proxy_port, profile: None }).unwrap();
+    let px = e.proxy_save(oso_core::store::Proxy { id: 0, name: "test".into(), kind: oso_core::store::ProxyKind::Http, host: "127.0.0.1".into(), port: proxy_port }).unwrap();
     let mut s = e.store.server(id).unwrap().clone();
     s.proxy = Some(px);
     e.save_server(s, None, None).unwrap();

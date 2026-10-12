@@ -1,6 +1,7 @@
 //! Spaces through the engine: the groups of an older version become Spaces the first time, and are never imported twice.
 
 use oso_core::engine::{Emit, Engine};
+use oso_core::vault::{SecretKind, SecretMeta};
 use oso_core::store::Store;
 use oso_core::vault::Vault;
 use std::path::{Path, PathBuf};
@@ -55,5 +56,47 @@ fn without_groups_there_are_no_spaces_and_no_file() {
     let e = engine_in(&dir);
     assert!(e.spaces_list().is_empty());
     assert!(!dir.join("oso-spaces.json").exists());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+fn secret(name: &str) -> SecretMeta {
+    SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, env_var: None, agent_visible: false, notes: String::new(), updated: 0 }
+}
+
+#[test]
+fn the_secrets_of_the_old_profiles_move_to_their_spaces_when_the_vault_opens() {
+    let dir = temp("profile-secrets");
+    // a vault as the older version left it: secrets marked with their profile
+    let (a, b, c, d) = {
+        let mut e = engine_in(&dir);
+        e.vault_unlock("m").unwrap();
+        let ids = (e.secret_save(secret("work key"), Some("w")).unwrap(), e.secret_save(secret("home key"), Some("h")).unwrap(), e.secret_save(secret("default key"), Some("d")).unwrap(), e.secret_save(secret("for everyone"), Some("x")).unwrap());
+        e.vault.set_legacy_mark(ids.0, "work").unwrap();
+        e.vault.set_legacy_mark(ids.1, "home").unwrap();
+        e.vault.set_legacy_mark(ids.2, "default").unwrap();
+        ids
+    };
+    std::fs::write(dir.join("profiles.json"), r#"[{"id":"default","name":"default"},{"id":"work","name":"Work"},{"id":"home","name":"Home"}]"#).unwrap();
+    std::fs::write(dir.join("servers.json"), r#"{"next_id":3,"folders":[],"servers":[]}"#).unwrap();
+    let mut e = engine_in(&dir);
+    let (work, home) = (e.spaces_list()[0].id, e.spaces_list()[1].id);
+    assert!(e.spaces_list().iter().all(|s| s.secrets.is_empty()), "the vault is locked: nothing can be moved yet");
+    assert!(std::fs::read_dir(&dir).unwrap().any(|f| f.unwrap().file_name().to_string_lossy().starts_with("backup-before-spaces")), "a copy of the vault was made first");
+    e.vault_unlock("m").unwrap();
+    assert_eq!(e.spaces.get(work).unwrap().secrets, vec![a]);
+    assert_eq!(e.spaces.get(home).unwrap().secrets, vec![b]);
+    assert_eq!(e.secret_space(c), None, "the default profile's are General's");
+    assert_eq!(e.secret_space(d), None);
+    assert_eq!(e.secrets_in_reach(None), vec![c, d], "General sees its own only");
+    // the marks are gone from the vault, for good
+    e.vault_lock();
+    let mut v = oso_core::vault::Vault::new(dir.join("vault.json"));
+    v.unlock("m").unwrap();
+    assert!(v.legacy_marks().is_empty());
+    // and it is not done again
+    let mut again = engine_in(&dir);
+    again.vault_unlock("m").unwrap();
+    assert_eq!(again.spaces.get(work).unwrap().secrets, vec![a]);
+    assert!(again.spaces.pending_secrets().is_empty());
     std::fs::remove_dir_all(dir).ok();
 }

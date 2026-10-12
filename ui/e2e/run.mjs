@@ -51,23 +51,23 @@ check("the rail has the five sections, in order, and the panel shows only the op
 check("the rail is a thin bar of icons", (await page.$eval("#rail", (r) => Math.round(r.getBoundingClientRect().width))) === 48);
 check("the first time, Servers is open and the right panel is closed", (await page.getAttribute('[data-rail="servers"]', "aria-pressed")) === "true" && (await page.$eval("#rpanel", (e) => e.hidden)));
 check("the version is at the top right", /^v\d+\.\d+\.\d+/.test(await page.textContent(".tools .version")));
-check("the profile is big, labelled, and always shown", (await page.textContent(".pb-label")) === "Profile" && (await page.$eval(".profile-bar .sel-btn", (b) => b.getBoundingClientRect().height)) >= 36);
+check("the Space selector is big, labelled, and always shown, with General first", (await page.textContent(".pb-label")) === "Space" && (await page.$eval(".space-bar .sel-btn", (b) => b.getBoundingClientRect().height)) >= 36 && (await page.textContent(".space-bar .sel-btn")).includes("General"));
 await section("secrets");
 check("the Secrets section tells a locked vault what to do", (await page.$('[data-act="empty-unlock"]')) !== null);
 await section("tunnels");
 check("Tunnels says what it is for, with its button", (await page.$('[data-act="empty-add-tunnel"]')) !== null && (await page.textContent("body")).includes("keeps a port open"));
 check("every tool at the bottom of the rail says its name and its shortcut", (await page.$$eval("#rail .rail-btn.small", (b) => b.map((x) => x.title))).join(";").includes("Local terminal") && (await page.$eval('[data-act="foot-local"]', (b) => b.title)).includes("Alt+Shift+L") && (await page.$eval('[data-rail="secrets"]', (b) => b.title)).includes("Alt+Shift+3"));
 await section("servers");
-await page.click('.profile-bar .select[data-name="active-profile"] .sel-btn');
-check("\"+ New profile\" is in the profile list", (await page.textContent(".profile-bar .sel-pop")).includes("+ New profile"));
-await page.click('.profile-bar .sel-item[data-value="__new"]');
-await settle(200);
-await page.fill("#modal-bg input", "Personal");
-await page.keyboard.press("Enter");
+await page.click('.space-bar .select[data-name="active-space"] .sel-btn');
+check("\"+ New Space\" is in the Space list", (await page.textContent(".space-bar .sel-pop")).includes("+ New Space"));
+await page.click('.space-bar .sel-item[data-value="__new"]');
+await settle(250);
+check("an empty Space form has no name and says what to type", (await page.inputValue('[data-name="space-name"]')) === "" && (await page.getAttribute('[data-name="space-name"]', "placeholder")) === "Space name (e.g. the project)");
+await page.fill('[data-name="space-name"]', "Personal");
+await page.click('[data-act="space-save"]');
 await settle(400);
-check("it creates the profile and switches to it", (await page.textContent(".profile-bar .sel-btn")).includes("Personal"));
-check("and the first step is marked done", (await page.getAttribute('[data-step-row="profile"]', "class")).includes("done") && (await page.textContent('[data-start="card"]')).includes("1 of 4 done"));
-await page.evaluate(async () => { await window.oso.be.setActiveProfile("default"); await window.oso.be.profileDelete("personal"); await window.oso.refreshTree(); });
+check("and the first step is marked done", (await page.getAttribute('[data-step-row="space"]', "class")).includes("done") && (await page.textContent('[data-start="card"]')).includes("1 of 4 done"));
+await page.evaluate(async () => { const be = window.oso.be; for (const x of await be.spaceList()) await be.spaceDelete(x.id); await window.oso.refreshSpaces(); });
 await settle(200);
 // "?" opens the sheet of shortcuts, built from the real table
 await page.keyboard.press("Shift+Slash");
@@ -452,55 +452,46 @@ check("and a secret can be deleted", (await page.$$(".srow")).length === 0);
 await page.keyboard.press("Escape");
 await settle(150);
 
-// profiles: the host list follows the active profile
-await page.click('.profile-bar button[data-act="profiles"]');
-await settle(200);
-await page.fill('input[name="new-profile"]', "Work");
-await page.keyboard.press("Enter");
-await settle(250);
-check("a profile can be added", (await page.textContent(".plist")).includes("Work"));
-await page.keyboard.press("Escape");
-await settle(150);
+// Spaces: the host list follows the Space in use; what is in no Space (General) shows in all of them
 await page.evaluate(async () => {
   const be = window.oso.be;
-  const t = await be.tree();
-  const web = t.servers.find((x) => x.name === "web-1");
-  await be.saveServer({ ...web, profile: "work" }, null, null);
-  await be.setActiveProfile("work");
-  await window.oso.refreshTree();
+  const web = (await be.tree()).servers.find((x) => x.name === "web-1");
+  const id = await be.spaceSave({ id: 0, name: "Work", tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false, folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] });
+  await be.moveToSpace("server", web.id, id);
+  await window.oso.refreshSpaces();
+  await window.oso.selectSpace(id);
 });
-await settle(200);
-check("the profile bar always shows the active profile", (await page.textContent('.profile-bar .select[data-name="active-profile"]')).includes("Work"));
-check("the hosts of the active profile show, and the ones of no profile", (await page.$$('.row[data-kind="server"]')).length === 3);
-await page.click('.profile-bar .select[data-name="active-profile"] .sel-btn');
-await page.click('.profile-bar .select[data-name="active-profile"] .sel-item[data-value="default"]');
 await settle(250);
-check("another profile hides them", (await page.$$('.row[data-kind="server"]:has-text("web-1")')).length === 0 && (await page.$$('.row[data-kind="server"]')).length === 2);
-await page.click('.profile-bar button[data-act="view-all"]');
+check("the selector always shows the Space in use", (await page.textContent('.space-bar .select[data-name="active-space"]')).includes("Work"));
+check("the hosts of the Space show, and General's (the ones in no Space)", (await page.$$('.row[data-kind="server"]')).length === 3);
+await page.click('.space-bar .select[data-name="active-space"] .sel-btn');
+await page.click('.space-bar .select[data-name="active-space"] .sel-item[data-value=""]');
 await settle(250);
-check("and the eye shows every profile's hosts", (await page.$$('.row[data-kind="server"]')).length === 3);
-await page.click('.profile-bar button[data-act="view-all"]');
+check("General hides what is in a Space", (await page.$$('.row[data-kind="server"]:has-text("web-1")')).length === 0 && (await page.$$('.row[data-kind="server"]')).length === 2);
+await page.click('.space-bar button[data-act="view-all"]');
+await settle(250);
+check("and the eye shows every Space's hosts", (await page.$$('.row[data-kind="server"]')).length === 3);
+await page.click('.space-bar button[data-act="view-all"]');
 await settle(200);
-await shot("9b-profiles");
+await shot("9b-spaces");
 await page.evaluate(async () => {
-  await window.oso.be.setActiveProfile("work");
+  await window.oso.selectSpace((await window.oso.be.spaceList()).find((x) => x.name === "Work").id);
   await window.oso.openServer(0);
 });
 await settle(400);
-check("a local terminal says which profile it was born in", (await page.$$eval(".tab", (ts) => ts.map((t) => t.textContent))).some((t) => t.includes("Local · Work")));
+check("a local terminal says which Space it was born in", (await page.$$eval(".tab", (ts) => ts.map((t) => t.textContent))).some((t) => t.includes("Local · Work")));
 await clearAll();
 await page.evaluate(async () => {
   const be = window.oso.be;
-  await be.setActiveProfile("work");
-  const web = (await be.tree()).servers.find((x) => x.name === "web-1");
-  await be.saveServer({ ...web, profile: null }, null, null);
-  await be.setActiveProfile("default");
+  await window.oso.selectSpace(null);
+  for (const x of await be.spaceList()) await be.spaceDelete(x.id);
+  await window.oso.refreshSpaces();
   await window.oso.refreshTree();
 });
 await settle(200);
 
 // notes, kind of machine, proxy, named tunnels
-await page.click('.profile-bar button[data-act="profiles"]');
+await page.click('.space-bar button[data-act="space-manage"]');
 await settle(150);
 await page.click('[data-act="proxies"]');
 await settle(150);
@@ -545,12 +536,12 @@ await shot("9c-production");
 await page.evaluate(async () => {
   const be = window.oso.be;
   const st = (await be.tree()).servers.find((x) => x.name === "staging");
-  await be.setForwards(st.id, [{ id: 0, name: "postgres of acme", auto: false, kind: "local", bind_port: 5433, host: "db.internal", port: 5432 }]);
+  await be.setForwards(st.id, [{ id: 0, name: "postgres of example", auto: false, kind: "local", bind_port: 5433, host: "db.internal", port: 5432 }]);
   await window.oso.refreshTree();
 });
 await settle(300);
 await section("tunnels");
-check("saved tunnels are listed on the left by name", (await page.textContent('.row.tunnel')).includes("postgres of acme"));
+check("saved tunnels are listed on the left by name", (await page.textContent('.row.tunnel')).includes("postgres of example"));
 await page.click('.row.tunnel button[title="Switch on"]');
 await settle(1500);
 check("and can be switched on from there", (await page.$('.row.tunnel.up')) !== null || (await page.$('.row.tunnel button[title="Switch off"]')) !== null);
@@ -594,22 +585,32 @@ await settle(600);
 await section("accounts");
 check("switching changes the account and then opens it", (await state()).tabs === 1 && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@gmail.com"));
 await clearAll();
-// a profile that asks for accounts puts them in use
+// a Space that asks for other accounts: oso asks first, and switches only if told to
 await page.evaluate(async () => {
   const be = window.oso.be;
-  await be.profileSave("", "Client");
-  await be.profileSetAccounts("client", "github.com/work-user", "4ab1");
-  await be.setActiveProfile("client");
-  await window.oso.refreshTree();
-  await window.oso.refreshAccounts();
+  await be.spaceSave({ id: 0, name: "Client", tailscale_account: "4ab1", gh_user: "github.com/work-user", proxy: null, aws_profile: null, kubeconfig: null, production: false, folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] });
+  await window.oso.refreshSpaces();
 });
-await settle(200);
+await page.click('.space-bar .select[data-name="active-space"] .sel-btn');
+await page.click('.space-bar .sel-item:has-text("Client")');
+await settle(250);
+check("it asks before switching the accounts", (await page.textContent('[data-sheet="accounts-ask"]')).includes("Client uses other accounts"));
+await page.click('[data-act="accounts-cancel"]');
+await settle(250);
+check("cancelling stays where it was", (await page.textContent(".space-bar .sel-btn")).includes("General"));
+await page.click('.space-bar .select[data-name="active-space"] .sel-btn');
+await page.click('.space-bar .sel-item:has-text("Client")');
+await settle(250);
+await page.click('[data-act="accounts-switch"]');
+await settle(400);
 await section("accounts");
-check("switching profile switches its accounts", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: work-user") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com"));
+check("switching Space switches its accounts, when told to", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: work-user") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com") && (await page.textContent(".space-bar .sel-btn")).includes("Client"));
 await shot("9d-accounts");
 await page.evaluate(async () => {
   const be = window.oso.be;
-  await be.setActiveProfile("default");
+  await window.oso.selectSpace(null);
+  for (const x of await be.spaceList()) await be.spaceDelete(x.id);
+  await window.oso.refreshSpaces();
   const st = (await be.tree()).servers.find((x) => x.name === "staging");
   await be.saveServer({ ...st, network: null }, null, null);
   await window.oso.refreshTree();
@@ -617,7 +618,7 @@ await page.evaluate(async () => {
 
 // keys from the vault: a server form that picks one, and the import from ~/.ssh
 await page.evaluate(async () => {
-  await window.oso.be.secretSave({ id: 0, name: "deploy key", kind: "ssh_key", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "PRIVATE");
+  await window.oso.be.secretSave({ id: 0, name: "deploy key", kind: "ssh_key", env_var: null, agent_visible: false, notes: "", updated: 0 }, "PRIVATE");
 });
 await section("servers");
 await page.click('.row[data-kind="server"]:has-text("web-1")');
@@ -751,7 +752,7 @@ await page.keyboard.press("Escape");
 await settle(200);
 await page.evaluate(async () => {
   const be = window.oso.be;
-  await be.secretSave({ id: 0, name: "github 2fa", kind: "totp", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "GEZDGNBVGY3TQOJQ");
+  await be.secretSave({ id: 0, name: "github 2fa", kind: "totp", env_var: null, agent_visible: false, notes: "", updated: 0 }, "GEZDGNBVGY3TQOJQ");
 });
 await page.click('#rail [data-act="vault"]');
 await settle(300);
@@ -778,15 +779,15 @@ await page.evaluate(async () => {
 // cloud settings and production
 await page.evaluate(async () => {
   const be = window.oso.be;
-  await be.profileSetCloud("default", "acme-prod", "/home/me/.kube/config", true);
-  await window.oso.refreshTree();
+  await be.spaceSetSettings(null, { tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false, aws_profile: "example-prod", kubeconfig: "/home/me/.kube/config", production: true });
+  await window.oso.refreshSpaces();
 });
 await settle(200);
-check("a profile with cloud settings shows them in the header, in red when it is production", (await page.textContent(".cloud-chip.prod")).includes("aws acme-prod") && (await page.textContent(".cloud-chip.prod")).includes("k8s config") && (await page.$(".profile-bar.prod")) !== null);
-await shot("9g-production-profile");
+check("General with cloud settings shows them in the header, in red when it is production", (await page.textContent(".cloud-chip.prod")).includes("aws example-prod") && (await page.textContent(".cloud-chip.prod")).includes("k8s config") && (await page.$(".space-bar.prod")) !== null);
+await shot("9g-production-space");
 await page.evaluate(async () => {
-  await window.oso.be.profileSetCloud("default", null, null, false);
-  await window.oso.refreshTree();
+  await window.oso.be.spaceSetSettings(null, { tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false });
+  await window.oso.refreshSpaces();
 });
 await settle(150);
 check("and nothing when it has none", (await page.$(".cloud-chip")) === null);
@@ -1341,7 +1342,7 @@ await page.evaluate(({ t1, t2, t3, now }) => {
   const m = globalThis.__osoMock;
   m.agents.length = 0;
   m.agents.push(
-    { sid: t1, kind: "claude", name: "Claude Code", pid: 11, cwd: "/home/me/code/acme", folder: "acme", branch: "feature/login", state: "working", since: now - 60000, source: "hook" },
+    { sid: t1, kind: "claude", name: "Claude Code", pid: 11, cwd: "/home/me/code/example", folder: "example", branch: "feature/login", state: "working", since: now - 60000, source: "hook" },
     { sid: t2, kind: "opencode", name: "OpenCode", pid: 12, cwd: "/home/me/code/api", folder: "api", branch: "main", state: "needs_you", since: now - 120000, source: "hook" },
     { sid: t3, kind: "codex", name: "Codex", pid: 13, cwd: "/home/me/code/web", folder: "web", branch: "", state: "needs_you", since: now - 30000, source: "hook" },
   );
@@ -1353,7 +1354,7 @@ await settle(200);
 await page.click('[data-rtab="agents"]');
 await settle(200);
 const rows16 = await page.$$eval("[data-agent-row]", (r) => r.map((x) => ({ sid: Number(x.getAttribute("data-agent-row")), state: x.getAttribute("data-state"), text: x.textContent })));
-check("the Agents tab lists each agent with its folder, branch and state", rows16.length === 3 && rows16.find((r) => r.sid === t1).text.includes("acme") && rows16.find((r) => r.sid === t1).text.includes("feature/login") && rows16.find((r) => r.sid === t1).text.includes("working"), JSON.stringify(rows16));
+check("the Agents tab lists each agent with its folder, branch and state", rows16.length === 3 && rows16.find((r) => r.sid === t1).text.includes("example") && rows16.find((r) => r.sid === t1).text.includes("feature/login") && rows16.find((r) => r.sid === t1).text.includes("working"), JSON.stringify(rows16));
 check("who needs you comes first, the one waiting longest on top", rows16.map((r) => r.state).join() === "needs_you,needs_you,working" && rows16[0].sid === t2 && rows16[1].sid === t3);
 check("the tab says which tab it is, with a state mark of its own", (await page.textContent(`[data-agent-row="${t1}"]`)).includes("tab 1") && (await page.$$(".tab .adot")).length === 3 && (await page.getAttribute(`.tab[data-sid="${t2}"] .adot`, "data-state")) === "needs_you");
 check("the Agents tab carries the number of those who need you", (await page.textContent('[data-rtab="agents"] .pending-n')) === "2");
@@ -1428,12 +1429,12 @@ check("double-clicking a tab renames it", (await page.textContent(`.tab[data-sid
 // New agent, from a Space
 await clearAll();
 await page.evaluate(() => { globalThis.__osoMock.agents.length = 0; globalThis.__osoMock.worktrees.length = 0; });
-await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Acme", profile: null, folders: ["/tmp/acme"], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
+await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Example", folders: ["/tmp/example"], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
 await section("spaces");
-await page.hover('.row.space:has-text("Acme")');
-await page.click('.row.space:has-text("Acme") [data-act="space-agent"]');
+await page.hover('.row.space:has-text("Example")');
+await page.click('.row.space:has-text("Example") [data-act="space-agent"]');
 await settle(250);
-check("New agent asks for a folder (the Space's first one), an agent and a worktree", (await page.inputValue('[data-name="launch-folder"]')) === "/tmp/acme" && (await page.$('[data-name="launch-agent"]')) !== null && (await page.$('[data-name="launch-worktree"]')) !== null);
+check("New agent asks for a folder (the Space's first one), an agent and a worktree", (await page.inputValue('[data-name="launch-folder"]')) === "/tmp/example" && (await page.$('[data-name="launch-agent"]')) !== null && (await page.$('[data-name="launch-worktree"]')) !== null);
 check("the agents are the ones in the list", (await page.$$eval('[data-name="launch-agent"] .sel-item', (e) => e.map((x) => x.textContent))).join() === "Claude Code,OpenCode,Codex");
 await page.click('[data-name="launch-agent"] .sel-btn');
 await page.click('[data-name="launch-agent"] .sel-item[data-value="opencode"]');
@@ -1450,11 +1451,11 @@ await page.click('[data-act="launch-agent"]');
 await settle(900);
 const wt = await page.evaluate(() => globalThis.__osoMock.worktrees);
 const opened16 = await page.evaluate(() => { const t = [...window.oso.ws.tabs.values()].at(-1); return t ? { title: t.title, space: t.space, cwd: t.cwd } : null; });
-check("the worktree is made and the agent starts in it, in the Space", wt.length === 1 && wt[0][1] === "oso/try-1" && opened16 && opened16.title === "OpenCode · oso-try-1" && opened16.cwd === "/tmp/acme.worktrees/oso-try-1" && opened16.space > 0, JSON.stringify([wt, opened16]));
+check("the worktree is made and the agent starts in it, in the Space", wt.length === 1 && wt[0][1] === "oso/try-1" && opened16 && opened16.title === "OpenCode · oso-try-1" && opened16.cwd === "/tmp/example.worktrees/oso-try-1" && opened16.space > 0, JSON.stringify([wt, opened16]));
 check("its command is typed in the terminal", (await termText(await activeSid())).includes("opencode"));
 await section("spaces");
-await page.hover('.row.space:has-text("Acme")');
-await page.click('.row.space:has-text("Acme") [data-act="space-agent"]');
+await page.hover('.row.space:has-text("Example")');
+await page.click('.row.space:has-text("Example") [data-act="space-agent"]');
 await settle(200);
 await page.click('[data-act="launch-terminal"]');
 await settle(600);
@@ -1514,7 +1515,7 @@ await settle(300);
 const [s1, s2] = await page.evaluate(() => window.oso.ws.screen.groups.map((g) => g.active));
 await page.evaluate(() => { localStorage.removeItem("oso.sound"); window.oso.sound.update({ enabled: true, volume: 0.7, finished: { kind: "builtin" }, needs: { kind: "builtin" } }); window.oso.sound.played.length = 0; document.hasFocus = () => true; globalThis.__osoMock.agents.length = 0; });
 await page.evaluate((sid) => window.oso.focusSession(sid), s2);
-const setAgent = (sid, state) => page.evaluate(({ sid, state }) => { const a = globalThis.__osoMock.agents; const row = a.find((x) => x.sid === sid); if (row) row.state = state; else a.push({ sid, kind: "claude", name: "Claude Code", pid: 1, cwd: "/x/acme", folder: "acme", branch: "", state, since: Date.now(), source: "hook" }); return window.oso.pollAgents(); }, { sid, state });
+const setAgent = (sid, state) => page.evaluate(({ sid, state }) => { const a = globalThis.__osoMock.agents; const row = a.find((x) => x.sid === sid); if (row) row.state = state; else a.push({ sid, kind: "claude", name: "Claude Code", pid: 1, cwd: "/x/example", folder: "example", branch: "", state, since: Date.now(), source: "hook" }); return window.oso.pollAgents(); }, { sid, state });
 const played = () => page.evaluate(() => window.oso.sound.played.map((p) => `${p.event}:${p.sid}`));
 await setAgent(s1, "working");
 await setAgent(s1, "finished");
@@ -1623,8 +1624,8 @@ await page.keyboard.press("Escape");
 await settle(150);
 check("Escape closes it", (await page.$("#modal-bg.show")) === null);
 // it finds everything: servers, Spaces, secrets (by name only) and open tabs
-await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Zebra Shop", profile: null, folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
-await page.evaluate(async () => { if (!(await window.oso.be.vaultStatus()).unlocked) await window.oso.be.vaultUnlock("master"); await window.oso.be.secretSave({ id: 0, name: "STRIPE_KEY", kind: "api_key", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "sk_live_abcdef"); await window.oso.refreshVaultMark(); await window.oso.refreshSecrets(); });
+await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Zebra Shop", folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
+await page.evaluate(async () => { if (!(await window.oso.be.vaultStatus()).unlocked) await window.oso.be.vaultUnlock("master"); await window.oso.be.secretSave({ id: 0, name: "STRIPE_KEY", kind: "api_key", env_var: null, agent_visible: false, notes: "", updated: 0 }, "sk_live_abcdef"); await window.oso.refreshVaultMark(); await window.oso.refreshSecrets(); });
 await page.keyboard.press("Alt+Shift+Space");
 await page.keyboard.type("zebra");
 await settle(150);

@@ -312,8 +312,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oso-audit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = Audit::new(dir.join("audit.jsonl"));
-        a.log(Entry { pane: 1, action: "run".into(), host: "acme".into(), command: "df -h".into(), decision: "allowed".into(), exit_code: Some(0), ..Default::default() });
-        a.log(Entry { pane: 1, action: "run".into(), host: "acme".into(), command: "reboot".into(), decision: "denied".into(), ..Default::default() });
+        a.log(Entry { pane: 1, action: "run".into(), host: "example".into(), command: "df -h".into(), decision: "allowed".into(), exit_code: Some(0), ..Default::default() });
+        a.log(Entry { pane: 1, action: "run".into(), host: "example".into(), command: "reboot".into(), decision: "denied".into(), ..Default::default() });
         let text = std::fs::read_to_string(a.path()).unwrap();
         let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(lines.len(), 2);

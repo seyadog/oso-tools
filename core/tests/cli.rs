@@ -1,4 +1,4 @@
-//! oso's command line against a real window-side engine: unlock, profiles, `oso run`, hosts, scanning `.env` files.
+//! oso's command line against a real window-side engine: unlock, Spaces, `oso run`, hosts, scanning `.env` files.
 //! No command prints a secret.
 
 use oso_core::approvals::{Approvals, Decision};
@@ -73,11 +73,12 @@ fn rig(name: &str) -> Rig {
     let store = Store::load_from(dir.join("servers.json")).unwrap();
     let mut e = Engine::new(store, Vault::new(dir.join("vault.json")), emit);
     e.vault_unlock("master").unwrap();
-    let meta = |name: &str, var: &str, profile: Option<&str>, visible| SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, profile: profile.map(str::to_string), env_var: Some(var.into()), agent_visible: visible, notes: String::new(), updated: 0 };
-    e.secret_save(meta("visible", "VISIBLE_KEY", None, true), Some(TRAP_VISIBLE)).unwrap();
-    let work = e.profile_save("", "Work").unwrap();
-    e.secret_save(meta("hidden", "HIDDEN_KEY", Some(&work), false), Some(TRAP_HIDDEN)).unwrap();
-    e.secret_save(meta("work key", "WORK_KEY", Some(&work), true), Some(TRAP_OTHER)).unwrap();
+    let meta = |name: &str, var: &str, visible| SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, env_var: Some(var.into()), agent_visible: visible, notes: String::new(), updated: 0 };
+    // one secret in General (in no Space), two in the Space Work
+    e.secret_save(meta("visible", "VISIBLE_KEY", true), Some(TRAP_VISIBLE)).unwrap();
+    let hidden = e.secret_save(meta("hidden", "HIDDEN_KEY", false), Some(TRAP_HIDDEN)).unwrap();
+    let work_key = e.secret_save(meta("work key", "WORK_KEY", true), Some(TRAP_OTHER)).unwrap();
+    e.space_save(&oso_core::spaces::Space { name: "Work".into(), secrets: vec![hidden, work_key], ..Default::default() }).unwrap();
     e.vault_lock();
     let engine = Arc::new(Mutex::new(e));
     let approvals = Approvals::new();
@@ -115,7 +116,7 @@ fn unlock_lock_and_status_go_through_the_window_and_the_password_is_asked_not_sh
     let r = rig("unlock");
     let mut t = Fake::default();
     assert_eq!(run(&r, &mut t, &["status"]), 0);
-    assert!(t.said().contains("vault: locked") && t.said().contains("profile: default"), "{}", t.said());
+    assert!(t.said().contains("vault: locked") && t.said().contains("Space: General"), "{}", t.said());
     let mut t = Fake { password: "wrong".into(), ..Default::default() };
     assert_eq!(run(&r, &mut t, &["unlock"]), 1);
     assert!(t.said().contains("Wrong master password"), "{}", t.said());
@@ -142,19 +143,23 @@ fn without_a_window_the_command_line_says_so() {
 }
 
 #[test]
-fn profiles_are_listed_and_switched() {
-    let r = rig("profile");
+fn spaces_are_listed_and_switched() {
+    let r = rig("space");
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["profile"]), 0);
-    assert!(t.out.iter().any(|l| l.starts_with("* default")) && t.out.iter().any(|l| l.contains("Work (work)")), "{:?}", t.out);
+    assert_eq!(run(&r, &mut t, &["space"]), 0);
+    assert!(t.out.iter().any(|l| l.starts_with("* General")) && t.out.iter().any(|l| l.trim() == "Work"), "{:?}", t.out);
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["profile", "use", "Work"]), 0, "by name, any case");
-    assert_eq!(r.engine.lock().unwrap().active_profile(), "work");
-    assert_eq!(run(&r, &mut Fake::default(), &["profile", "use", "nope"]), 1);
+    assert_eq!(run(&r, &mut t, &["space", "use", "work"]), 0, "by name, any case");
+    let work = r.engine.lock().unwrap().spaces_list()[0].id;
+    assert_eq!(r.engine.lock().unwrap().active_space(), Some(work));
+    assert!(t.said().contains("Space: Work"));
+    assert_eq!(run(&r, &mut Fake::default(), &["space", "use", "General"]), 0);
+    assert_eq!(r.engine.lock().unwrap().active_space(), None);
+    assert_eq!(run(&r, &mut Fake::default(), &["space", "use", "nope"]), 1);
 }
 
 #[test]
-fn run_hands_the_visible_secrets_of_the_active_profile_without_asking_and_never_prints_them() {
+fn run_hands_the_visible_secrets_of_general_without_asking_and_never_prints_them() {
     let r = rig("run-visible");
     r.engine.lock().unwrap().vault_unlock("master").unwrap();
     let mut t = Fake::default();
@@ -163,8 +168,8 @@ fn run_hands_the_visible_secrets_of_the_active_profile_without_asking_and_never_
     assert_eq!((prog.as_str(), args.len()), ("env", 0));
     let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     assert_eq!(get("VISIBLE_KEY"), Some(TRAP_VISIBLE));
-    assert_eq!(get("HIDDEN_KEY"), None, "a secret of another profile is not handed over unasked");
-    assert_eq!(get("WORK_KEY"), None, "nor another profile's");
+    assert_eq!(get("HIDDEN_KEY"), None, "a secret of a Space is not handed over unasked");
+    assert_eq!(get("WORK_KEY"), None, "nor another one of that Space");
     assert!(get("PATH").is_some(), "the rest of the environment comes along");
     for trap in [TRAP_VISIBLE, TRAP_HIDDEN, TRAP_OTHER] {
         assert!(!t.said().contains(trap), "{trap} was printed");
@@ -175,10 +180,10 @@ fn run_hands_the_visible_secrets_of_the_active_profile_without_asking_and_never_
 fn run_asks_before_handing_over_what_a_terminal_does_not_already_have() {
     let r = rig("run-asks");
     r.engine.lock().unwrap().vault_unlock("master").unwrap();
-    // another profile
+    // another Space
     let seen = person(&r.approvals, Decision::Deny);
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["run", "-p", "work", "--", "printenv", "WORK_KEY"]), 1);
+    assert_eq!(run(&r, &mut t, &["run", "-s", "work", "--", "printenv", "WORK_KEY"]), 1);
     assert!(t.ran.is_none() && t.said().contains("not allowed"), "{}", t.said());
     let shown = seen.lock().unwrap()[0].clone();
     assert!(shown.contains("printenv WORK_KEY") && shown.contains("work key (WORK_KEY)") && shown.contains("hidden (HIDDEN_KEY)") && !shown.contains(TRAP_OTHER) && !shown.contains(TRAP_HIDDEN), "the person is shown names, not values: {shown}");
@@ -187,11 +192,11 @@ fn run_asks_before_handing_over_what_a_terminal_does_not_already_have() {
     r2.engine.lock().unwrap().vault_unlock("master").unwrap();
     person(&r2.approvals, Decision::Once);
     let mut t = Fake::default();
-    assert_eq!(run(&r2, &mut t, &["run", "-p", "Work", "--", "sh", "-c", "echo hi"]), 0);
+    assert_eq!(run(&r2, &mut t, &["run", "-s", "Work", "--", "sh", "-c", "echo hi"]), 0);
     let (_, args, env) = t.ran.unwrap();
     assert_eq!(args, vec!["-c", "echo hi"]);
     assert!(env.iter().any(|(k, v)| k == "WORK_KEY" && v == TRAP_OTHER) && env.iter().any(|(k, v)| k == "HIDDEN_KEY" && v == TRAP_HIDDEN));
-    // locked vault, bad usage, unknown profile
+    // locked vault, bad usage, unknown Space
     r2.engine.lock().unwrap().vault_lock();
     let mut t = Fake::default();
     assert_eq!(run(&r2, &mut t, &["run", "--", "env"]), 1);
@@ -199,22 +204,22 @@ fn run_asks_before_handing_over_what_a_terminal_does_not_already_have() {
     assert_eq!(run(&r2, &mut Fake::default(), &["run", "env"]), 2);
     assert_eq!(run(&r2, &mut Fake::default(), &["run", "--"]), 2);
     r2.engine.lock().unwrap().vault_unlock("master").unwrap();
-    assert_eq!(run(&r2, &mut Fake::default(), &["run", "-p", "nope", "--", "env"]), 1);
+    assert_eq!(run(&r2, &mut Fake::default(), &["run", "-s", "nope", "--", "env"]), 1);
 }
 
 #[test]
 fn hosts_are_added_and_opened_from_the_command_line() {
     let r = rig("host");
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["host", "add", "acme", "acme.example.com", "--user", "deploy", "--port", "2222", "--auth", "key", "--key", "~/.ssh/id_x", "--notes", "the API"]), 0, "{}", t.said());
-    let s = r.engine.lock().unwrap().store.servers.iter().find(|s| s.name == "acme").cloned().unwrap();
-    assert_eq!((s.host.as_str(), s.user.as_str(), s.port, s.key_path.as_str(), s.notes.as_str()), ("acme.example.com", "deploy", 2222, "~/.ssh/id_x", "the API"));
+    assert_eq!(run(&r, &mut t, &["host", "add", "example", "example.example.com", "--user", "deploy", "--port", "2222", "--auth", "key", "--key", "~/.ssh/id_x", "--notes", "the API"]), 0, "{}", t.said());
+    let s = r.engine.lock().unwrap().store.servers.iter().find(|s| s.name == "example").cloned().unwrap();
+    assert_eq!((s.host.as_str(), s.user.as_str(), s.port, s.key_path.as_str(), s.notes.as_str()), ("example.example.com", "deploy", 2222, "~/.ssh/id_x", "the API"));
     assert_eq!(s.auth, oso_core::store::Auth::Key);
-    assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "ACME", "x"]), 1, "no two with the same name");
+    assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "EXAMPLE", "x"]), 1, "no two with the same name");
     assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "z", "z.example", "--auth", "magic"]), 1);
     assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "z", "z.example", "--bogus", "1"]), 2);
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["ssh", "acme"]), 0);
+    assert_eq!(run(&r, &mut t, &["ssh", "example"]), 0);
     let ev = r.events.lock().unwrap().iter().find(|(k, _)| k == "open").cloned().unwrap();
     assert_eq!(ev.1["server_id"], s.id);
     assert_eq!(run(&r, &mut Fake::default(), &["ssh", "nope"]), 1);
@@ -227,7 +232,7 @@ fn no_command_has_a_way_to_print_a_secret() {
     r.engine.lock().unwrap().vault_unlock("master").unwrap();
     person(&r.approvals, Decision::Once);
     let mut all = String::new();
-    for args in [vec!["status"], vec!["profile"], vec!["profile", "use", "work"], vec!["profile", "use", "default"], vec!["host", "add", "x", "x.example"], vec!["ssh", "x"], vec!["run", "-p", "work", "--", "true"], vec!["lock"], vec!["bogus"], vec!["status", "--secrets"]] {
+    for args in [vec!["status"], vec!["space"], vec!["space", "use", "work"], vec!["space", "use", "General"], vec!["host", "add", "x", "x.example"], vec!["ssh", "x"], vec!["run", "-s", "work", "--", "true"], vec!["lock"], vec!["bogus"], vec!["status", "--secrets"]] {
         let mut t = Fake { password: "master".into(), ..Default::default() };
         run(&r, &mut t, &args);
         all.push_str(&t.said());
@@ -307,7 +312,7 @@ fn one_time_codes_come_from_a_seed_that_never_leaves_and_a_server_can_use_it() {
     let r = rig("totp");
     let mut e = r.engine.lock().unwrap();
     e.vault_unlock("master").unwrap();
-    let meta = |name: &str, kind| SecretMeta { id: 0, name: name.into(), kind, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: 0 };
+    let meta = |name: &str, kind| SecretMeta { id: 0, name: name.into(), kind, env_var: None, agent_visible: false, notes: String::new(), updated: 0 };
     assert!(e.secret_save(meta("bad", SecretKind::Totp), Some("not a seed!")).is_err(), "a seed that cannot make codes is refused");
     let seed = "GEZDGNBVGY3TQOJQ";
     let id = e.secret_save(meta("github 2fa", SecretKind::Totp), Some(seed)).unwrap();

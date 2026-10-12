@@ -7,6 +7,7 @@
 //! later; they are skipped when used, never an error.
 
 use crate::store::{Folder, Store};
+use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,15 +60,75 @@ pub struct SpaceTab {
     pub panes: Vec<SpacePane>,
 }
 
+/// Something that can be put in a Space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    Server(u64),
+    Folder(u64),
+    Secret(u64),
+}
+
+impl Item {
+    fn id(self) -> u64 {
+        match self {
+            Item::Server(i) | Item::Folder(i) | Item::Secret(i) => i,
+        }
+    }
+}
+
+/// What a Space (or General) may fix for the machine while it is in use. Every field is optional: what is not set is
+/// left as it is.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SpaceSettings {
+    /// The Tailscale account (id, tailnet or account name) to be on. oso asks before switching to it.
+    #[serde(default)]
+    pub tailscale_account: Option<String>,
+    /// The GitHub account (`host/login`) `gh` should use. oso asks before switching to it.
+    #[serde(default)]
+    pub gh_user: Option<String>,
+    /// The proxy (a saved one) that the local terminals go out through (`HTTP_PROXY` and friends).
+    #[serde(default)]
+    pub proxy: Option<u64>,
+    /// `AWS_PROFILE` for its local terminals: a name from `~/.aws/config`, never a key.
+    #[serde(default)]
+    pub aws_profile: Option<String>,
+    /// `KUBECONFIG` for them (a path).
+    #[serde(default)]
+    pub kubeconfig: Option<String>,
+    /// Real machines are on the other end: the window shows it in red.
+    #[serde(default)]
+    pub production: bool,
+}
+
+impl SpaceSettings {
+    /// Trimmed, with what is empty taken out, and refused when a value would end up in an environment variable or a path
+    /// it must not.
+    pub fn cleaned(&self) -> Result<SpaceSettings> {
+        let mut s = self.clone();
+        let clean = |v: &mut Option<String>| *v = v.take().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        clean(&mut s.tailscale_account);
+        clean(&mut s.gh_user);
+        clean(&mut s.aws_profile);
+        clean(&mut s.kubeconfig);
+        if s.aws_profile.as_deref().is_some_and(|a| a.starts_with('-') || a.chars().any(|c| c.is_whitespace() || c.is_control())) {
+            bail!("an AWS account name has no spaces");
+        }
+        if s.kubeconfig.as_deref().is_some_and(|k| k.contains('\0') || k.contains('\n')) {
+            bail!("a kubeconfig is a path, on one line");
+        }
+        Ok(s)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Space {
     /// 0 for one that is not saved yet.
     #[serde(default)]
     pub id: u64,
     pub name: String,
-    /// The profile to work in when it opens (`None`: whichever is active).
-    #[serde(default)]
-    pub profile: Option<String>,
+    /// What it fixes for the machine while you work in it (accounts, a proxy, cloud settings): all optional.
+    #[serde(flatten)]
+    pub settings: SpaceSettings,
     /// Work folders (repos), absolute paths (`~` allowed).
     #[serde(default)]
     pub folders: Vec<String>,
@@ -102,6 +163,103 @@ fn folder_subtree(folders: &[Folder], root: u64) -> BTreeSet<u64> {
         }
     }
     out
+}
+
+/// Which Spaces each server and folder are in; one in none is in General.
+#[derive(Default, Debug)]
+pub struct Membership {
+    servers: HashMap<u64, Vec<u64>>,
+    folders: HashMap<u64, Vec<u64>>,
+}
+
+impl Membership {
+    pub fn spaces_of_server(&self, id: u64) -> &[u64] {
+        self.servers.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Is it shown when `active` (None: General) is the Space in use? A server in no Space (General) shows in all of them.
+    pub fn server_shows(&self, id: u64, active: Option<u64>) -> bool {
+        let m = self.spaces_of_server(id);
+        m.is_empty() || active.is_some_and(|a| m.contains(&a))
+    }
+
+    /// The folders worth showing: those in the active Space, those that hold a server that shows, empty ones that are in
+    /// General, and every folder above one of those.
+    pub fn folders_shown(&self, store: &Store, active: Option<u64>) -> Vec<u64> {
+        let inside = |p: Option<u64>, root: u64| {
+            let mut cur = p;
+            let mut guard = 0;
+            while let Some(id) = cur {
+                if id == root {
+                    return true;
+                }
+                cur = store.folder(id).and_then(|f| f.parent);
+                guard += 1;
+                if guard > 64 {
+                    break;
+                }
+            }
+            false
+        };
+        let holds_anything = |f: u64| store.servers.iter().any(|s| s.parent.is_some_and(|p| inside(Some(p), f))) || store.folders.iter().any(|g| g.id != f && g.parent.is_some_and(|p| inside(Some(p), f)));
+        let holds_visible = |f: u64| store.servers.iter().any(|s| s.parent.is_some_and(|p| inside(Some(p), f)) && self.server_shows(s.id, active));
+        let mut shown: Vec<u64> = store
+            .folders
+            .iter()
+            .filter(|f| {
+                let own = self.folders.get(&f.id).map(Vec::as_slice).unwrap_or(&[]);
+                active.is_some_and(|a| own.contains(&a)) || holds_visible(f.id) || (own.is_empty() && !holds_anything(f.id))
+            })
+            .map(|f| f.id)
+            .collect();
+        let mut i = 0;
+        while i < shown.len() {
+            if let Some(p) = store.folder(shown[i]).and_then(|f| f.parent) {
+                if !shown.contains(&p) {
+                    shown.push(p);
+                }
+            }
+            i += 1;
+        }
+        shown
+    }
+}
+
+/// A profile as the old `profiles.json` had it (read only, to migrate it).
+#[derive(Deserialize, Default)]
+struct LegacyProfile {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    proxy: Option<u64>,
+    #[serde(default)]
+    gh_user: Option<String>,
+    #[serde(default)]
+    tailscale_account: Option<String>,
+    #[serde(default)]
+    aws_profile: Option<String>,
+    #[serde(default)]
+    kubeconfig: Option<String>,
+    #[serde(default)]
+    production: bool,
+}
+
+impl LegacyProfile {
+    fn settings(&self) -> SpaceSettings {
+        SpaceSettings { tailscale_account: self.tailscale_account.clone(), gh_user: self.gh_user.clone(), proxy: self.proxy, aws_profile: self.aws_profile.clone(), kubeconfig: self.kubeconfig.clone(), production: self.production }
+    }
+}
+
+/// What turning the profiles into Spaces did, for the window to say once.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct ProfileMigration {
+    /// The Spaces that were made (one per old profile that was not the default one).
+    pub spaces: Vec<String>,
+    /// The Space that was in use, when it was one of them.
+    pub active: Option<String>,
+    /// Where the copy of the old files is.
+    pub backup: String,
 }
 
 impl Space {
@@ -139,7 +297,7 @@ impl Space {
         if s.name.is_empty() {
             bail!("a Space needs a name");
         }
-        s.profile = s.profile.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+        s.settings = s.settings.cleaned()?;
         s.folders = s.folders.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
         if s.folders.iter().any(|f| f.contains('\0') || f.contains('\n')) {
             bail!("a folder is a path, on one line");
@@ -272,6 +430,16 @@ struct File {
     next_id: u64,
     #[serde(default)]
     spaces: Vec<Space>,
+    /// What General fixes (the same things a Space may fix).
+    #[serde(default)]
+    general: SpaceSettings,
+    /// The old profiles have become Spaces (done once).
+    #[serde(default)]
+    profiles_migrated: bool,
+    /// While secrets still have to be put in the Space of their old profile (they are in the vault, which has to be unlocked):
+    /// old profile id → the Space it became.
+    #[serde(default)]
+    pending_secrets: std::collections::BTreeMap<String, u64>,
 }
 
 /// The Spaces on disk (`oso-spaces.json`).
@@ -281,6 +449,12 @@ pub struct Spaces {
     spaces: Vec<Space>,
     /// Set when `groups.json` was migrated at load, until the window has told the person.
     migration: Option<Migration>,
+    /// What General fixes.
+    pub general: SpaceSettings,
+    profiles_migrated: bool,
+    pending_secrets: std::collections::BTreeMap<String, u64>,
+    /// Set when the old profiles became Spaces at load, until the window has told the person.
+    profile_migration: Option<ProfileMigration>,
 }
 
 impl Spaces {
@@ -289,26 +463,216 @@ impl Spaces {
     /// left alone, they are never imported twice.
     pub fn load_from(dir: &Path) -> Spaces {
         let path = dir.join(FILE);
-        let mut me = Spaces { path: path.clone(), next_id: 1, spaces: vec![], migration: None };
+        let mut me = Spaces { path: path.clone(), next_id: 1, spaces: vec![], migration: None, general: SpaceSettings::default(), profiles_migrated: false, pending_secrets: Default::default(), profile_migration: None };
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(file) = serde_json::from_str::<File>(&text) {
                 me.spaces = file.spaces;
                 me.next_id = file.next_id.max(me.spaces.iter().map(|s| s.id).max().unwrap_or(0) + 1).max(1);
+                me.general = file.general;
+                me.profiles_migrated = file.profiles_migrated;
+                me.pending_secrets = file.pending_secrets;
             }
-            return me;
-        }
-        let groups = dir.join("groups.json");
-        if let Ok(text) = std::fs::read_to_string(&groups) {
-            let (spaces, report) = migrate_groups(&text);
-            me.next_id = spaces.len() as u64 + 1;
-            me.spaces = spaces;
-            // the Spaces are written first; only then is the old file put aside
-            if me.save().is_ok() {
-                let _ = std::fs::rename(&groups, dir.join("groups.json.migrated"));
-                me.migration = Some(report);
+        } else {
+            let groups = dir.join("groups.json");
+            if let Ok(text) = std::fs::read_to_string(&groups) {
+                let (spaces, report) = migrate_groups(&text);
+                me.next_id = spaces.len() as u64 + 1;
+                me.spaces = spaces;
+                // the Spaces are written first; only then is the old file put aside
+                if me.save().is_ok() {
+                    let _ = std::fs::rename(&groups, dir.join("groups.json.migrated"));
+                    me.migration = Some(report);
+                }
             }
         }
+        me.migrate_profiles(dir);
         me
+    }
+
+    /// The old profiles become Spaces (once). The default one is General: its things stay where they are and its accounts,
+    /// proxy and cloud settings are General's; every other one becomes a Space with what was in it. A copy of every file
+    /// that is read goes to `backup-before-spaces-<time>/` first. Secrets are moved when the vault is unlocked (they are
+    /// in it): see `take_pending_secrets`.
+    fn migrate_profiles(&mut self, dir: &Path) {
+        if self.profiles_migrated {
+            return;
+        }
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+        let legacy: Vec<LegacyProfile> = read("profiles.json").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let servers: Value = read("servers.json").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        let tagged = |key: &str| servers.get(key).and_then(Value::as_array).map(|a| a.iter().any(|x| x.get("profile").and_then(Value::as_str).is_some_and(|p| !p.is_empty()))).unwrap_or(false);
+        let settings: Value = read("settings.json").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        let has_legacy = !legacy.is_empty() || tagged("servers") || tagged("folders") || settings.get("active_profile").is_some_and(|v| v.is_string());
+        if !has_legacy {
+            return;
+        }
+        // a copy first
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let backup = dir.join(format!("backup-before-spaces-{stamp}"));
+        let copied = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&backup)?;
+            for f in ["servers.json", "profiles.json", "proxies.json", "settings.json", "vault.json"] {
+                if dir.join(f).exists() {
+                    std::fs::copy(dir.join(f), backup.join(f))?;
+                }
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        })();
+        if copied.is_err() {
+            return; // without a copy nothing is changed: it is tried again next time
+        }
+        let mut report = ProfileMigration { backup: backup.to_string_lossy().into_owned(), ..Default::default() };
+        if let Some(d) = legacy.iter().find(|p| p.id == "default") {
+            self.general = d.settings();
+        }
+        let ids = |key: &str, profile: &str| -> Vec<u64> {
+            servers.get(key).and_then(Value::as_array).map(|a| a.iter().filter(|x| x.get("profile").and_then(Value::as_str) == Some(profile)).filter_map(|x| x.get("id").and_then(Value::as_u64)).collect()).unwrap_or_default()
+        };
+        for p in legacy.iter().filter(|p| p.id != "default") {
+            let mut name: String = p.name.trim().chars().take(80).collect();
+            if name.is_empty() {
+                name = p.id.clone();
+            }
+            let base = name.clone();
+            let mut n = 2;
+            while self.spaces.iter().any(|s| s.name == name) {
+                name = format!("{base} ({n})");
+                n += 1;
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            self.spaces.push(Space { id, name: name.clone(), settings: p.settings(), servers: ids("servers", &p.id), server_folders: ids("folders", &p.id), ..Default::default() });
+            self.pending_secrets.insert(p.id.clone(), id);
+            report.spaces.push(name);
+        }
+        // the vault is looked at when it is unlocked, even if there is nothing to move: the old profile marks go away then
+        self.profiles_migrated = true;
+        if self.save().is_err() {
+            return;
+        }
+        // settings: the Space in use, and whether every Space's servers are shown
+        let dir_s = dir;
+        if let Some(active) = settings.get("active_profile").and_then(Value::as_str) {
+            if let Some(space) = self.pending_secrets.get(active) {
+                crate::settings::save_key_in(dir_s, "active_space", (*space).into());
+                report.active = self.get(*space).map(|s| s.name.clone());
+            }
+        }
+        if let Some(all) = settings.get("view_all_profiles").and_then(Value::as_bool) {
+            crate::settings::save_key_in(dir_s, "view_all", all.into());
+        }
+        for old in ["active_profile", "view_all_profiles"] {
+            crate::settings::save_key_in(dir_s, old, Value::Null);
+        }
+        let _ = std::fs::rename(dir.join("profiles.json"), dir.join("profiles.json.migrated"));
+        self.profile_migration = Some(report);
+    }
+
+    /// The report of the migration of the profiles, once.
+    pub fn take_profile_migration(&mut self) -> Option<ProfileMigration> {
+        self.profile_migration.take()
+    }
+
+    /// The old profiles whose secrets have not been put in their Space yet: old profile id → Space id.
+    pub fn pending_secrets(&self) -> &std::collections::BTreeMap<String, u64> {
+        &self.pending_secrets
+    }
+
+    /// The secrets have been moved (or there was nothing to move): the old marks are not needed any more.
+    pub fn secrets_done(&mut self) -> Result<()> {
+        self.pending_secrets.clear();
+        self.save()
+    }
+
+    /// Puts a secret in a Space (without saving: call `save_all` after a batch).
+    pub fn add_secret_to(&mut self, space: u64, secret: u64) {
+        if let Some(s) = self.spaces.iter_mut().find(|s| s.id == space) {
+            if !s.secrets.contains(&secret) {
+                s.secrets.push(secret);
+            }
+        }
+    }
+
+    pub fn save_all(&self) -> Result<()> {
+        self.save()
+    }
+
+    /// Changes what General fixes.
+    pub fn set_general(&mut self, g: SpaceSettings) -> Result<()> {
+        self.general = g;
+        self.save()
+    }
+
+    /// The settings of a Space, or General's.
+    pub fn settings_of(&self, space: Option<u64>) -> SpaceSettings {
+        space.and_then(|id| self.get(id)).map(|s| s.settings.clone()).unwrap_or_else(|| self.general.clone())
+    }
+
+    /// For every server and folder, the Spaces it is in (a folder counts for everything below it). Empty: General.
+    pub fn membership(&self, store: &Store) -> Membership {
+        let mut m = Membership::default();
+        for sp in &self.spaces {
+            for id in sp.server_ids(store) {
+                m.servers.entry(id).or_default().push(sp.id);
+            }
+            for root in &sp.server_folders {
+                if store.folders.iter().any(|f| f.id == *root) {
+                    for f in folder_subtree(&store.folders, *root) {
+                        m.folders.entry(f).or_default().push(sp.id);
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    /// For every secret that is in a Space, which ones.
+    pub fn secret_membership(&self) -> HashMap<u64, Vec<u64>> {
+        let mut out: HashMap<u64, Vec<u64>> = HashMap::new();
+        for sp in &self.spaces {
+            for id in &sp.secrets {
+                out.entry(*id).or_default().push(sp.id);
+            }
+        }
+        out
+    }
+
+    /// The secrets that are in `space` or in General, out of `all` (General: the ones in no Space; `Some(space)`: its own as
+    /// well). This is what a terminal of that Space, and an agent in it, may use.
+    pub fn secrets_in_scope(&self, space: Option<u64>, all: impl IntoIterator<Item = u64>) -> Vec<u64> {
+        let member = self.secret_membership();
+        all.into_iter().filter(|id| member.get(id).is_none_or(Vec::is_empty) || space.is_some_and(|sp| member.get(id).is_some_and(|v| v.contains(&sp)))).collect()
+    }
+
+    /// The servers that are in `space` or in General (General: the ones in no Space).
+    pub fn servers_in_scope(&self, store: &Store, space: Option<u64>) -> Vec<u64> {
+        let m = self.membership(store);
+        store.servers.iter().map(|s| s.id).filter(|id| m.server_shows(*id, space)).collect()
+    }
+
+    /// Puts something in one Space only, or (`None`) in none, which is General. A server in a folder that is in a Space is
+    /// still in that Space too: only what the Space lists itself is moved.
+    pub fn move_item(&mut self, item: Item, to: Option<u64>) -> Result<()> {
+        if to.is_some_and(|id| self.get(id).is_none()) {
+            bail!("this Space no longer exists");
+        }
+        for sp in &mut self.spaces {
+            let list = match item {
+                Item::Server(_) => &mut sp.servers,
+                Item::Folder(_) => &mut sp.server_folders,
+                Item::Secret(_) => &mut sp.secrets,
+            };
+            list.retain(|x| *x != item.id());
+            if Some(sp.id) == to {
+                list.push(item.id());
+            }
+        }
+        self.save()
     }
 
     pub fn list(&self) -> &[Space] {
@@ -352,7 +716,7 @@ impl Spaces {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&File { next_id: self.next_id, spaces: self.spaces.clone() })?)?;
+        std::fs::write(&tmp, serde_json::to_string_pretty(&File { next_id: self.next_id, spaces: self.spaces.clone(), general: self.general.clone(), profiles_migrated: self.profiles_migrated, pending_secrets: self.pending_secrets.clone() })?)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -410,7 +774,7 @@ mod tests {
         assert_eq!((ops.tabs[0].name.as_str(), ops.tabs[0].broadcast, ops.tabs[0].panes[0].command.as_str()), ("ops", true, "tail -f x"));
         assert!(!spaces[1].tabs[0].broadcast, "a lone terminal has nobody to broadcast to");
         assert_eq!(spaces[2].servers, vec![4], "the same server twice is one");
-        assert!(ops.folders.is_empty() && ops.secrets.is_empty() && ops.tunnels.is_empty() && ops.notes.is_empty() && ops.profile.is_none());
+        assert!(ops.folders.is_empty() && ops.secrets.is_empty() && ops.tunnels.is_empty() && ops.notes.is_empty() && ops.settings == SpaceSettings::default());
         assert_eq!(migrate_groups("not json").0.len() + migrate_groups("{}").0.len(), 0);
     }
 
@@ -444,10 +808,10 @@ mod tests {
     fn spaces_are_saved_changed_deleted_and_get_ids_that_are_not_reused() {
         let dir = temp("save");
         let mut s = Spaces::load_from(&dir);
-        let a = s.save_space(&Space { name: "  Acme  ".into(), folders: vec!["/srv/a".into(), "/srv/a".into(), " ".into()], servers: vec![3, 3], ..Default::default() }).unwrap();
+        let a = s.save_space(&Space { name: "  Example  ".into(), folders: vec!["/srv/a".into(), "/srv/a".into(), " ".into()], servers: vec![3, 3], ..Default::default() }).unwrap();
         let b = s.save_space(&Space { name: "Beta".into(), ..Default::default() }).unwrap();
         assert_eq!((a, b), (1, 2));
-        assert_eq!(s.get(a).unwrap().name, "Acme");
+        assert_eq!(s.get(a).unwrap().name, "Example");
         assert_eq!((s.get(a).unwrap().folders.clone(), s.get(a).unwrap().servers.clone()), (vec!["/srv/a".to_string()], vec![3]));
         s.delete(b).unwrap();
         let c = s.save_space(&Space { name: "Gamma".into(), ..Default::default() }).unwrap();
@@ -458,7 +822,7 @@ mod tests {
         assert!(s.save_space(&Space { id: 99, name: "ghost".into(), ..Default::default() }).is_err());
         assert!(s.save_space(&Space { name: "   ".into(), ..Default::default() }).is_err());
         let again = Spaces::load_from(&dir);
-        assert_eq!(again.list().iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Acme", "Gamma"]);
+        assert_eq!(again.list().iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Example", "Gamma"]);
         assert_eq!(again.get(a).unwrap().notes, "use the staging db");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -477,7 +841,7 @@ mod tests {
     fn a_space_covers_its_servers_and_everything_under_its_folders_and_skips_what_was_deleted() {
         let dir = temp("cover");
         let mut store = Store::load_from(dir.join("servers.json")).unwrap();
-        store.folders = vec![Folder { id: 10, name: "prod".into(), parent: None, expanded: false, profile: None }, Folder { id: 11, name: "eu".into(), parent: Some(10), expanded: false, profile: None }, Folder { id: 12, name: "other".into(), parent: None, expanded: false, profile: None }];
+        store.folders = vec![Folder { id: 10, name: "prod".into(), parent: None, expanded: false }, Folder { id: 11, name: "eu".into(), parent: Some(10), expanded: false }, Folder { id: 12, name: "other".into(), parent: None, expanded: false }];
         store.servers = vec![server(1, None), server(2, Some(10)), server(3, Some(11)), server(4, Some(12)), server(5, None)];
         let sp = Space { name: "x".into(), servers: vec![1, 99], server_folders: vec![10, 77], ..Default::default() };
         assert_eq!(sp.server_ids(&store).into_iter().collect::<Vec<_>>(), [1, 2, 3], "a folder counts at any depth; ids that do not exist are skipped");
@@ -492,5 +856,146 @@ mod tests {
         assert_eq!(Space::default().first_folder(), None);
         let home = expand_home("~/code");
         assert!(home.is_absolute() && home.ends_with("code"));
+    }
+
+    // ------------------------------------------------------------ profiles became Spaces
+
+    fn old_files(dir: &Path) {
+        std::fs::write(
+            dir.join("servers.json"),
+            json!({
+                "next_id": 20,
+                "folders": [ { "id": 10, "name": "clients", "parent": null, "expanded": true, "profile": "work" }, { "id": 11, "name": "mixed", "parent": null, "expanded": false } ],
+                "servers": [
+                    { "id": 1, "name": "shop-api", "host": "h1", "port": 22, "user": "u", "auth": "agent", "parent": 10, "profile": null },
+                    { "id": 2, "name": "nas", "host": "h2", "port": 22, "user": "u", "auth": "agent", "parent": null, "profile": "home" },
+                    { "id": 3, "name": "everywhere", "host": "h3", "port": 22, "user": "u", "auth": "agent", "parent": null },
+                    { "id": 4, "name": "old-default", "host": "h4", "port": 22, "user": "u", "auth": "agent", "parent": 11, "profile": "default" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("profiles.json"),
+            json!([
+                { "id": "default", "name": "default", "proxy": 7, "gh_user": "me", "aws_profile": "base" },
+                { "id": "work", "name": "Work", "tailscale_account": "corp.example.com", "gh_user": "work-user", "production": true },
+                { "id": "home", "name": "Home", "kubeconfig": "~/.kube/home.yaml" }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("proxies.json"), "[]").unwrap();
+        std::fs::write(dir.join("settings.json"), json!({ "theme": "terminal", "active_profile": "work", "view_all_profiles": true }).to_string()).unwrap();
+        std::fs::write(dir.join("vault.json"), "SEALED").unwrap();
+    }
+
+    #[test]
+    fn the_profiles_become_general_and_spaces_with_a_copy_of_the_old_files() {
+        let dir = temp("profiles");
+        old_files(&dir);
+        let mut s = Spaces::load_from(&dir);
+        // the default profile is General: its settings are General's, its servers are in no Space
+        assert_eq!((s.general.proxy, s.general.gh_user.as_deref(), s.general.aws_profile.as_deref()), (Some(7), Some("me"), Some("base")));
+        // every other profile is a Space with what was in it
+        let names: Vec<&str> = s.list().iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["Work", "Home"]);
+        let work = s.list()[0].clone();
+        assert_eq!((work.server_folders.clone(), work.servers.clone()), (vec![10], vec![]), "a folder of the profile: everything inside it");
+        assert_eq!((work.settings.tailscale_account.as_deref(), work.settings.gh_user.as_deref(), work.settings.production), (Some("corp.example.com"), Some("work-user"), true));
+        let home = s.list()[1].clone();
+        assert_eq!((home.servers.clone(), home.settings.kubeconfig.as_deref()), (vec![2], Some("~/.kube/home.yaml")));
+        // the report, once
+        let r = s.take_profile_migration().expect("told once");
+        assert_eq!((r.spaces.clone(), r.active.as_deref()), (vec!["Work".to_string(), "Home".to_string()], Some("Work")));
+        assert!(s.take_profile_migration().is_none());
+        // a copy of what was read, before anything was changed
+        let backup = PathBuf::from(&r.backup);
+        for f in ["servers.json", "profiles.json", "proxies.json", "settings.json", "vault.json"] {
+            assert!(backup.join(f).exists(), "{f}");
+        }
+        assert_eq!(std::fs::read_to_string(backup.join("vault.json")).unwrap(), "SEALED");
+        assert!(std::fs::read_to_string(backup.join("profiles.json")).unwrap().contains("corp.example.com"), "as it was");
+        // the space in use and the view are in settings, the old keys are gone
+        let st: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(st["active_space"], work.id);
+        assert_eq!(st["view_all"], true);
+        assert!(st["active_profile"].is_null() && st["view_all_profiles"].is_null() && st["theme"] == "terminal", "the rest is kept: {st}");
+        assert!(dir.join("profiles.json.migrated").exists() && !dir.join("profiles.json").exists());
+        // the secrets of each old profile wait for the vault to be unlocked
+        assert_eq!(s.pending_secrets().get("work"), Some(&work.id));
+        assert!(s.pending_secrets().get("default").is_none(), "General's stay where they are");
+        // starting again does not migrate again
+        let mut again = Spaces::load_from(&dir);
+        assert_eq!(again.list().len(), 2);
+        assert!(again.take_profile_migration().is_none());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("backup-before-spaces")).count(), 1, "one copy, not two");
+        // the servers: who is where
+        let mut store = Store::load_from(dir.join("servers.json")).unwrap();
+        store.proxies.clear();
+        let m = again.membership(&store);
+        assert_eq!(m.spaces_of_server(1), &[again.list()[0].id], "shop-api is in a folder of Work");
+        assert_eq!(m.spaces_of_server(2), &[again.list()[1].id], "nas is Home's");
+        assert!(m.spaces_of_server(3).is_empty() && m.spaces_of_server(4).is_empty(), "the rest is General");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_single_default_profile_becomes_general_and_makes_no_space_and_nothing_else_is_touched() {
+        let dir = temp("one-profile");
+        std::fs::write(dir.join("profiles.json"), json!([{ "id": "default", "name": "default", "tailscale_account": "me.ts.net" }]).to_string()).unwrap();
+        std::fs::write(dir.join("servers.json"), json!({ "next_id": 2, "folders": [], "servers": [ { "id": 1, "name": "a", "host": "h", "port": 22, "user": "u", "auth": "agent", "profile": "default" } ] }).to_string()).unwrap();
+        let mut s = Spaces::load_from(&dir);
+        assert!(s.list().is_empty(), "no Space is made from the only profile");
+        assert_eq!(s.general.tailscale_account.as_deref(), Some("me.ts.net"));
+        assert!(s.take_profile_migration().unwrap().spaces.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn nothing_that_comes_from_profiles_means_nothing_is_done_and_no_file_is_made() {
+        let dir = temp("no-profiles");
+        let mut s = Spaces::load_from(&dir);
+        assert!(s.take_profile_migration().is_none() && !dir.join(FILE).exists());
+        std::fs::write(dir.join("servers.json"), json!({ "next_id": 1, "folders": [], "servers": [] }).to_string()).unwrap();
+        assert!(Spaces::load_from(&dir).list().is_empty() && !dir.join(FILE).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn two_profiles_that_would_have_the_same_name_get_different_ones() {
+        let dir = temp("same-name");
+        std::fs::write(dir.join("profiles.json"), json!([{ "id": "default", "name": "default" }, { "id": "a", "name": "Work" }, { "id": "b", "name": "Work" }]).to_string()).unwrap();
+        let s = Spaces::load_from(&dir);
+        assert_eq!(s.list().iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Work", "Work (2)"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn what_is_shown_depends_on_the_space_in_use_and_general_is_everywhere() {
+        let dir = temp("membership");
+        let mut store = Store::load_from(dir.join("servers.json")).unwrap();
+        store.folders = vec![Folder { id: 10, name: "prod".into(), parent: None, expanded: false }, Folder { id: 11, name: "eu".into(), parent: Some(10), expanded: false }, Folder { id: 12, name: "empty".into(), parent: None, expanded: false }];
+        store.servers = vec![server(1, Some(11)), server(2, None), server(3, None)];
+        let mut s = Spaces::load_from(&dir);
+        let a = s.save_space(&Space { name: "A".into(), server_folders: vec![10], ..Default::default() }).unwrap();
+        let b = s.save_space(&Space { name: "B".into(), servers: vec![2], ..Default::default() }).unwrap();
+        let m = s.membership(&store);
+        assert!(m.server_shows(1, Some(a)) && !m.server_shows(1, Some(b)) && !m.server_shows(1, None), "in A only");
+        assert!(m.server_shows(3, None) && m.server_shows(3, Some(a)) && m.server_shows(3, Some(b)), "General is everywhere");
+        assert_eq!(s.servers_in_scope(&store, None), vec![3]);
+        assert_eq!(s.servers_in_scope(&store, Some(b)), vec![2, 3]);
+        let mut shown = m.folders_shown(&store, Some(a));
+        shown.sort();
+        assert_eq!(shown, vec![10, 11, 12], "A's folders, and an empty one that is General's");
+        assert_eq!(m.folders_shown(&store, Some(b)), vec![12]);
+        // secrets
+        s.add_secret_to(a, 100);
+        s.save_all().unwrap();
+        assert_eq!(s.secrets_in_scope(None, [100, 101]), vec![101]);
+        assert_eq!(s.secrets_in_scope(Some(a), [100, 101]), vec![100, 101]);
+        assert_eq!(s.secrets_in_scope(Some(b), [100, 101]), vec![101]);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

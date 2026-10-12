@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentState, AgentStatus, baseName, effectiveState, guessFromScreen, nextAttention, noticesFor, proposedBranch, tabDot } from "../src/agents";
 
-const status = (over: Partial<AgentStatus> = {}): AgentStatus => ({ sid: 1, kind: "claude", name: "Claude Code", pid: 7, cwd: "/srv/acme", folder: "acme", branch: "main", state: "idle", since: 1000, source: "process", ...over });
+const status = (over: Partial<AgentStatus> = {}): AgentStatus => ({ sid: 1, kind: "claude", name: "Claude Code", pid: 7, cwd: "/srv/example", folder: "example", branch: "main", state: "idle", since: 1000, source: "process", ...over });
 
 describe("a guess from the screen", () => {
   it("says it needs you when the last lines ask a question, and that it works when output is arriving", () => {
@@ -75,7 +75,7 @@ describe("the small things", () => {
     expect(proposedBranch("claude", new Date(2026, 9, 11, 14, 30))).toBe("oso/claude-261011-1430");
     expect(proposedBranch("My Agent!", new Date(2026, 0, 2, 3, 4))).toBe("oso/MyAgent-260102-0304");
     expect(proposedBranch("", new Date(2026, 0, 2, 3, 4))).toBe("oso/agent-260102-0304");
-    expect(baseName("/home/u/code/acme/")).toBe("acme");
-    expect(baseName("acme")).toBe("acme");
+    expect(baseName("/home/u/code/example/")).toBe("example");
+    expect(baseName("example")).toBe("example");
   });
 });

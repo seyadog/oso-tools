@@ -1,4 +1,4 @@
-//! The cloud settings a profile can ask for in its local terminals: which AWS profile (`AWS_PROFILE`) and which
+//! The cloud settings a Space (or General) can ask for in its local terminals: which AWS profile (`AWS_PROFILE`) and which
 //! kubeconfig (`KUBECONFIG`). oso reads only the *names* of what exists, to offer them in a list; it never reads
 //! or keeps a key, a token or a certificate.
 
@@ -99,14 +99,14 @@ pub fn options(home: &Path, kubeconfig_env: Option<&str>) -> CloudOptions {
 mod tests {
     use super::*;
 
-    const AWS_CONFIG: &str = "[default]\nregion = eu-west-1\n\n[profile acme-prod]\nsso_session = acme\nsso_account_id = 111\n\n[sso-session acme]\nsso_start_url = https://x.awsapps.com/start\n\n[profile  spaced ]\nregion=x\n\n[services s3-special]\nx = y\n";
+    const AWS_CONFIG: &str = "[default]\nregion = eu-west-1\n\n[profile example-prod]\nsso_session = example\nsso_account_id = 111\n\n[sso-session example]\nsso_start_url = https://x.awsapps.com/start\n\n[profile  spaced ]\nregion=x\n\n[services s3-special]\nx = y\n";
     const AWS_CREDENTIALS: &str = "[default]\naws_access_key_id = AKIATRAPTRAPTRAP\naws_secret_access_key = TRAPSECRETTRAPSECRET\n[legacy]\naws_access_key_id = AKIAOTHERTRAP\n";
     const KUBE: &str = "apiVersion: v1\nclusters:\n- cluster:\n    server: https://k.example\n    certificate-authority-data: TRAPCERTDATA\n  name: prod-cluster\ncontexts:\n- context:\n    cluster: prod-cluster\n    user: me\n  name: prod\n- context:\n    cluster: dev-cluster\n    user: me\n  name: \"dev\"\ncurrent-context: prod\nkind: Config\nusers:\n- name: me\n  user:\n    token: TRAPTOKEN\n";
 
     #[test]
     fn aws_profiles_come_from_both_files_by_name_only() {
         let p = parse_aws_profiles(AWS_CONFIG, AWS_CREDENTIALS);
-        assert_eq!(p, vec!["default", "acme-prod", "spaced", "legacy"], "sessions and services are not profiles; a name appears once");
+        assert_eq!(p, vec!["default", "example-prod", "spaced", "legacy"], "sessions and services are not profiles; a name appears once");
         assert!(!format!("{p:?}").contains("TRAP"));
     }
 

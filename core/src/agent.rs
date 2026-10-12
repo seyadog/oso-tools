@@ -33,7 +33,7 @@ pub trait KeyProvider: Send + Sync {
     fn sign(&self, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>>;
 }
 
-/// Where the agent listens: inside the config dir if `OSO_CONFIG_DIR` is set (separate profiles and tests do not
+/// Where the agent listens: inside the config dir if `OSO_CONFIG_DIR` is set (separate setups and tests do not
 /// share one), otherwise in the user's private runtime directory.
 pub fn socket_path() -> PathBuf {
     if let Some(d) = std::env::var_os("OSO_CONFIG_DIR") {

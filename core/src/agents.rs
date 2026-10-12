@@ -402,7 +402,7 @@ mod tests {
     }
 
     fn found(sid: u64, kind: &str) -> HashMap<u64, Detected> {
-        HashMap::from([(sid, Detected { kind: kind.into(), name: kind.to_uppercase(), pid: 7, cwd: PathBuf::from("/srv/acme") })])
+        HashMap::from([(sid, Detected { kind: kind.into(), name: kind.to_uppercase(), pid: 7, cwd: PathBuf::from("/srv/example") })])
     }
 
     fn state_of(t: &mut Tracker, now: u64, found: &HashMap<u64, Detected>, pending: &[u64]) -> (State, &'static str, u64) {
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn a_worktree_is_a_new_branch_in_a_folder_next_to_the_repository() {
         let base = temp("worktree");
-        let repo = base.join("acme");
+        let repo = base.join("example");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
         assert!(git(&["init", "-q", "-b", "main"]).status.success());
@@ -514,11 +514,11 @@ mod tests {
         git(&["add", "."]);
         assert!(git(&["commit", "-q", "-m", "first"]).status.success());
         let dir = worktree_add(&repo, "oso/claude-1").unwrap();
-        assert_eq!(dir, base.join("acme.worktrees").join("oso-claude-1"));
+        assert_eq!(dir, base.join("example.worktrees").join("oso-claude-1"));
         assert!(dir.join("a.txt").exists(), "the files are there");
         assert_eq!(git_branch(&dir).as_deref(), Some("oso/claude-1"), "its own branch, read through the worktree");
         assert_eq!(git_branch(&repo).as_deref(), Some("main"), "the repository is where it was");
-        assert!(!repo.join("acme.worktrees").exists() && git(&["status", "--porcelain"]).stdout.is_empty(), "the repository gets no untracked files");
+        assert!(!repo.join("example.worktrees").exists() && git(&["status", "--porcelain"]).stdout.is_empty(), "the repository gets no untracked files");
         assert!(worktree_add(&repo, "oso/claude-1").unwrap_err().contains("already exists"));
         assert!(worktree_add(&repo, "-D").is_err());
         assert!(worktree_add(&base, "x").unwrap_err().contains("not inside a git repository"));

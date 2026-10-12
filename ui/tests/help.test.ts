@@ -49,17 +49,17 @@ describe("the sheet of shortcuts", () => {
 });
 
 describe("getting started", () => {
-  const base = { profiles: 1, apiKeys: null, openedLocal: false, aiConnected: false };
+  const base = { spaces: 0, apiKeys: null, openedLocal: false, aiConnected: false };
   it("has the four steps in order, each with a button", () => {
     const s = steps(base);
-    expect(s.map((x) => x.id)).toEqual(["profile", "key", "terminal", "ai"]);
+    expect(s.map((x) => x.id)).toEqual(["space", "key", "terminal", "ai"]);
     expect(s.every((x) => x.button.length > 3 && x.text.length > 20)).toBe(true);
     expect(progress(base)).toEqual({ done: 0, total: 4 });
   });
   it("marks what is done", () => {
-    const done = progress({ profiles: 2, apiKeys: 1, openedLocal: true, aiConnected: true });
+    const done = progress({ spaces: 1, apiKeys: 1, openedLocal: true, aiConnected: true });
     expect(done).toEqual({ done: 4, total: 4 });
-    expect(steps({ ...base, profiles: 3 })[0].done).toBe(true);
+    expect(steps({ ...base, spaces: 1 })[0].done).toBe(true);
     expect(steps({ ...base, apiKeys: 0 })[1].done).toBe(false);
   });
 });

@@ -17,7 +17,17 @@ pub fn scan_panes() -> HashMap<u64, Vec<Proc>> {
     scan_panes_in(Path::new("/proc"))
 }
 
+/// The same, only for the terminals of the background server that listens on `socket`: another oso on the same
+/// machine (a test, a second window) numbers its terminals from 1 too, so the number alone does not say whose it is.
+pub fn scan_panes_of(socket: &Path) -> HashMap<u64, Vec<Proc>> {
+    scan_panes_for(Path::new("/proc"), Some(socket))
+}
+
 pub fn scan_panes_in(root: &Path) -> HashMap<u64, Vec<Proc>> {
+    scan_panes_for(root, None)
+}
+
+fn scan_panes_for(root: &Path, socket: Option<&Path>) -> HashMap<u64, Vec<Proc>> {
     let mut out: HashMap<u64, Vec<Proc>> = HashMap::new();
     let Ok(dir) = std::fs::read_dir(root) else { return out };
     for entry in dir.flatten() {
@@ -25,6 +35,12 @@ pub fn scan_panes_in(root: &Path) -> HashMap<u64, Vec<Proc>> {
         let p = entry.path();
         let Ok(env) = std::fs::read(p.join("environ")) else { continue };
         let Some(pane) = env.split(|b| *b == 0).find_map(|kv| kv.strip_prefix(b"OSO_PANE=")).and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse::<u64>().ok()) else { continue };
+        if let Some(want) = socket {
+            let theirs = env.split(|b| *b == 0).find_map(|kv| kv.strip_prefix(b"OSO_SOCKET="));
+            if theirs.is_some_and(|t| t != want.as_os_str().as_encoded_bytes()) {
+                continue; // a terminal of another oso
+            }
+        }
         let argv: Vec<String> = std::fs::read(p.join("cmdline")).map(|c| c.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()).unwrap_or_default();
         if argv.is_empty() {
             continue; // a kernel thread or a zombie
@@ -71,6 +87,19 @@ mod tests {
         assert_eq!(p.ppid, std::process::id(), "its parent is this test");
         assert!(cwd_of(Path::new("/proc"), mine.id()).is_some());
         for c in [&mut mine, &mut other, &mut plain] {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    #[test]
+    fn a_terminal_of_another_oso_is_not_ours_even_with_the_same_number() {
+        let mut ours = Command::new("sleep").arg("33").env("OSO_PANE", "5151").env("OSO_SOCKET", "/tmp/a/oso.sock").stdout(Stdio::null()).spawn().unwrap();
+        let mut theirs = Command::new("sleep").arg("34").env("OSO_PANE", "5151").env("OSO_SOCKET", "/tmp/b/oso.sock").spawn().unwrap();
+        let found = scan_panes_of(Path::new("/tmp/a/oso.sock"));
+        let pids: Vec<u32> = found.get(&5151).map(|v| v.iter().map(|p| p.pid).collect()).unwrap_or_default();
+        assert!(pids.contains(&ours.id()) && !pids.contains(&theirs.id()), "{pids:?}");
+        for c in [&mut ours, &mut theirs] {
             let _ = c.kill();
             let _ = c.wait();
         }

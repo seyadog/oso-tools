@@ -21,12 +21,12 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "oso_context",
-            "description": "Call this first, before working with servers, credentials or secrets. It tells you the active profile, every server with its name, user, whether it is production/staging/dev and the notes its owner wrote about it, the tunnels and whether they are on, the names (never the values) of the environment variables already set in your terminal, and the secrets you can use through oso_run_with. Never ask the user for a password or a key: oso holds them and uses them for you.",
+            "description": "Call this first, before working with servers, credentials or secrets. It tells you where you are (a Space, or General), every server with its name, user, whether it is production/staging/dev and the notes its owner wrote about it, the tunnels and whether they are on, the names (never the values) of the environment variables already set in your terminal, and the secrets you can use through oso_run_with. Never ask the user for a password or a key: oso holds them and uses them for you.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         },
         {
             "name": "oso_hosts",
-            "description": "Search the servers of the active profile by name, host, user or notes. Use it when oso_context says there are too many servers to list.",
+            "description": "Search the servers you may use by name, host, user or notes. Use it when oso_context says there are too many servers to list.",
             "inputSchema": { "type": "object", "properties": { "query": { "type": "string", "description": "Words to look for; empty lists the first ones." } }, "additionalProperties": false },
         },
         {
@@ -66,8 +66,11 @@ pub fn instructions(context: &Value) -> String {
         return out;
     }
     let r = &context["result"];
-    let profile = r["profile"]["name"].as_str().unwrap_or("default");
-    out.push_str(&format!("\n\nActive profile: {profile}."));
+    let space = r["space"]["name"].as_str().unwrap_or("General");
+    out.push_str(&format!("\n\nYou are in: {space}."));
+    if let Some(notes) = r["space"]["notes"].as_str().filter(|n| !n.trim().is_empty()) {
+        out.push_str(&format!(" {}", notes.trim()));
+    }
     let servers = r["servers"].as_array().cloned().unwrap_or_default();
     if r["servers_note"].as_str().is_some_and(|n| !n.is_empty()) {
         out.push_str(&format!(" There are {} servers: use oso_hosts to search them.", servers.len()));
@@ -226,7 +229,7 @@ mod tests {
         fn call(&self, tool: &str, args: Value, agent: &str) -> Value {
             self.0.lock().unwrap().push((tool.into(), args, agent.into()));
             match tool {
-                "oso_context" => json!({ "ok": true, "result": { "profile": { "id": "work", "name": "Work" }, "servers": [{ "name": "acme-api", "environment": "production", "notes": "nginx + API node" }, { "name": "dev-box", "environment": "dev", "notes": "" }], "servers_note": "" } }),
+                "oso_context" => json!({ "ok": true, "result": { "space": { "name": "Work", "notes": "" }, "servers": [{ "name": "example-api", "environment": "production", "notes": "nginx + API node" }, { "name": "dev-box", "environment": "dev", "notes": "" }], "servers_note": "" } }),
                 "oso_run" => json!({ "ok": true, "result": { "exit_code": 0, "stdout": "hi\n" } }),
                 _ => json!({ "ok": false, "error": "The user did not allow this command." }),
             }
@@ -244,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn it_introduces_itself_with_a_summary_of_the_profile_and_its_servers() {
+    fn it_introduces_itself_with_a_summary_of_the_space_and_its_servers() {
         let (a, calls) = talk(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": "2" } } }), json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })]);
         assert_eq!(a.len(), 1, "a notification is not answered");
         let r = &a[0]["result"];
@@ -252,7 +255,7 @@ mod tests {
         assert_eq!(r["serverInfo"]["name"], "oso");
         assert!(r["capabilities"]["tools"].is_object());
         let text = r["instructions"].as_str().unwrap();
-        assert!(text.contains("Active profile: Work") && text.contains("acme-api (production): nginx + API node") && text.contains("dev-box (dev)"), "{text}");
+        assert!(text.contains("You are in: Work") && text.contains("example-api (production): nginx + API node") && text.contains("dev-box (dev)"), "{text}");
         assert!(text.contains("never ask for a password"));
         assert_eq!(calls[0].0, "oso_context");
         assert_eq!(calls[0].2, "claude-code");
@@ -262,7 +265,7 @@ mod tests {
     fn an_unknown_version_gets_ours_and_a_big_server_list_is_not_dumped() {
         let (a, _) = talk(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "1999-01-01" } })]);
         assert_eq!(a[0]["result"]["protocolVersion"], "2025-06-18");
-        let many = json!({ "ok": true, "result": { "profile": { "name": "Big" }, "servers": [{ "name": "a" }, { "name": "b" }], "servers_note": "There are many servers" } });
+        let many = json!({ "ok": true, "result": { "space": { "name": "Big" }, "servers": [{ "name": "a" }, { "name": "b" }], "servers_note": "There are many servers" } });
         let t = instructions(&many);
         assert!(t.contains("use oso_hosts") && !t.contains("- a"), "{t}");
         assert!(instructions(&json!({ "ok": false, "error": "oso's window is not open" })).contains("window is not open"));
@@ -286,7 +289,7 @@ mod tests {
     fn a_call_goes_to_oso_and_its_answer_comes_back_as_text_or_as_an_error() {
         let (a, calls) = talk(&[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "clientInfo": { "name": "opencode" } } }),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "oso_run", "arguments": { "host": "acme-api", "command": "echo hi" } } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "oso_run", "arguments": { "host": "example-api", "command": "echo hi" } } }),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "oso_sudo", "arguments": { "command": "reboot" } } }),
             json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "rm_rf", "arguments": {} } }),
             json!({ "jsonrpc": "2.0", "id": 5, "method": "nope" }),
@@ -300,7 +303,7 @@ mod tests {
         assert_eq!(a[4]["error"]["code"], -32601);
         assert_eq!(a[5]["result"], json!({}));
         let run = calls.iter().find(|c| c.0 == "oso_run").unwrap();
-        assert_eq!((run.1["host"].as_str(), run.2.as_str()), (Some("acme-api"), "opencode"), "the agent's name travels with the call");
+        assert_eq!((run.1["host"].as_str(), run.2.as_str()), (Some("example-api"), "opencode"), "the agent's name travels with the call");
         assert!(!calls.iter().any(|c| c.0 == "rm_rf"));
     }
 

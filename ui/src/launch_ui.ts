@@ -20,7 +20,7 @@ export async function newAgentDialog(ctx: LaunchCtx, space: Space | null) {
   const kinds = await ctx.be.agentKinds().catch(() => [] as AgentKindRow[]);
   openModal((close) => {
     const folders = space?.folders ?? [];
-    const folder = el("input", { value: folders[0] ?? "", autocomplete: "off", spellcheck: "false", placeholder: "~/code/acme (empty: the home folder)", list: "launch-folders", "data-name": "launch-folder" }) as HTMLInputElement;
+    const folder = el("input", { value: folders[0] ?? "", autocomplete: "off", spellcheck: "false", placeholder: "~/code/your-project (empty: the home folder)", list: "launch-folders", "data-name": "launch-folder" }) as HTMLInputElement;
     const known = el("datalist", { id: "launch-folders" }, ...folders.map((f) => el("option", { value: f })));
     const agent = makeSelect(kinds.map((k): [string, string] => [k.id, k.name]), kinds[0]?.id ?? "", { "data-name": "launch-agent" });
     const useTree = el("input", { type: "checkbox", id: "launch-wt", "data-name": "launch-worktree" }) as HTMLInputElement;

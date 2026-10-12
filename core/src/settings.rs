@@ -5,12 +5,12 @@ use std::path::Path;
 
 #[derive(Deserialize)]
 pub struct Settings {
-    /// The profile the window works in (see `store::Profile`).
+    /// The Space the window works in (`None`: General).
     #[serde(default)]
-    pub active_profile: Option<String>,
-    /// Show the hosts of every profile, not only of the active one.
+    pub active_space: Option<u64>,
+    /// Show what is in every Space, not only General and the Space in use.
     #[serde(default)]
-    pub view_all_profiles: bool,
+    pub view_all: bool,
     /// `"terminal"` (pastels on your terminal's own background, the default) or `"classic"` (fixed colours).
     #[serde(default = "terminal")]
     pub theme: String,
@@ -22,7 +22,7 @@ fn terminal() -> String {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: terminal(), active_profile: None, view_all_profiles: false }
+        Settings { theme: terminal(), active_space: None, view_all: false }
     }
 }
 

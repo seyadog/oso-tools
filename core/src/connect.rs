@@ -236,7 +236,7 @@ fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<Stri
 
 /// The environment a local terminal starts with: the one this program has, minus what only oso may set.
 pub fn client_env() -> Vec<(String, String)> {
-    const OURS: [&str; 5] = ["OSO", "OSO_PROFILE", "OSO_PANE", "OSO_TOKEN", "OSO_SOCKET"];
+    const OURS: [&str; 5] = ["OSO", "OSO_SPACE", "OSO_PANE", "OSO_TOKEN", "OSO_SOCKET"];
     std::env::vars().filter(|(k, _)| !OURS.contains(&k.as_str())).collect()
 }
 
@@ -368,7 +368,6 @@ mod tests {
             has_sudo: false,
             has_totp: false,
             forwards: vec![],
-            profile: None,
             notes: String::new(),
             env_kind: None,
             proxy: None,
@@ -494,7 +493,7 @@ mod tests {
     }
 
     fn socks(host: &str, port: u16) -> Proxy {
-        Proxy { id: 0, name: "corp".into(), kind: ProxyKind::Socks5, host: host.into(), port, profile: None }
+        Proxy { id: 0, name: "corp".into(), kind: ProxyKind::Socks5, host: host.into(), port }
     }
 
     /// A store with the saved proxy `p` (its id is returned).

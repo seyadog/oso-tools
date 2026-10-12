@@ -2,10 +2,11 @@
 // and what is left of it when things it names were deleted. (The engine enforces the same rules for agents.)
 
 import { Space, SpaceTab, TreeData } from "./api";
+import { NO_SETTINGS } from "./space_bar";
 import { Tree } from "./tree";
 
 export function emptySpace(): Space {
-  return { id: 0, name: "", profile: null, folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] };
+  return { id: 0, name: "", folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [], ...NO_SETTINGS };
 }
 
 /** Every server a Space covers: its single servers, and everything under its folders at any depth. Deleted ones are not there. */

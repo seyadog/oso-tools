@@ -132,7 +132,7 @@ fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> 
 
 // ---------------------------------------------------------------- paths
 
-/// Where the server listens: inside the config dir if `OSO_CONFIG_DIR` is set (separate profiles and
+/// Where the server listens: inside the config dir if `OSO_CONFIG_DIR` is set (separate setups and
 /// tests do not share a server), otherwise in the user's private runtime directory.
 pub fn socket_path() -> PathBuf {
     if let Some(d) = std::env::var_os("OSO_CONFIG_DIR") {
@@ -697,6 +697,8 @@ pub struct Daemon {
     shared: Arc<ClientShared>,
     /// Version of the server we talk to.
     pub server_version: String,
+    /// The socket it is connected to: the terminals it starts carry it as `OSO_SOCKET`.
+    pub socket: PathBuf,
 }
 
 pub enum ConnectError {
@@ -713,10 +715,10 @@ impl Daemon {
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => ConnectError::None,
             _ => ConnectError::Other(e.into()),
         })?;
-        Self::handshake(stream)
+        Self::handshake(stream, path)
     }
 
-    fn handshake(stream: UnixStream) -> std::result::Result<Daemon, ConnectError> {
+    fn handshake(stream: UnixStream, path: &Path) -> std::result::Result<Daemon, ConnectError> {
         let other = |e: anyhow::Error| ConnectError::Other(e);
         stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| other(e.into()))?;
         let mut writer = stream.try_clone().map_err(|e| other(e.into()))?;
@@ -750,7 +752,7 @@ impl Daemon {
             }
             inbox.lost();
         });
-        Ok(Daemon { shared, server_version: version })
+        Ok(Daemon { shared, server_version: version, socket: path.to_path_buf() })
     }
 
     /// Starts a session in the server and attaches to it.

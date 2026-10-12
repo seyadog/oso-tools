@@ -113,20 +113,59 @@ fn vault_change_master(state: State<AppState>, master: String) -> Res<()> {
     engine!(state).vault_change_master(&master).map_err(err)
 }
 
+/// Works in this Space (`null`: General). Nothing is switched by itself: `space_account_changes` says which accounts the
+/// Space asks for, and the window asks the person before using `account_use`.
 #[tauri::command]
-fn profile_save(state: State<AppState>, id: String, name: String) -> Res<String> {
-    engine!(state).profile_save(&id, &name).map_err(err)
+fn set_active_space(state: State<AppState>, id: Option<u64>) -> Res<()> {
+    engine!(state).set_active_space(id).map_err(err)
+}
+
+/// The accounts this Space (or General) asks for that are not the ones in use.
+#[tauri::command]
+fn space_account_changes(state: State<AppState>, id: Option<u64>) -> Res<Vec<oso_core::engine::AccountChange>> {
+    Ok(engine!(state).account_changes(id))
+}
+
+/// What a Space (or General: `null`) fixes: accounts, proxy, cloud settings, the production mark.
+#[tauri::command]
+fn space_settings(state: State<AppState>, id: Option<u64>) -> Res<oso_core::spaces::SpaceSettings> {
+    Ok(engine!(state).space_settings(id))
 }
 
 #[tauri::command]
-fn profile_delete(state: State<AppState>, id: String) -> Res<()> {
-    engine!(state).profile_delete(&id).map_err(err)
+fn space_set_settings(state: State<AppState>, id: Option<u64>, settings: oso_core::spaces::SpaceSettings) -> Res<()> {
+    engine!(state).space_set_settings(id, settings).map_err(err)
 }
 
-/// Switches the profile and the accounts it asks for; the answer lists what could not be switched.
+/// Puts a server, a folder or a secret in one Space, or (`null`) in General. `kind`: `server`, `folder` or `secret`.
 #[tauri::command]
-fn set_active_profile(state: State<AppState>, id: String) -> Res<Vec<String>> {
-    engine!(state).switch_profile(&id).map_err(err)
+fn move_to_space(state: State<AppState>, kind: String, id: u64, space: Option<u64>) -> Res<()> {
+    let mut e = engine!(state);
+    match kind.as_str() {
+        "server" => e.server_set_space(id, space),
+        "folder" => e.folder_set_space(id, space),
+        "secret" => e.secret_set_space(id, space),
+        _ => return Err("unknown kind".into()),
+    }
+    .map_err(err)
+}
+
+/// The Space each secret is in (secret id → Space id; the ones that are not here are General's).
+#[tauri::command]
+fn secret_spaces(state: State<AppState>) -> Res<std::collections::HashMap<u64, u64>> {
+    Ok(engine!(state).secret_spaces())
+}
+
+/// The secret that is this computer's sudo password, if there is one.
+#[tauri::command]
+fn local_sudo_secret(state: State<AppState>) -> Res<Option<u64>> {
+    Ok(engine!(state).vault.links(0).sudo)
+}
+
+/// What turning the old profiles into Spaces did at start-up, once (then `null`).
+#[tauri::command]
+fn space_profile_migration(state: State<AppState>) -> Res<Option<oso_core::spaces::ProfileMigration>> {
+    Ok(engine!(state).spaces.take_profile_migration())
 }
 
 #[tauri::command]
@@ -137,11 +176,6 @@ fn accounts(state: State<AppState>) -> Res<oso_core::accounts::AccountsView> {
 #[tauri::command]
 fn account_use(state: State<AppState>, tool: String, id: String) -> Res<()> {
     engine!(state).account_use(&tool, &id).map_err(err)
-}
-
-#[tauri::command]
-fn profile_set_accounts(state: State<AppState>, profile: String, gh_user: Option<String>, tailscale_account: Option<String>) -> Res<()> {
-    engine!(state).profile_set_accounts(&profile, gh_user, tailscale_account).map_err(err)
 }
 
 #[tauri::command]
@@ -157,11 +191,6 @@ fn set_view_all(state: State<AppState>, all: bool) -> Res<()> {
 }
 
 #[tauri::command]
-fn set_folder_profile(state: State<AppState>, id: u64, profile: Option<String>) -> Res<()> {
-    engine!(state).set_folder_profile(id, profile).map_err(err)
-}
-
-#[tauri::command]
 fn proxy_save(state: State<AppState>, proxy: Proxy) -> Res<u64> {
     engine!(state).proxy_save(proxy).map_err(err)
 }
@@ -169,11 +198,6 @@ fn proxy_save(state: State<AppState>, proxy: Proxy) -> Res<u64> {
 #[tauri::command]
 fn proxy_delete(state: State<AppState>, id: u64) -> Res<()> {
     engine!(state).proxy_delete(id).map_err(err)
-}
-
-#[tauri::command]
-fn profile_set_proxy(state: State<AppState>, profile: String, proxy: Option<u64>) -> Res<()> {
-    engine!(state).profile_set_proxy(&profile, proxy).map_err(err)
 }
 
 /// The person's answer to what an AI agent asked: `once`, `always_read`, `deny` or `terminal`.
@@ -298,11 +322,6 @@ fn proton_import(state: State<AppState>, path: String, which: Vec<usize>) -> Res
 #[tauri::command]
 fn cloud_options(state: State<AppState>) -> Res<oso_core::cloud::CloudOptions> {
     Ok(engine!(state).cloud_options())
-}
-
-#[tauri::command]
-fn profile_set_cloud(state: State<AppState>, profile: String, aws_profile: Option<String>, kubeconfig: Option<String>, production: bool) -> Res<()> {
-    engine!(state).profile_set_cloud(&profile, aws_profile, kubeconfig, production).map_err(err)
 }
 
 #[tauri::command]
@@ -744,18 +763,20 @@ fn main() {
             vault_reveal,
             vault_set,
             vault_change_master,
-            profile_save,
-            profile_delete,
-            set_active_profile,
+            set_active_space,
+            space_account_changes,
+            space_settings,
+            space_set_settings,
+            move_to_space,
+            secret_spaces,
+            local_sudo_secret,
+            space_profile_migration,
             accounts,
             account_use,
-            profile_set_accounts,
             network_accept,
             set_view_all,
-            set_folder_profile,
             proxy_save,
             proxy_delete,
-            profile_set_proxy,
             approval_answer,
             audit_recent,
             agent_activity,
@@ -780,7 +801,6 @@ fn main() {
             proton_preview,
             proton_import,
             cloud_options,
-            profile_set_cloud,
             import_preview,
             import_apply,
             import_delete_originals,

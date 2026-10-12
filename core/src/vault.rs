@@ -55,10 +55,11 @@ pub struct Secret {
     pub kind: SecretKind,
     /// The only really secret part (for `SshKey`: the OpenSSH private key).
     pub value: String,
-    /// `None`: every profile.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Put in the environment of the terminals of its profile, e.g. `ANTHROPIC_API_KEY`.
+    /// What older versions called the profile of a secret. It is moved into a Space the first time the vault is unlocked
+    /// after the change, and then dropped (see `legacy_marks` and `clear_legacy_marks`).
+    #[serde(default, rename = "profile", skip_serializing_if = "Option::is_none")]
+    pub legacy_profile: Option<String>,
+    /// Put in the environment of the terminals where it is available (its Space's, or all of them in General), e.g. `ANTHROPIC_API_KEY`.
     #[serde(default)]
     pub env_var: Option<String>,
     /// May be put in terminals where an AI agent can run.
@@ -79,8 +80,6 @@ pub struct SecretMeta {
     pub name: String,
     pub kind: SecretKind,
     #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
     pub env_var: Option<String>,
     #[serde(default)]
     pub agent_visible: bool,
@@ -96,7 +95,6 @@ impl Secret {
             id: self.id,
             name: self.name.clone(),
             kind: self.kind,
-            profile: self.profile.clone(),
             env_var: self.env_var.clone(),
             agent_visible: self.agent_visible,
             notes: self.notes.clone(),
@@ -161,7 +159,7 @@ impl Data {
                 let Some(value) = value else { continue };
                 let id = d.new_id();
                 let sk = if kind == Kind::Login { SecretKind::Password } else { SecretKind::Sudo };
-                d.secrets.insert(id, Secret { id, name: auto_name(server, kind), kind: sk, value, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: now() });
+                d.secrets.insert(id, Secret { id, name: auto_name(server, kind), kind: sk, value, legacy_profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: now() });
                 if kind == Kind::Login { links.login = Some(id) } else { links.sudo = Some(id) }
             }
             d.host_links.insert(server, links);
@@ -356,7 +354,7 @@ impl Vault {
             (Some(v), None) => {
                 let sid = st.data.new_id();
                 let (sk, suffix) = if kind == Kind::Login { (SecretKind::Password, "login") } else { (SecretKind::Sudo, "sudo") };
-                st.data.secrets.insert(sid, Secret { id: sid, name: format!("{label} ({suffix})"), kind: sk, value: v.to_string(), profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: now() });
+                st.data.secrets.insert(sid, Secret { id: sid, name: format!("{label} ({suffix})"), kind: sk, value: v.to_string(), legacy_profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: now() });
                 let link = st.data.host_links.entry(id).or_default();
                 if kind == Kind::Login { link.login = Some(sid) } else { link.sudo = Some(sid) }
             }
@@ -497,13 +495,6 @@ impl Vault {
         if let Some(v) = &env_var {
             check_env_name(v)?;
         }
-        let profile = meta.profile.filter(|p| !p.is_empty());
-        let overlaps = |a: &Option<String>, b: &Option<String>| a.is_none() || b.is_none() || a == b;
-        if let Some(v) = &env_var {
-            if st.data.secrets.values().any(|o| o.id != meta.id && o.env_var.as_deref() == Some(v) && overlaps(&o.profile, &profile)) {
-                bail!("another secret already fills {v} in that profile");
-            }
-        }
         let existing = st.data.secrets.contains_key(&meta.id);
         if meta.id != 0 && !existing {
             bail!("this secret no longer exists");
@@ -520,7 +511,7 @@ impl Vault {
             name,
             kind: meta.kind,
             value: value.map(str::to_string).or_else(|| prev.as_ref().map(|p| p.value.clone())).unwrap_or_default(),
-            profile,
+            legacy_profile: None,
             env_var,
             agent_visible: meta.agent_visible,
             notes: meta.notes,
@@ -561,39 +552,51 @@ impl Vault {
         Ok(touched)
     }
 
-    /// For `oso run`: `(secret name, variable, value, visible to agents)` of every secret that fills a variable in `profile`.
-    pub fn env_with_flags(&mut self, profile: &str) -> Vec<(String, String, Zeroizing<String>, bool)> {
+    /// For `oso run`: `(secret name, variable, value, visible to agents)` of the secrets in `ids` that fill a variable.
+    pub fn env_with_flags(&mut self, ids: &[u64]) -> Vec<(String, String, Zeroizing<String>, bool)> {
         let Some(st) = self.state.as_mut() else { return vec![] };
         st.last_used = Instant::now();
-        st.data
-            .secrets
-            .values()
-            .filter(|s| s.profile.as_deref().is_none_or(|p| p == profile))
-            .filter_map(|s| s.env_var.clone().map(|v| (s.name.clone(), v, Zeroizing::new(s.value.clone()), s.agent_visible)))
-            .collect()
+        let mut rows: Vec<&Secret> = st.data.secrets.values().filter(|s| ids.contains(&s.id)).collect();
+        rows.sort_by_key(|s| s.id);
+        rows.into_iter().filter_map(|s| s.env_var.clone().map(|v| (s.name.clone(), v, Zeroizing::new(s.value.clone()), s.agent_visible))).collect()
     }
 
-    /// `(variable, value)` for every secret that fills a variable in `profile` and may be seen by agents.
-    pub fn env_for(&mut self, profile: &str, agent_visible_only: bool) -> Vec<(String, Zeroizing<String>)> {
-        let Some(st) = self.state.as_mut() else { return vec![] };
-        st.last_used = Instant::now();
-        st.data
-            .secrets
-            .values()
-            .filter(|s| s.profile.as_deref().is_none_or(|p| p == profile) && (!agent_visible_only || s.agent_visible))
-            .filter_map(|s| s.env_var.clone().map(|v| (v, Zeroizing::new(s.value.clone()))))
-            .collect()
+    /// Writes an old profile mark (`#[doc(hidden)]`: only for the tests of the migration, which need a vault as an older
+    /// version left it).
+    #[doc(hidden)]
+    pub fn set_legacy_mark(&mut self, id: u64, profile: &str) -> Result<()> {
+        let st = self.state.as_mut().context("the vault is locked")?;
+        st.data.secrets.get_mut(&id).context("no such secret")?.legacy_profile = Some(profile.to_string());
+        self.save()
     }
 
-    /// Like `env_for`, but for the secrets of a Space: the ones in `ids` that have a variable (and, when
-    /// `agent_visible_only`, are marked visible to agents), whatever profile they were made in.
+    /// The old profile marks that are still in the vault: `(secret, old profile id)`.
+    pub fn legacy_marks(&self) -> Vec<(u64, String)> {
+        let Some(st) = self.state.as_ref() else { return vec![] };
+        st.data.secrets.values().filter_map(|s| s.legacy_profile.clone().filter(|p| !p.is_empty()).map(|p| (s.id, p))).collect()
+    }
+
+    /// Drops the old profile marks (their secrets are in a Space now, or in General) and saves.
+    pub fn clear_legacy_marks(&mut self) -> Result<()> {
+        let st = self.state.as_mut().context("the vault is locked")?;
+        let any = st.data.secrets.values().any(|s| s.legacy_profile.is_some());
+        for s in st.data.secrets.values_mut() {
+            s.legacy_profile = None;
+        }
+        if any {
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// `(variable, value)` of the secrets in `ids` that fill a variable (and, when `agent_visible_only`, are marked visible
+    /// to agents). In the order of `ids`, so that a later secret wins over an earlier one that fills the same variable.
     pub fn env_for_ids(&mut self, ids: &[u64], agent_visible_only: bool) -> Vec<(String, Zeroizing<String>)> {
         let Some(st) = self.state.as_mut() else { return vec![] };
         st.last_used = Instant::now();
-        st.data
-            .secrets
-            .values()
-            .filter(|s| ids.contains(&s.id) && (!agent_visible_only || s.agent_visible))
+        ids.iter()
+            .filter_map(|id| st.data.secrets.get(id))
+            .filter(|s| !agent_visible_only || s.agent_visible)
             .filter_map(|s| s.env_var.clone().map(|v| (v, Zeroizing::new(s.value.clone()))))
             .collect()
     }
@@ -797,7 +800,7 @@ mod tests {
     }
 
     fn meta(name: &str, kind: SecretKind) -> SecretMeta {
-        SecretMeta { id: 0, name: name.into(), kind, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: 0 }
+        SecretMeta { id: 0, name: name.into(), kind, env_var: None, agent_visible: false, notes: String::new(), updated: 0 }
     }
 
     #[test]
@@ -810,7 +813,6 @@ mod tests {
         for (i, k) in kinds.iter().enumerate() {
             let mut m = meta(&format!("secret-{i}"), *k);
             m.notes = format!("note {i}");
-            m.profile = (i % 2 == 0).then(|| "work".to_string());
             ids.push(v.save_secret(m, Some(&format!("value-{i}"))).unwrap());
         }
         v.lock();
@@ -819,7 +821,6 @@ mod tests {
         for (i, k) in kinds.iter().enumerate() {
             let m = v.meta(ids[i]).unwrap();
             assert_eq!((m.kind, m.name.as_str(), m.notes.as_str()), (*k, format!("secret-{i}").as_str(), format!("note {i}").as_str()));
-            assert_eq!(m.profile.is_some(), i % 2 == 0);
             assert_eq!(v.reveal(ids[i]).as_deref(), Some(format!("value-{i}").as_str()));
         }
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -830,11 +831,11 @@ mod tests {
         let path = temp("sealed");
         let mut v = Vault::new(path.clone());
         v.create_with("m", FAST).unwrap();
-        let mut m = meta("aws-acme-prod", SecretKind::Token);
+        let mut m = meta("aws-example-prod", SecretKind::Token);
         m.notes = "rotates on fridays".into();
         v.save_secret(m, Some("v")).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("aws-acme-prod") && !raw.contains("fridays"));
+        assert!(!raw.contains("aws-example-prod") && !raw.contains("fridays"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -871,29 +872,29 @@ mod tests {
     }
 
     #[test]
-    fn variables_are_checked_and_not_shared_inside_a_profile() {
+    fn variables_are_checked_and_come_in_the_order_asked() {
         let path = temp("env");
         let mut v = Vault::new(path.clone());
         v.create_with("m", FAST).unwrap();
         let mut a = meta("a", SecretKind::ApiKey);
         a.env_var = Some("ANTHROPIC_API_KEY".into());
-        a.profile = Some("work".into());
         a.agent_visible = true;
-        v.save_secret(a.clone(), Some("va")).unwrap();
+        let ia = v.save_secret(a.clone(), Some("va")).unwrap();
+        // the same variable in two Spaces is fine: what a terminal gets depends on which secrets are in its reach
         let mut dup = a.clone();
         dup.name = "dup".into();
-        assert!(v.save_secret(dup.clone(), Some("x")).is_err(), "same variable, same profile");
-        dup.profile = Some("home".into());
-        v.save_secret(dup, Some("vb")).unwrap();
+        let ib = v.save_secret(dup, Some("vb")).unwrap();
         for bad in ["1X", "A B", "PATH", "LD_PRELOAD", "OSO_TOKEN", "a-b"] {
             let mut m = meta("bad", SecretKind::Token);
             m.env_var = Some(bad.into());
             assert!(v.save_secret(m, Some("x")).is_err(), "{bad}");
         }
-        let work = v.env_for("work", false);
-        assert_eq!(work.len(), 1);
-        assert_eq!((work[0].0.as_str(), work[0].1.as_str()), ("ANTHROPIC_API_KEY", "va"));
-        assert_eq!(v.env_for("home", false)[0].1.as_str(), "vb");
+        assert_eq!(v.env_for_ids(&[ia], false).iter().map(|(k, x)| (k.as_str(), x.as_str())).collect::<Vec<_>>(), [("ANTHROPIC_API_KEY", "va")]);
+        assert_eq!(v.env_for_ids(&[ib], false)[0].1.as_str(), "vb");
+        let both = v.env_for_ids(&[ia, ib], false);
+        assert_eq!(both.last().unwrap().1.as_str(), "vb", "the later one is the one that stays");
+        assert_eq!(v.env_with_flags(&[ib]).len(), 1);
+        assert!(v.env_for_ids(&[], false).is_empty());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

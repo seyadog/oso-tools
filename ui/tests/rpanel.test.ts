@@ -6,7 +6,7 @@ import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, ago, clampWid
 import { LEFT_DEFAULT, LEFT_MAX, LEFT_MIN, RAIL_WIDTH, SECTIONS, clampLeft, clickSection, readSection } from "../src/chrome";
 
 const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", has_output: false, note: "", ...over });
-const req = (id: number, over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id, pane: 2, label: "Claude in acme, pane 2", agent: "claude", action: "run", host: "acme", command: "df -h", production: false, can_remember: true, ...over });
+const req = (id: number, over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id, pane: 2, label: "Claude in example, pane 2", agent: "claude", action: "run", host: "example", command: "df -h", production: false, can_remember: true, ...over });
 
 describe("the words of the panel", () => {
   it("names the agent and says how long ago", () => {

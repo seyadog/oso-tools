@@ -41,7 +41,7 @@ fn engine_in(dir: &Path) -> Arc<Mutex<Engine>> {
 }
 
 fn meta(name: &str, kind: SecretKind) -> SecretMeta {
-    SecretMeta { id: 0, name: name.into(), kind, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: 0 }
+    SecretMeta { id: 0, name: name.into(), kind, env_var: None, agent_visible: false, notes: String::new(), updated: 0 }
 }
 
 // ---- a client of the agent protocol, to test it from the outside
@@ -148,39 +148,53 @@ fn the_agent_signs_with_the_vault_open_and_has_nothing_when_it_is_locked() {
 }
 
 #[test]
-fn the_agent_of_a_space_offers_the_keys_of_that_space_and_signs_with_no_other() {
+fn the_agent_of_a_space_offers_the_keys_of_that_space_and_general_and_signs_with_no_other() {
     let dir = temp("space-agent");
-    let (a_text, _) = need_keygen!(dir, "acme", "ed25519");
+    let (a_text, _) = need_keygen!(dir, "example", "ed25519");
     let (b_text, _) = need_keygen!(dir, "beta", "ed25519");
+    let (g_text, _) = need_keygen!(dir, "shared", "ed25519");
     let engine = engine_in(&dir);
-    let (a_id, _b_id) = {
+    let (a_id, b_id, g_id) = {
         let mut e = engine.lock().unwrap();
-        (e.secret_save(meta("acme key", SecretKind::SshKey), Some(&a_text)).unwrap(), e.secret_save(meta("beta key", SecretKind::SshKey), Some(&b_text)).unwrap())
+        (e.secret_save(meta("example key", SecretKind::SshKey), Some(&a_text)).unwrap(), e.secret_save(meta("beta key", SecretKind::SshKey), Some(&b_text)).unwrap(), e.secret_save(meta("shared key", SecretKind::SshKey), Some(&g_text)).unwrap())
     };
     let sock = dir.join("agent.sock");
     let _agent = Engine::start_agent_at(&engine, sock.clone(), None).unwrap();
-    assert_eq!(identities(&sock).len(), 2, "the ordinary agent offers every key of the vault");
-    let space = engine.lock().unwrap().space_save(&oso_core::spaces::Space { name: "Acme".into(), secrets: vec![a_id], ..Default::default() }).unwrap();
+    assert_eq!(identities(&sock).len(), 3, "the ordinary agent (the one logins use) offers every key of the vault");
+    let (space, other) = {
+        let mut e = engine.lock().unwrap();
+        (e.space_save(&oso_core::spaces::Space { name: "Example".into(), secrets: vec![a_id], ..Default::default() }).unwrap(), e.space_save(&oso_core::spaces::Space { name: "Other".into(), secrets: vec![b_id], ..Default::default() }).unwrap())
+    };
+    let _ = (other, g_id);
     let space_sock = engine.lock().unwrap().space_agent_sock(space).expect("the Space has its own agent");
     assert_ne!(space_sock, sock);
     assert_eq!(std::fs::metadata(&space_sock).unwrap().permissions().mode_bits(), 0o600);
-    let ids = identities(&space_sock);
-    assert_eq!(ids.iter().map(|i| i.1.as_str()).collect::<Vec<_>>(), ["acme key"], "only the Space's key");
-    let acme = ssh_key::PrivateKey::from_openssh(&a_text).unwrap().public_key().clone();
+    let names = |s: &Path| {
+        let mut n: Vec<String> = identities(s).into_iter().map(|i| i.1).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(&space_sock), ["example key", "shared key"], "the Space's key and General's, which is shared; not Other's");
+    // General has an agent too: only what is in no Space
+    let general_sock = engine.lock().unwrap().space_agent_sock(0).expect("General has its own agent");
+    assert_eq!(names(&general_sock), ["shared key"]);
+    let example = ssh_key::PrivateKey::from_openssh(&a_text).unwrap().public_key().clone();
     let beta = ssh_key::PrivateKey::from_openssh(&b_text).unwrap().public_key().clone();
-    assert!(verifies(&acme, b"data", &sign(&space_sock, &acme.to_bytes().unwrap(), b"data", 0).expect("signs with its own key")));
+    assert!(verifies(&example, b"data", &sign(&space_sock, &example.to_bytes().unwrap(), b"data", 0).expect("signs with its own key")));
     assert!(sign(&space_sock, &beta.to_bytes().unwrap(), b"data", 0).is_none(), "and with no key of another Space");
+    assert!(sign(&general_sock, &example.to_bytes().unwrap(), b"data", 0).is_none(), "General does not sign with a Space's key");
     // the same socket is used again, and changing the Space changes what it offers without a restart
     assert_eq!(engine.lock().unwrap().space_agent_sock(space), Some(space_sock.clone()));
     let mut changed = engine.lock().unwrap().spaces_list()[0].clone();
     changed.secrets.clear();
     engine.lock().unwrap().space_save(&changed).unwrap();
-    assert!(identities(&space_sock).is_empty(), "a Space without keys offers none");
+    assert_eq!(names(&space_sock), ["example key", "shared key"], "a key that left its Space is in General, and General's is everywhere");
+    assert_eq!(names(&general_sock), ["example key", "shared key"], "and General offers it too");
     // locked: nothing, as everywhere
     changed.secrets = vec![a_id];
     engine.lock().unwrap().space_save(&changed).unwrap();
     engine.lock().unwrap().vault_lock();
-    assert!(identities(&space_sock).is_empty());
+    assert!(identities(&space_sock).is_empty() && identities(&general_sock).is_empty());
     // deleting the Space takes its agent away
     engine.lock().unwrap().space_delete(space).unwrap();
     std::thread::sleep(Duration::from_millis(100));
@@ -329,7 +343,6 @@ fn server_for(name: &str, sshd: &Sshd, jump: Option<u64>) -> Server {
         has_sudo: false,
         has_totp: false,
         forwards: vec![],
-        profile: None,
         notes: String::new(),
         env_kind: None,
         proxy: None,

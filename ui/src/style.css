@@ -278,10 +278,10 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .srow .secret .pw { flex: none; width: 110px; }
 .srow .old { color: var(--yellow, #e5c07b); font-size: 11.5px; margin: 0 6px; white-space: nowrap; }
 
-/* Profiles */
-.profile-slot { padding: 0 10px 6px; }
-.profile-bar { display: flex; align-items: center; gap: 4px; }
-.profile-bar .select { flex: 1; min-width: 0; }
+/* Spaces */
+.space-slot { padding: 0 10px 6px; }
+.space-bar { display: flex; align-items: center; gap: 4px; }
+.space-bar .select { flex: 1; min-width: 0; }
 .prow { grid-template-columns: 1fr auto; }
 
 /* production machines are red: in the tab and in the terminal */
@@ -322,10 +322,10 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .btn.way { display: flex; flex-direction: column; align-items: flex-start; text-align: left; padding: 10px 12px; height: auto; }
 .btn.way small { color: var(--muted); font-weight: 400; }
 
-/* a production profile is red */
+/* a production Space is red */
 .cloud-chip { font-size: 12px; padding: 2px 9px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; margin-right: 4px; }
 .cloud-chip.prod { background: rgba(255, 110, 145, .18); color: var(--red); }
-.profile-bar.prod .select .sel-btn { border-color: var(--red); color: var(--red); }
+.space-bar.prod .select .sel-btn { border-color: var(--red); color: var(--red); }
 
 /* help under fields, check rows, empty states */
 .help { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.35; }
@@ -337,14 +337,14 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .actions { flex-wrap: wrap; }
 .btn { white-space: nowrap; }
 
-/* the left panel: profile on top, sections with words, labelled buttons at the bottom */
-.profile-slot { padding: 12px 12px 6px; }
-.profile-bar { display: block; }
+/* the left panel: Space on top, sections with words, labelled buttons at the bottom */
+.space-slot { padding: 12px 12px 6px; }
+.space-bar { display: block; }
 .pb-label { color: var(--muted); font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin: 0 0 5px 2px; }
 .pb-row { display: flex; align-items: center; gap: 4px; }
-.profile-bar .select { flex: 1; min-width: 0; }
-.profile-bar .select .sel-btn { height: 38px; font-size: 15px; font-weight: 600; border-color: var(--accent); }
-.profile-bar.prod .select .sel-btn { border-color: var(--red); color: var(--red); }
+.space-bar .select { flex: 1; min-width: 0; }
+.space-bar .select .sel-btn { height: 38px; font-size: 15px; font-weight: 600; border-color: var(--accent); }
+.space-bar.prod .select .sel-btn { border-color: var(--red); color: var(--red); }
 .sec-btn { margin-left: 6px; height: 22px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--line); background: transparent; color: var(--dim); font-size: 11.5px; font-weight: 600; letter-spacing: 0; text-transform: none; cursor: pointer; white-space: nowrap; }
 .sec-btn:hover { background: var(--hover); color: var(--fg); border-color: var(--accent); }
 .sec .n + .sec-btn { margin-left: 8px; }

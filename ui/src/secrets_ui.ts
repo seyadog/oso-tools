@@ -1,4 +1,4 @@
-// The Secrets window: every secret of the vault with its type and profile, to read, copy, change or delete.
+// The Secrets window: every secret of the vault with its type and Space, to read, copy, change or delete.
 
 import { Backend, SecretKind, SecretMeta } from "./api";
 import { clear, confirmBox, el, fieldHelp, makeSelect, openModal, toast } from "./dom";
@@ -12,10 +12,8 @@ export interface Ctx {
   importProton(): void;
   /** Shows the current code of a one-time-code secret. */
   showCode(id: number, name: string): void;
-  /** Profiles that exist: id and name. */
-  profiles(): { id: string; name: string }[];
-  /** The profile the window is showing. */
-  activeProfile(): string;
+  /** Spaces that exist: id and name. */
+  spaces(): { id: number; name: string }[];
   lockVault(): Promise<void>;
   /** Something about the secrets may have changed (the left panel counts them). */
   changed?(): void;
@@ -28,10 +26,10 @@ export const STALE_DAYS = 90;
 export const daysOld = (updated: number, now = Date.now()) => (updated ? Math.floor((now / 1000 - updated) / 86400) : 0);
 export const isStale = (m: SecretMeta, now = Date.now()) => daysOld(m.updated, now) > STALE_DAYS;
 
-/** Which secrets a filter lets through: text in the name, the type, and the profile (`""` any, `"-"` for all-profile ones). */
-export function matches(m: SecretMeta, q: string, kind: string, profile: string): boolean {
+/** Which secrets a filter lets through: text in the name, the type, and the Space it lives in (`space` is `""` for any, `"-"` for General, else the id; `own` is the secret's Space, `null` for General). */
+export function matches(m: SecretMeta, q: string, kind: string, space: string, own: number | null = null): boolean {
   if (kind && m.kind !== kind) return false;
-  if (profile === "-" ? m.profile !== null : profile && m.profile !== profile && m.profile !== null) return false;
+  if (space === "-" ? own !== null : space && String(own) !== space) return false;
   const text = `${m.name} ${m.env_var ?? ""} ${m.notes}`.toLowerCase();
   return !q || text.includes(q.toLowerCase());
 }
@@ -45,18 +43,19 @@ export function copyForAWhile(text: string) {
   toast("Copied. The clipboard is cleared in 30 seconds.");
 }
 
-export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: string } = {}) {
+export function secretsDialog(ctx: Ctx, preset: { kind?: string; space?: string } = {}) {
   const shown = new Map<number, string>();
   openModal((close) => {
     const list = el("div", { class: "vault-list" });
     const filter = el("input", { type: "search", placeholder: "Search secrets", autocomplete: "off", spellcheck: "false", name: "secret-search" });
     const kinds = makeSelect([["", "All types"], ...KINDS.map((k): [string, string] => [k, KIND_LABEL[k]])], preset.kind ?? "", { "data-name": "kind-filter" });
-    const profiles = makeSelect([["", "All profiles"], ["-", "Shared by all"], ...ctx.profiles().map((p): [string, string] => [p.id, p.name])], preset.profile ?? "", { "data-name": "profile-filter" });
+    const spaces = makeSelect([["", "All Spaces"], ["-", "General"], ...ctx.spaces().map((p): [string, string] => [String(p.id), p.name])], preset.space ?? "", { "data-name": "space-filter" });
     let all: SecretMeta[] = [];
+    let where: Record<number, number> = {};
 
     const draw = () => {
       clear(list);
-      const rows = all.filter((m) => matches(m, filter.value.trim(), kinds.value, profiles.value));
+      const rows = all.filter((m) => matches(m, filter.value.trim(), kinds.value, spaces.value, where[m.id] ?? null));
       if (!rows.length) {
         const none = el("div", { class: "empty-box" }, el("div", {}, all.length ? "No secret matches." : "You have no secrets yet. Add your first API key."));
         if (!all.length) {
@@ -72,7 +71,8 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
       for (const m of rows) {
         const key = m.id;
         const old = isStale(m);
-        const where = [KIND_LABEL[m.kind], m.profile ? ctx.profiles().find((p) => p.id === m.profile)?.name ?? m.profile : "all profiles", m.env_var ? `$${m.env_var}` : ""].filter(Boolean).join(" · ");
+        const wherein = where[m.id] !== undefined ? ctx.spaces().find((p) => p.id === where[m.id])?.name ?? "a Space" : "General";
+        const detail = [KIND_LABEL[m.kind], wherein, m.env_var ? `$${m.env_var}` : ""].filter(Boolean).join(" · ");
         const text = el("span", { class: "pw" }, shown.get(key) ?? "••••••••••");
         const btn = (name: string, title: string, f: () => void) => {
           const b = el("button", { class: "ib", type: "button", title, "aria-label": title });
@@ -104,7 +104,7 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
         });
         list.append(
           el("div", { class: "vrow srow", "data-secret": m.name },
-            el("div", { class: "who" }, el("span", { class: "txt" }, el("b", {}, m.name), el("small", {}, where))),
+            el("div", { class: "who" }, el("span", { class: "txt" }, el("b", {}, m.name), el("small", {}, detail))),
             el("div", { class: "secret" }, text, old ? el("span", { class: "old", title: `Last changed ${daysOld(m.updated)} days ago` }, `${daysOld(m.updated)} days old`) : null, code, eye, cp, ed, rm),
           ),
         );
@@ -112,11 +112,12 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     };
     const load = async () => {
       all = await ctx.be.secretList().catch(() => []);
+      where = await ctx.be.secretSpaces().catch(() => ({}));
       draw();
     };
     filter.oninput = draw;
     kinds.onchange = draw;
-    profiles.onchange = draw;
+    spaces.onchange = draw;
     void load();
 
     const add = el("button", { class: "btn primary", type: "button", "data-act": "new-secret" }, "New secret");
@@ -164,7 +165,7 @@ export function secretsDialog(ctx: Ctx, preset: { kind?: string; profile?: strin
     };
     const done = el("button", { class: "btn", type: "button" }, "Done");
     done.onclick = close;
-    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "API keys, passwords, SSH keys, tokens and one-time codes. Everything here is encrypted, names included, and never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, profiles), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
+    return el("div", { class: "wide" }, el("h2", {}, "Secrets"), el("div", { class: "hint", style: "margin:0 0 10px" }, "API keys, passwords, SSH keys, tokens and one-time codes. Everything here is encrypted, names included, and never leaves this computer unencrypted."), el("div", { class: "filters" }, filter, kinds, spaces), list, el("div", { class: "actions" }, add, imp, sudo, lock, change, done));
   }, () => ctx.changed?.());
 }
 
@@ -193,15 +194,16 @@ function importChooser(ctx: Ctx) {
 }
 
 /** Add (`null`) or change a secret. On a change, leaving the value empty keeps the saved one. */
-export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => void, preset: Partial<SecretMeta> = {}) {
-  const m: SecretMeta = existing ?? { id: 0, name: "", kind: "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0, ...preset };
+export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => void, preset: Partial<SecretMeta> & { space?: string } = {}) {
+  const m: SecretMeta = existing ?? { id: 0, name: "", kind: "password", env_var: null, agent_visible: false, notes: "", updated: 0, ...preset };
   openModal((close) => {
     const name = el("input", { value: m.name, name: "name", autocomplete: "off", spellcheck: "false", placeholder: "anthropic-work" });
     const kind = makeSelect(KINDS.map((k): [string, string] => [k, KIND_LABEL[k]]), m.kind, { "data-name": "kind" });
     const long = () => kind.value === "ssh_key";
     const value = el("input", { type: "password", name: "value", autocomplete: "new-password", spellcheck: "false", placeholder: existing ? "saved — leave empty to keep" : "" });
     const keyText = el("textarea", { name: "value-key", rows: "5", spellcheck: "false", placeholder: existing ? "saved — leave empty to keep" : "-----BEGIN OPENSSH PRIVATE KEY-----" });
-    const profile = makeSelect([["", "All profiles"], ...ctx.profiles().map((p): [string, string] => [p.id, p.name])], m.profile ?? "", { "data-name": "profile" });
+    const space = makeSelect([["", "General (every Space)"], ...ctx.spaces().map((p): [string, string] => [String(p.id), p.name])], preset.space ?? "", { "data-name": "space" });
+    if (existing) void ctx.be.secretSpaces().then((w) => (space.value = w[existing.id] !== undefined ? String(w[existing.id]) : "")).catch(() => {});
     const env = el("input", { value: m.env_var ?? "", name: "env", autocomplete: "off", spellcheck: "false", placeholder: "ANTHROPIC_API_KEY (optional)" });
     const agent = el("input", { type: "checkbox", id: "agent-visible", name: "agent" }) as HTMLInputElement;
     agent.checked = existing ? m.agent_visible : m.agent_visible;
@@ -218,8 +220,8 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
     sync();
     const err = el("div", { class: "err" });
     const visible = el("div", { class: "check" }, agent, el("label", { for: "agent-visible" }, "Visible to AI agents"));
-    visible.append(el("div", { class: "help" }, "If on, the terminals of this profile where an AI tool runs get it in their environment. If off, only you (and tools you approve one by one) can use it."));
-    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), fieldHelp("Name", name, "How you find it in the list. Anything you like."), fieldHelp("Type", kind, "API key, password, SSH key, token, or the seed of one-time codes."), valueRow, fieldHelp("Profile", profile, "Which profile can use it. “All profiles” makes it available everywhere."), fieldHelp("Environment variable", env, "The name a program reads it by, like ANTHROPIC_API_KEY. Leave it empty if programs do not need it."), visible, fieldHelp("Notes", notes, "Anything to remember about it (where it comes from, when it expires). Encrypted too."), err);
+    visible.append(el("div", { class: "help" }, "If on, the terminals of this Space (or of any Space, for a General one) where an AI tool runs get it in their environment. If off, only you (and tools you approve one by one) can use it."));
+    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), fieldHelp("Name", name, "How you find it in the list. Anything you like."), fieldHelp("Type", kind, "API key, password, SSH key, token, or the seed of one-time codes."), valueRow, fieldHelp("Space", space, "Which Space can use it. General is available in every Space."), fieldHelp("Environment variable", env, "The name a program reads it by, like ANTHROPIC_API_KEY. Leave it empty if programs do not need it."), visible, fieldHelp("Notes", notes, "Anything to remember about it (where it comes from, when it expires). Encrypted too."), err);
     const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
     const no = el("button", { class: "btn", type: "button" }, "Cancel");
     no.onclick = () => {
@@ -231,7 +233,8 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
       e.preventDefault();
       const v = long() ? keyText.value.trim() : value.value;
       try {
-        await ctx.be.secretSave({ ...m, name: name.value.trim(), kind: kind.value as SecretKind, profile: profile.value || null, env_var: env.value.trim() || null, agent_visible: agent.checked, notes: notes.value }, v || null);
+        const id = await ctx.be.secretSave({ ...m, name: name.value.trim(), kind: kind.value as SecretKind, env_var: env.value.trim() || null, agent_visible: agent.checked, notes: notes.value }, v || null);
+        await ctx.be.moveToSpace("secret", id, space.value ? Number(space.value) : null);
         close();
         back();
       } catch (x) {

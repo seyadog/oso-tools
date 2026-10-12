@@ -1,7 +1,7 @@
 //! oso's command line (`oso unlock`, `oso run`…) talks to the running window through a private socket. The vault lives
 //! in the window's process, so that is where the answers are; with no window there is nothing to talk to.
 //!
-//! What it never does: print a secret. `oso run` hands the secrets of a profile to a program the person names (as
+//! What it never does: print a secret. `oso run` hands the secrets of a Space to a program the person names (as
 //! environment variables, like any "run with secrets" tool); when that would give it more than a terminal of oso
 //! already has, the window asks first.
 
@@ -117,7 +117,8 @@ impl Api {
             "status" => {
                 let e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
                 let v = e.vault_status();
-                json!({ "ok": true, "vault_exists": v.exists, "vault_unlocked": v.unlocked, "profile": e.active_profile() })
+                let space = e.active_space().and_then(|id| e.spaces.get(id)).map(|s| s.name.clone()).unwrap_or_else(|| "General".into());
+                json!({ "ok": true, "vault_exists": v.exists, "vault_unlocked": v.unlocked, "space": space })
             }
             "unlock" => {
                 let master = zeroize::Zeroizing::new(req.get("master").and_then(Value::as_str).unwrap_or("").to_string());
@@ -136,21 +137,31 @@ impl Api {
                 (self.ui)("refresh", Value::Null);
                 json!({ "ok": true })
             }
-            "profiles" => {
+            "spaces" => {
                 let e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
-                json!({ "ok": true, "active": e.active_profile(), "profiles": e.profiles().iter().map(|p| json!({ "id": p.id, "name": p.name })).collect::<Vec<_>>() })
+                let active = e.active_space().and_then(|id| e.spaces.get(id)).map(|s| s.name.clone()).unwrap_or_else(|| "General".into());
+                let mut all = vec![json!({ "name": "General" })];
+                all.extend(e.spaces.list().iter().map(|s| json!({ "name": s.name })));
+                json!({ "ok": true, "active": active, "spaces": all })
             }
-            "profile_use" => {
-                let name = req.get("profile").and_then(Value::as_str).unwrap_or("");
+            "space_use" => {
+                let name = req.get("space").and_then(Value::as_str).unwrap_or("");
                 let mut e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
-                let Some(id) = e.profiles().iter().find(|p| p.id == name || p.name.eq_ignore_ascii_case(name)).map(|p| p.id.clone()) else {
-                    return fail(format!("there is no profile {name:?}"));
+                let id = if name.eq_ignore_ascii_case("general") {
+                    None
+                } else {
+                    match e.spaces.list().iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
+                        Some(s) => Some(s.id),
+                        None => return fail(format!("there is no Space {name:?}")),
+                    }
                 };
-                match e.switch_profile(&id) {
-                    Ok(problems) => {
+                match e.set_active_space(id) {
+                    Ok(()) => {
+                        let changes = e.account_changes(id);
+                        let shown = id.and_then(|i| e.spaces.get(i)).map(|s| s.name.clone()).unwrap_or_else(|| "General".into());
                         drop(e);
                         (self.ui)("refresh", Value::Null);
-                        json!({ "ok": true, "profile": id, "problems": problems })
+                        json!({ "ok": true, "space": shown, "changes": changes })
                     }
                     Err(x) => fail(format!("{x:#}")),
                 }
@@ -202,35 +213,37 @@ impl Api {
         if command.is_empty() {
             return fail("no command given");
         }
-        let wanted = req.get("profile").and_then(Value::as_str).map(str::to_string);
-        let (env, names, extra, active, label_profile) = {
+        let wanted = req.get("space").and_then(Value::as_str).map(str::to_string);
+        let (env, names, extra, label_space) = {
             let mut e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
             if !e.vault.is_unlocked() {
                 return fail("the vault is locked: run `oso unlock` first");
             }
-            let active = e.active_profile().to_string();
-            let id = match &wanted {
-                None => active.clone(),
-                Some(w) => match e.profiles().iter().find(|p| &p.id == w || p.name.eq_ignore_ascii_case(w)) {
-                    Some(p) => p.id.clone(),
-                    None => return fail(format!("there is no profile {w:?}")),
+            let active = e.active_space();
+            let space = match wanted.as_deref() {
+                None => active,
+                Some(w) if w.eq_ignore_ascii_case("general") => None,
+                Some(w) => match e.spaces.list().iter().find(|s| s.name.eq_ignore_ascii_case(w)) {
+                    Some(s) => Some(s.id),
+                    None => return fail(format!("there is no Space {w:?}")),
                 },
             };
             let mut env: Vec<(String, zeroize::Zeroizing<String>)> = vec![];
             let mut names = vec![];
-            let mut extra = id != active;
-            for (name, var, value, visible) in e.vault.env_with_flags(&id) {
+            // asking for another Space than the one in use hands over more than a terminal of it already has
+            let mut extra = space != active;
+            let ids = e.secrets_in_reach(space);
+            for (name, var, value, visible) in e.vault.env_with_flags(&ids) {
                 extra |= !visible;
                 names.push(format!("{name} ({var})"));
                 env.push((var, value));
             }
-            let plain = e.profile_env(&id);
-            let label = e.profiles().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or(id.clone());
+            let plain = e.space_env(space);
+            let label = space.and_then(|i| e.spaces.get(i)).map(|s| s.name.clone()).unwrap_or_else(|| "General".into());
             let mut all: Vec<(String, String)> = plain;
             all.extend(env.iter().map(|(k, v)| (k.clone(), v.to_string())));
-            (all, names, extra, active, label)
+            (all, names, extra, label)
         };
-        let _ = active;
         let shown = command.join(" ");
         if extra && !names.is_empty() {
             let d = self.approvals.ask(
@@ -241,7 +254,7 @@ impl Api {
                     agent: "oso run".into(),
                     action: "run_with".into(),
                     host: "this computer".into(),
-                    command: format!("{shown}    [with the secrets of {label_profile}: {}]", names.join(", ")),
+                    command: format!("{shown}    [with the secrets of {label_space}: {}]", names.join(", ")),
                     production: false,
                     can_remember: false,
                 },
@@ -267,7 +280,14 @@ impl Api {
         if e.store.servers.iter().any(|s| s.name.eq_ignore_ascii_case(&name)) {
             return fail(format!("there is already a host called {name:?}"));
         }
-        let profile = text("profile");
+        let space = match text("space") {
+            None => None,
+            Some(w) if w.eq_ignore_ascii_case("general") => None,
+            Some(w) => match e.spaces.list().iter().find(|s| s.name.eq_ignore_ascii_case(&w)) {
+                Some(s) => Some(s.id),
+                None => return fail(format!("there is no Space {w:?}")),
+            },
+        };
         let s = Server {
             name,
             host,
@@ -276,11 +296,13 @@ impl Api {
             auth,
             key_path: text("key").unwrap_or_default(),
             notes: text("notes").unwrap_or_default(),
-            profile,
             ..Default::default()
         };
         match e.save_server(s, None, None) {
             Ok(id) => {
+                if space.is_some() {
+                    let _ = e.server_set_space(id, space);
+                }
                 drop(e);
                 (self.ui)("refresh", Value::Null);
                 json!({ "ok": true, "id": id })

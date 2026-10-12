@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 pub struct ApprovalRequest {
     pub id: u64,
     pub pane: u64,
-    /// "Claude in acme-api, pane 2": who asks, from where.
+    /// "Claude in example-api, pane 2": who asks, from where.
     pub label: String,
     pub agent: String,
     /// `run`, `sudo`, `run_with` or `tunnel`.
@@ -117,7 +117,7 @@ mod tests {
     use super::*;
 
     fn req() -> ApprovalRequest {
-        ApprovalRequest { id: 0, pane: 2, label: "Claude in acme-api, pane 2".into(), agent: "claude".into(), action: "run".into(), host: "acme".into(), command: "df -h".into(), production: false, can_remember: true }
+        ApprovalRequest { id: 0, pane: 2, label: "Claude in example-api, pane 2".into(), agent: "claude".into(), action: "run".into(), host: "example".into(), command: "df -h".into(), production: false, can_remember: true }
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
         }));
         assert_eq!(a.ask(req(), Duration::from_secs(5)), Decision::Once);
         let r = seen.lock().unwrap()[0].clone();
-        assert_eq!((r.label.as_str(), r.command.as_str(), r.id), ("Claude in acme-api, pane 2", "df -h", 1));
+        assert_eq!((r.label.as_str(), r.command.as_str(), r.id), ("Claude in example-api, pane 2", "df -h", 1));
         assert_eq!(a.waiting(), 0);
     }
 

@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { ApprovalRequest, AuditEntry } from "../src/api";
 import { actionTitle, auditLine } from "../src/agents_ui";
 
-const req = (over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id: 1, pane: 2, label: "Claude in acme-api, pane 2", agent: "claude-code", action: "run", host: "acme", command: "df -h", production: false, can_remember: true, ...over });
+const req = (over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id: 1, pane: 2, label: "Claude in example-api, pane 2", agent: "claude-code", action: "run", host: "example", command: "df -h", production: false, can_remember: true, ...over });
 
 describe("what an agent asks", () => {
   it("says who asks and what for", () => {
-    expect(actionTitle(req())).toBe("Claude in acme-api, pane 2 wants to run a command");
+    expect(actionTitle(req())).toBe("Claude in example-api, pane 2 wants to run a command");
     expect(actionTitle(req({ action: "sudo" }))).toContain("use sudo on this computer");
     expect(actionTitle(req({ action: "run_with" }))).toContain("with secrets");
     expect(actionTitle(req({ action: "tunnel" }))).toContain("tunnel");

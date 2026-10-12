@@ -51,7 +51,7 @@ export const ACTIONS: ActionDef[] = [
   // open things
   { id: "palette.open", label: "Command palette", describe: "Every command, server, Space, secret and tab: type to find it", icon: "search", keywords: "commands search find" },
   { id: "search", label: "Open a server…", describe: "Open a server (quick search)", icon: "server", keywords: "connect ssh host" },
-  { id: "local.new", label: "New local terminal", describe: "New local terminal (in the active profile)", icon: "terminal", keywords: "shell" },
+  { id: "local.new", label: "New local terminal", describe: "New local terminal (in the active Space)", icon: "terminal", keywords: "shell" },
   { id: "tab.new", label: "New terminal on the same server", describe: "New terminal (same server)", icon: "plus", when: t },
   { id: "agent.new", label: "New agent…", describe: "New agent (folder, agent, optional worktree)", icon: "agent", keywords: "claude opencode codex ai worktree" },
   { id: "space.new", label: "New Space…", icon: "layers", keywords: "workspace project" },

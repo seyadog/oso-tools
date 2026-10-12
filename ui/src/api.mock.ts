@@ -1,12 +1,11 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, Activity, AgentStatusRow, Space, SpaceMigration, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountChange, AccountsView, Activity, AgentStatusRow, ProfileMigration, Space, SpaceMigration, SpaceSettings, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
-  const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true, profile: null }];
-  const profiles: Profile[] = [{ id: "default", name: "default", proxy: null, gh_user: null, tailscale_account: null, aws_profile: null, kubeconfig: null, production: false }];
+  const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true }];
   const tools: AccountsView = {
     github: { installed: true, error: null, accounts: [{ id: "github.com/me", name: "me", detail: "github.com", active: true }, { id: "github.com/work-user", name: "work-user", detail: "github.com", active: false }] },
     tailscale: { installed: true, error: null, accounts: [{ id: "4ab1", name: "me@corp.example.com", detail: "corp.example.com", active: true }, { id: "9fe2", name: "me@gmail.com", detail: "home.ts.net", active: false }] },
@@ -18,16 +17,18 @@ export function mockBackend(): Backend {
     t.accounts.forEach((a) => (a.active = a.id === id || a.name === id || a.detail === id));
   };
   const proxies: Proxy[] = [];
-  let activeProfile = "default";
+  /** The Space the window works in (null: General). */
+  let activeSpace: number | null = null;
+  const general: SpaceSettings = { tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false };
   let viewAll = false;
   const servers: Server[] = [
-    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
-    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
-    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 2, name: "web-1", host: "web1.example.com", port: 22, user: "root", auth: "agent", key_path: "", parent: 1, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 3, name: "db-1", host: "db1.example.com", port: 22, user: "admin", auth: "password", key_path: "", parent: 1, jump: null, has_secret: true, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
+    { id: 4, name: "staging", host: "stg.example.com", port: 2222, user: "deploy", auth: "key", key_path: "~/.ssh/id_ed25519", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" },
   ];
   const config = new Map<string, string>();
   // Every secret the vault holds (with its value) and which of them a server logs in or sudoes with, as in the engine.
-  const vaultSecrets = new Map<number, { meta: SecretMeta; value: string }>([[900, { meta: { id: 900, name: "db-1 (login)", kind: "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: "db-secret-pw" }]]);
+  const vaultSecrets = new Map<number, { meta: SecretMeta; value: string }>([[900, { meta: { id: 900, name: "db-1 (login)", kind: "password", env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: "db-secret-pw" }]]);
   const links = new Map<string, number>([["3:l", 900]]);
   let nextSecret = 901;
   const setLink = (serverId: number, sudo: boolean, secret: string | null, label: string) => {
@@ -36,7 +37,7 @@ export function mockBackend(): Backend {
     if (secret && cur) vaultSecrets.get(cur)!.value = secret;
     else if (secret) {
       const id = nextSecret++;
-      vaultSecrets.set(id, { meta: { id, name: `${label} (${sudo ? "sudo" : "login"})`, kind: sudo ? "sudo" : "password", profile: null, env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: secret });
+      vaultSecrets.set(id, { meta: { id, name: `${label} (${sudo ? "sudo" : "login"})`, kind: sudo ? "sudo" : "password", env_var: null, agent_visible: false, notes: "", updated: Math.floor(Date.now() / 1000) }, value: secret });
       links.set(key, id);
     } else if (cur) {
       vaultSecrets.delete(cur);
@@ -72,6 +73,7 @@ export function mockBackend(): Backend {
   let notifyClick: (sid: number) => void = () => {};
   const spaces: Space[] = [];
   let nextSpace = 1;
+  const migrationOfProfiles: { value: ProfileMigration | null } = { value: null };
   /** What a test says the migration of the old groups did, to be told once. */
   const migration: { value: SpaceMigration | null } = { value: null };
   /** What the activity panel reads; tests add to it the way the audit log grows. */
@@ -92,7 +94,9 @@ export function mockBackend(): Backend {
     deletedOriginals,
     approvalAnswers,
     spaces,
+    general,
     migration,
+    migrationOfProfiles,
     agents,
     agentAcks,
     agentKinds,
@@ -120,56 +124,70 @@ export function mockBackend(): Backend {
 
   return {
     tree: async () => {
-      const folderProfile = (id: number | null): string | null => {
-        for (let f = folders.find((x) => x.id === id), n = 0; f && n < 50; f = folders.find((x) => x.id === f!.parent), n++) if (f.profile) return f.profile;
-        return null;
+      // which Spaces each server and folder are in (a folder counts for everything below it); none: General
+      const below = (folder: number | null, root: number) => {
+        for (let f = folders.find((x) => x.id === folder), n = 0; f && n < 50; f = folders.find((x) => x.id === f!.parent), n++) if (f.id === root) return true;
+        return false;
       };
-      const eff = (s: Server) => s.profile ?? folderProfile(s.parent);
-      const inProfile = (p: string | null) => viewAll || p === null || p === activeProfile;
-      const srv = knobs.empty ? [] : servers.filter((s) => inProfile(eff(s)));
-      const holds = (fid: number) => srv.some((s) => { for (let f = folders.find((x) => x.id === s.parent); f; f = folders.find((x) => x.id === f!.parent)) if (f.id === fid) return true; return false; });
-      const fol = knobs.empty ? [] : folders.filter((f) => viewAll || folderProfile(f.id) === activeProfile || holds(f.id) || (folderProfile(f.id) === null && !servers.some((s) => s.parent === f.id)));
-      return { folders: structuredClone(fol), servers: structuredClone(srv).map((s) => ({ ...s, profile_eff: eff(s) })), profiles: structuredClone(profiles), proxies: structuredClone(proxies), active_profile: activeProfile, view_all: viewAll } as TreeData;
+      const ofServer = (s: Server) => spaces.filter((sp) => sp.servers.includes(s.id) || sp.server_folders.some((r) => below(s.parent, r))).map((sp) => sp.id);
+      const ofFolder = (id: number) => spaces.filter((sp) => sp.server_folders.some((r) => below(id, r))).map((sp) => sp.id);
+      const shows = (m: number[]) => viewAll || m.length === 0 || (activeSpace !== null && m.includes(activeSpace));
+      const srv = knobs.empty ? [] : servers.filter((s) => shows(ofServer(s)));
+      const holds = (fid: number) => srv.some((s) => below(s.parent, fid));
+      const fol = knobs.empty ? [] : folders.filter((f) => viewAll || (activeSpace !== null && ofFolder(f.id).includes(activeSpace)) || holds(f.id) || (ofFolder(f.id).length === 0 && !servers.some((s) => s.parent === f.id) && !folders.some((g) => g.parent === f.id)));
+      const mine = (key: "servers" | "server_folders", id: number) => spaces.find((sp) => sp[key].includes(id))?.id ?? null;
+      return {
+        folders: structuredClone(fol).map((f) => ({ ...f, space: mine("server_folders", f.id) })),
+        servers: structuredClone(srv).map((s) => ({ ...s, spaces_of: ofServer(s), space: mine("servers", s.id) })),
+        proxies: structuredClone(proxies),
+        active_space: activeSpace,
+        view_all: viewAll,
+      } as TreeData;
     },
-    profileSave: async (id, name) => {
-      if (!name.trim()) throw new Error("a profile needs a name");
-      if (id) {
-        profiles.find((p) => p.id === id)!.name = name.trim();
-        return id;
+    setActiveSpace: async (id) => {
+      if (id !== null && !spaces.some((x) => x.id === id)) throw new Error("this Space no longer exists");
+      activeSpace = id;
+    },
+    spaceAccountChanges: async (id) => {
+      const set = id === null ? general : (spaces.find((x) => x.id === id) ?? general);
+      const out: AccountChange[] = [];
+      for (const [tool, want] of [["github", set.gh_user], ["tailscale", set.tailscale_account]] as const) {
+        const view = tools[tool];
+        if (!want || !view.installed || knobs.noTools) continue;
+        if (view.accounts.some((a) => a.active && [a.id, a.name, a.detail].includes(want))) continue;
+        out.push({ tool, wanted: want, id: want, current: view.accounts.find((a) => a.active)?.name ?? "none" });
       }
-      const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      if (!slug || profiles.some((p) => p.id === slug)) throw new Error(`there is already a profile called "${name}"`);
-      profiles.push({ id: slug, name: name.trim(), proxy: null, gh_user: null, tailscale_account: null, aws_profile: null, kubeconfig: null, production: false });
-      return slug;
+      return out;
     },
-    profileDelete: async (id) => {
-      if (id === "default") throw new Error("the default profile cannot be deleted");
-      profiles.splice(profiles.findIndex((p) => p.id === id), 1);
-      servers.forEach((s) => s.profile === id && (s.profile = "default"));
-      folders.forEach((f) => f.profile === id && (f.profile = "default"));
-      if (activeProfile === id) activeProfile = "default";
+    spaceSettings: async (id) => {
+      const sp = id === null ? general : spaces.find((x) => x.id === id);
+      if (!sp) throw new Error("this Space no longer exists");
+      return { tailscale_account: sp.tailscale_account, gh_user: sp.gh_user, proxy: sp.proxy, aws_profile: sp.aws_profile, kubeconfig: sp.kubeconfig, production: sp.production };
     },
-    setActiveProfile: async (id) => {
-      activeProfile = id;
-      const p = profiles.find((x) => x.id === id)!;
-      const problems: string[] = [];
-      for (const [tool, want] of [["github", p.gh_user], ["tailscale", p.tailscale_account]] as const) {
-        if (!want) continue;
-        try {
-          use(tool, want);
-        } catch (e) {
-          problems.push((e as Error).message);
-        }
+    spaceSetSettings: async (id, settings) => {
+      if (settings.aws_profile && /\s/.test(settings.aws_profile)) throw new Error("an AWS account name has no spaces");
+      if (settings.proxy != null && !proxies.some((x) => x.id === settings.proxy)) throw new Error("this proxy no longer exists");
+      const target = id === null ? general : spaces.find((x) => x.id === id);
+      if (!target) throw new Error("this Space no longer exists");
+      Object.assign(target, settings);
+    },
+    moveToSpace: async (kind, id, space) => {
+      if (space !== null && !spaces.some((x) => x.id === space)) throw new Error("this Space no longer exists");
+      const key = kind === "server" ? "servers" : kind === "folder" ? "server_folders" : "secrets";
+      for (const sp of spaces) {
+        sp[key] = sp[key].filter((x) => x !== id);
+        if (sp.id === space) sp[key].push(id);
       }
-      return problems;
+    },
+    secretSpaces: async () => Object.fromEntries(spaces.flatMap((sp) => sp.secrets.map((id) => [id, sp.id] as const))),
+    localSudoSecret: async () => links.get("0:s") ?? null,
+    spaceProfileMigration: async () => {
+      const m = migrationOfProfiles.value;
+      migrationOfProfiles.value = null;
+      return m;
     },
     accounts: async () => (knobs.noTools ? ({ github: { installed: false, accounts: [], error: null }, tailscale: { installed: false, accounts: [], error: null } } as AccountsView) : structuredClone(tools)),
     accountUse: async (tool, id) => use(tool, id),
-    profileSetAccounts: async (profile, gh, ts) => {
-      const p = profiles.find((x) => x.id === profile)!;
-      p.gh_user = gh || null;
-      p.tailscale_account = ts || null;
-    },
     networkAccept: async (id) => void networkOk.add(id),
     setViewAll: async (all) => void (viewAll = all),
     proxySave: async (p) => {
@@ -185,10 +203,9 @@ export function mockBackend(): Backend {
     proxyDelete: async (id) => {
       proxies.splice(proxies.findIndex((x) => x.id === id), 1);
       servers.forEach((s) => s.proxy === id && (s.proxy = null));
-      profiles.forEach((p) => p.proxy === id && (p.proxy = null));
+      if (general.proxy === id) general.proxy = null;
+      spaces.forEach((sp) => sp.proxy === id && (sp.proxy = null));
     },
-    profileSetProxy: async (profile, proxy) => void (profiles.find((p) => p.id === profile)!.proxy = proxy),
-    setFolderProfile: async (id, profile) => void (folders.find((f) => f.id === id)!.profile = profile),
     vaultStatus: async () => ({ ...vault }),
     vaultUnlock: async (master) => {
       if (master !== "master") throw new Error("Wrong master password");
@@ -230,13 +247,13 @@ export function mockBackend(): Backend {
         }
         const id = nextSecret++;
         const name = k.path.split("/").pop()!;
-        vaultSecrets.set(id, { meta: { id, name, kind: "ssh_key", profile: null, env_var: null, agent_visible: false, notes: "imported", updated: Math.floor(Date.now() / 1000) }, value: "PRIVATE" });
+        vaultSecrets.set(id, { meta: { id, name, kind: "ssh_key", env_var: null, agent_visible: false, notes: "imported", updated: Math.floor(Date.now() / 1000) }, value: "PRIVATE" });
         out.keys_added.push(name);
         out.originals.push(k.path);
       }
       for (const a of req.hosts) {
         const id = next++;
-        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" });
+        servers.push({ id, name: a, host: `${a}.example`, port: 22, user: "", auth: "agent", key_path: "", parent: null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" });
         out.hosts_added.push(a);
       }
       return out;
@@ -276,7 +293,7 @@ export function mockBackend(): Backend {
         const names = c.names.length ? c.names : project === "app" ? ["STRIPE_KEY", "DB_PASSWORD"] : ["API_TOKEN"];
         for (const n of names) {
           const id = nextSecret++;
-          vaultSecrets.set(id, { meta: { id, name: `${project}/${n}`, kind: "token", profile: null, env_var: null, agent_visible: false, notes: `imported from ${c.path}`, updated: Math.floor(Date.now() / 1000) }, value: "v" });
+          vaultSecrets.set(id, { meta: { id, name: `${project}/${n}`, kind: "token", env_var: null, agent_visible: false, notes: `imported from ${c.path}`, updated: Math.floor(Date.now() / 1000) }, value: "v" });
           out.added.push(`${project}/${n}`);
         }
         out.originals.push(c.path);
@@ -298,13 +315,7 @@ export function mockBackend(): Backend {
       if (!vault.unlocked) throw new Error("the vault is locked");
       return { added: which.map((i) => ["GitHub (me)", "Mail (m@x.com)"][i]), skipped: [], originals: [] };
     },
-    cloudOptions: async () => ({ aws_profiles: ["default", "acme-prod"], kubeconfigs: [{ path: "/home/me/.kube/config", contexts: ["prod", "dev"] }] }),
-    profileSetCloud: async (profile, aws, kube, production) => {
-      const p = profiles.find((x) => x.id === profile)!;
-      p.aws_profile = aws || null;
-      p.kubeconfig = kube || null;
-      p.production = production;
-    },
+    cloudOptions: async () => ({ aws_profiles: ["default", "example-prod"], kubeconfigs: [{ path: "/home/me/.kube/config", contexts: ["prod", "dev"] }] }),
     onCli: (f) => void (cliHandler = f),
     integrationStatus: async () => ({ ...connected }),
     integrationPlan: async (agent, install) => [
@@ -391,7 +402,7 @@ export function mockBackend(): Backend {
     },
     addFolder: async (name, parent) => {
       const id = next++;
-      folders.push({ id, name, parent, expanded: true, profile: null });
+      folders.push({ id, name, parent, expanded: true });
       return id;
     },
     renameFolder: async (id, name) => void (folders.find((f) => f.id === id)!.name = name),
@@ -416,7 +427,7 @@ export function mockBackend(): Backend {
         if (!now || ![now.id, now.name, now.detail].includes(wanted)) throw new Error(`network:${wanted}|${now?.name ?? "none"}`);
       }
       if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
-      const local = activeProfile === "default" ? "Local" : `Local · ${profiles.find((p) => p.id === activeProfile)?.name ?? activeProfile}`;
+      const local = "Local";
       const space = opts?.space != null ? spaces.find((x) => x.id === opts.space) : undefined;
       if (opts?.space != null && !space) throw new Error("this Space no longer exists");
       const title = serverId === 0 && space ? `${local} · ${space.name}` : (s?.name ?? local);
@@ -424,7 +435,7 @@ export function mockBackend(): Backend {
     },
     spaceList: async () => JSON.parse(JSON.stringify(spaces)),
     spaceSave: async (space) => {
-      const clean = { ...JSON.parse(JSON.stringify(space)), name: space.name.trim() } as Space;
+      const clean = { tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false, ...JSON.parse(JSON.stringify(space)), name: space.name.trim() } as Space;
       if (!clean.name) throw new Error("a Space needs a name");
       if (clean.id === 0) {
         clean.id = nextSpace++;
@@ -436,7 +447,10 @@ export function mockBackend(): Backend {
       }
       return clean.id;
     },
-    spaceDelete: async (id) => void spaces.splice(0, spaces.length, ...spaces.filter((x) => x.id !== id)),
+    spaceDelete: async (id) => {
+      spaces.splice(0, spaces.length, ...spaces.filter((x) => x.id !== id));
+      if (activeSpace === id) activeSpace = null;
+    },
     spaceMigration: async () => {
       const m = migration.value;
       migration.value = null;

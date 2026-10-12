@@ -191,7 +191,7 @@ impl Engine {
                         continue;
                     }
                 }
-                let meta = SecretMeta { id: 0, name: full.clone(), kind, profile: None, env_var: None, agent_visible: false, notes: format!("imported from {}", path.display()), updated: 0 };
+                let meta = SecretMeta { id: 0, name: full.clone(), kind, env_var: None, agent_visible: false, notes: format!("imported from {}", path.display()), updated: 0 };
                 match self.vault.save_secret(meta, Some(&value)) {
                     Ok(_) => out.added.push(full),
                     Err(e) => {
@@ -337,7 +337,7 @@ impl Engine {
             let label = if it.username.is_empty() { it.name.clone() } else { format!("{} ({})", it.name, it.username) };
             let notes = [it.url.as_str(), it.note.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n");
             if !it.password.is_empty() {
-                let meta = SecretMeta { id: 0, name: label.clone(), kind: SecretKind::Password, profile: None, env_var: None, agent_visible: false, notes: notes.clone(), updated: 0 };
+                let meta = SecretMeta { id: 0, name: label.clone(), kind: SecretKind::Password, env_var: None, agent_visible: false, notes: notes.clone(), updated: 0 };
                 match self.vault.save_secret(meta, Some(&it.password)) {
                     Ok(_) => out.added.push(label.clone()),
                     Err(e) => out.skipped.push(format!("{label}: {e:#}")),
@@ -345,7 +345,7 @@ impl Engine {
             }
             if !it.totp.is_empty() {
                 let name = format!("{label} (2FA)");
-                let meta = SecretMeta { id: 0, name: name.clone(), kind: SecretKind::Totp, profile: None, env_var: None, agent_visible: false, notes, updated: 0 };
+                let meta = SecretMeta { id: 0, name: name.clone(), kind: SecretKind::Totp, env_var: None, agent_visible: false, notes, updated: 0 };
                 match self.vault.save_secret(meta, Some(&it.totp)) {
                     Ok(_) => out.added.push(name),
                     Err(e) => out.skipped.push(format!("{name}: {e:#}")),

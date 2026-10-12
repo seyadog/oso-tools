@@ -3,14 +3,14 @@
 //! is tested without a screen.
 
 use crate::accounts::{self, AccountsView, Runner};
-use crate::spaces::{Space, Spaces};
+use crate::spaces::{Item, Space, SpaceSettings, Spaces};
 use crate::agent::{self, KeyProvider};
 use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
 use crate::jobs::{self, Job};
 use crate::session::SpawnOpts;
 use crate::ssh_import::{self, Preview};
-use crate::store::{Auth, DEFAULT_PROFILE, Forward, ForwardKind, NodeId, Profile, Proxy, Server, Store, slug};
+use crate::store::{Auth, Forward, ForwardKind, NodeId, Proxy, Server, Store, slug};
 use crate::vault::{Kind, SecretMeta, UnlockError, Vault};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -133,8 +133,8 @@ pub struct Engine {
     next_transfer: u64,
     /// Extra options put before the target of every tunnel and copy (the tests use it to reach their own sshd).
     pub ssh_extra: Vec<String>,
-    /// The profile the window works in, and whether the sidebar shows every profile's hosts.
-    active_profile: String,
+    /// The Space the window works in (`None`: General), and whether the sidebar shows what is in every Space.
+    active_space: Option<u64>,
     view_all: bool,
     /// How `gh` and `tailscale` are run (the tests give canned answers).
     pub runner: Box<dyn Runner>,
@@ -153,6 +153,19 @@ pub struct Engine {
     /// What each agent running in a terminal is doing.
     tracker: crate::agents::Tracker,
     focus: Focus,
+}
+
+/// An account a Space asks for that is not the one in use.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AccountChange {
+    /// `github` or `tailscale`.
+    pub tool: &'static str,
+    /// What the Space asks for, as it wrote it.
+    pub wanted: String,
+    /// What to hand to `account_use` to switch to it.
+    pub id: String,
+    /// The account in use now.
+    pub current: String,
 }
 
 /// What the person is looking at, as the window tells the engine: names are looked up here, never screen contents.
@@ -179,8 +192,8 @@ impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
-        let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default(), focus: Focus::default() }
+        let active_space = settings.active_space.filter(|id| spaces.get(*id).is_some());
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_space, view_all: settings.view_all, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default(), focus: Focus::default() }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -266,42 +279,32 @@ impl Engine {
         self.spawn(plan.opts, title, server_id, &ctx).map_err(|e| OpenError::Other(format!("{e:#}")))
     }
 
-    /// A terminal of this computer is born inside the active profile (or the one of its Space): its environment says so,
-    /// and (when the vault is unlocked) carries the secrets the profile fills in, and the sudo password is typed at sudo's
-    /// prompt. In a Space it carries the Space's secrets instead of the profile's, its own ssh-agent, and the Space's
-    /// first folder (or `cwd`) as its working folder.
+    /// A terminal of this computer is born in a Space (or in General): its environment says so, and (when the vault is
+    /// unlocked) carries the secrets in its reach (General's, and its Space's on top), and the sudo password is typed at
+    /// sudo's prompt. It starts in the Space's first folder (or `cwd`), with the Space's proxy and cloud settings, and with
+    /// an ssh-agent that offers only the keys in its reach.
     fn prepare_local(&mut self, plan: &mut connect::Plan, use_vault: bool, space: Option<&Space>, cwd: Option<&str>) {
-        let profile = space.and_then(|s| s.profile.clone()).filter(|p| self.store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| self.active_profile.clone());
+        let space_id = space.map(|s| s.id);
         let mut env = connect::client_env();
         env.push(("OSO".into(), "1".into()));
-        env.push(("OSO_PROFILE".into(), profile.clone()));
-        if let Some(sp) = space {
-            env.push(("OSO_SPACE".into(), sp.name.clone()));
-        }
+        env.push(("OSO_SPACE".into(), space.map(|s| s.name.clone()).unwrap_or_else(|| "General".into())));
         let unlocked = use_vault && self.vault.is_unlocked();
         if unlocked {
-            let vars = match space {
-                Some(sp) => self.vault.env_for_ids(&sp.secrets, true),
-                None => self.vault.env_for(&profile, true),
-            };
-            for (name, value) in vars {
+            let ids = self.secrets_in_reach(space_id);
+            for (name, value) in self.vault.env_for_ids(&ids, true) {
                 env.retain(|(k, _)| *k != name);
                 env.push((name, value.to_string()));
             }
             plan.opts.sudo_fill = self.vault.get(LOCAL, Kind::Sudo);
         }
-        // what the profile asks for (a proxy, an AWS profile, a kubeconfig) goes into this terminal and no other
-        for (k, v) in self.profile_env(&profile) {
+        // what the Space asks for (a proxy, an AWS account, a kubeconfig) goes into this terminal and no other
+        for (k, v) in self.space_env(space_id) {
             env.retain(|(name, _)| *name != k);
             env.push((k, v));
         }
-        // git and ssh in this terminal find oso's agent (which hands on to the agent that was there before); a Space
-        // gets one that offers only its own keys
-        let sock = match space {
-            Some(sp) => self.space_agent_sock(sp.id).or_else(|| self.agent_sock.clone()),
-            None => self.agent_sock.clone(),
-        };
-        if let Some(sock) = sock {
+        // git and ssh in this terminal find an ssh-agent of oso's that offers only the keys in its reach (and hands on to
+        // the agent that was there before)
+        if let Some(sock) = self.space_agent_sock(space_id.unwrap_or(0)).or_else(|| self.agent_sock.clone()) {
             env.retain(|(k, _)| k != "SSH_AUTH_SOCK");
             env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
         }
@@ -316,20 +319,26 @@ impl Engine {
         if folder.is_some() {
             plan.opts.cwd = folder;
         }
-        let name = self.store.profiles.iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or(profile.clone());
-        match space {
-            Some(sp) => {
-                plan.title = format!("{} · {}", plan.title, sp.name);
-                if !plan.opts.agent {
-                    plan.title.push_str(" · no agent access (restart oso's background server)");
-                }
+        if let Some(sp) = space {
+            plan.title = format!("{} · {}", plan.title, sp.name);
+            if !plan.opts.agent {
+                plan.title.push_str(" · no agent access (restart oso's background server)");
             }
-            None if profile != DEFAULT_PROFILE => plan.title = format!("{} · {name}", plan.title),
-            None => {}
         }
         if self.vault.exists() && !unlocked {
             plan.title.push_str(" · vault locked");
         }
+    }
+
+    /// The secrets a terminal (or an agent) of `space` may use: the ones in no Space (General), then the Space's own, so
+    /// that the Space wins where both fill the same variable.
+    pub fn secrets_in_reach(&self, space: Option<u64>) -> Vec<u64> {
+        let member = self.spaces.secret_membership();
+        let mut all: Vec<u64> = self.vault.list().into_iter().map(|m| m.id).collect();
+        all.sort_unstable();
+        let general = |id: &u64| member.get(id).is_none_or(Vec::is_empty);
+        let (general_ids, own): (Vec<u64>, Vec<u64>) = all.into_iter().filter(|id| general(id) || space.is_some_and(|s| member.get(id).is_some_and(|v| v.contains(&s)))).partition(general);
+        general_ids.into_iter().chain(own).collect()
     }
 
     /// A connection that uses a key from the vault finds oso's agent through `SSH_AUTH_SOCK`.
@@ -345,17 +354,17 @@ impl Engine {
         Ok(())
     }
 
-    /// What a profile adds to the environment of a program that is not a secret: its proxy and its cloud settings.
-    pub fn profile_env(&self, profile: &str) -> Vec<(String, String)> {
+    /// What a Space (or General) adds to the environment of a program that is not a secret: its proxy and its cloud settings.
+    pub fn space_env(&self, space: Option<u64>) -> Vec<(String, String)> {
         let mut env = vec![];
-        let Some(p) = self.store.profiles.iter().find(|p| p.id == profile) else { return env };
-        if let Some(px) = p.proxy.and_then(|id| self.store.proxy(id)).filter(|px| px.problem().is_none()) {
+        let set = self.spaces.settings_of(space);
+        if let Some(px) = set.proxy.and_then(|id| self.store.proxy(id)).filter(|px| px.problem().is_none()) {
             env.extend(connect::proxy_env(px));
         }
-        if let Some(a) = p.aws_profile.as_deref().filter(|a| !a.is_empty()) {
+        if let Some(a) = set.aws_profile.as_deref().filter(|a| !a.is_empty()) {
             env.push(("AWS_PROFILE".into(), a.to_string()));
         }
-        if let Some(k) = p.kubeconfig.as_deref().filter(|k| !k.is_empty()) {
+        if let Some(k) = set.kubeconfig.as_deref().filter(|k| !k.is_empty()) {
             env.push(("KUBECONFIG".into(), connect::expand_tilde(k)));
         }
         env
@@ -367,22 +376,24 @@ impl Engine {
         crate::cloud::options(&home, std::env::var("KUBECONFIG").ok().as_deref())
     }
 
-    /// The cloud settings of a profile's local terminals, and whether it is a production one (shown in red).
-    pub fn profile_set_cloud(&mut self, profile: &str, aws_profile: Option<String>, kubeconfig: Option<String>, production: bool) -> Result<()> {
-        let clean = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        let aws = clean(aws_profile);
-        if aws.as_deref().is_some_and(|a| a.starts_with('-') || a.chars().any(|c| c.is_whitespace() || c.is_control())) {
-            bail!("an AWS profile name has no spaces");
+    /// What a Space fixes (`Some(id)`) or what General fixes (`None`): accounts, proxy, cloud settings, production mark.
+    pub fn space_settings(&self, space: Option<u64>) -> SpaceSettings {
+        self.spaces.settings_of(space)
+    }
+
+    pub fn space_set_settings(&mut self, space: Option<u64>, settings: SpaceSettings) -> Result<()> {
+        let settings = settings.cleaned()?;
+        if settings.proxy.is_some_and(|p| self.store.proxy(p).is_none()) {
+            bail!("this proxy no longer exists");
         }
-        let kube = clean(kubeconfig);
-        if kube.as_deref().is_some_and(|k| k.contains('\0') || k.contains('\n')) {
-            bail!("that is not a path");
+        match space {
+            None => self.spaces.set_general(settings),
+            Some(id) => {
+                let mut sp = self.spaces.get(id).cloned().context("this Space no longer exists")?;
+                sp.settings = settings;
+                self.spaces.save_space(&sp).map(|_| ())
+            }
         }
-        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
-        p.aws_profile = aws;
-        p.kubeconfig = kube;
-        p.production = production;
-        self.store.save()
     }
 
     /// Does the background server in use keep the Space of a session (version 0.4 and later)?
@@ -524,7 +535,26 @@ impl Engine {
         let names: HashMap<u64, String> = self.store.servers.iter().map(|s| (s.id, s.name.clone())).chain([(LOCAL, "this computer".to_string())]).collect();
         self.vault.relabel_hosts(|id| names.get(&id).cloned()).map_err(|e| format!("{e:#}"))?;
         self.refresh_key_files();
+        self.migrate_secret_marks();
         Ok(())
+    }
+
+    /// Secrets that older versions marked with a profile go into the Space that profile became (once, now that the vault is
+    /// open). The marks are dropped from the vault; a copy of the old vault was kept when the profiles became Spaces.
+    fn migrate_secret_marks(&mut self) {
+        let marks = self.vault.legacy_marks();
+        let pending = self.spaces.pending_secrets().clone();
+        if marks.is_empty() && pending.is_empty() {
+            return;
+        }
+        for (secret, profile) in marks {
+            if let Some(space) = pending.get(&profile) {
+                self.spaces.add_secret_to(*space, secret);
+            }
+        }
+        if self.spaces.secrets_done().is_ok() {
+            let _ = self.vault.clear_legacy_marks();
+        }
     }
 
     fn host_label(&self, server_id: u64) -> String {
@@ -644,111 +674,92 @@ impl Engine {
 
     // ---------------------------------------------------------------- servers
 
-    /// The folders and servers of the active profile (or of every one), for the sidebar.
+    /// The folders and servers of the Space in use (and General's, which are everywhere), or all of them, for the sidebar.
     pub fn tree(&self) -> Value {
-        let p = self.active_profile.as_str();
+        let member = self.spaces.membership(&self.store);
+        let active = self.active_space;
         let (folders, servers): (Vec<&crate::store::Folder>, Vec<&Server>) = if self.view_all {
             (self.store.folders.iter().collect(), self.store.servers.iter().collect())
         } else {
-            let shown = self.store.folders_in(p);
-            // a hop of a shown server stays in the list, whatever its profile: the server's form needs to name it
-            let mut ids: Vec<u64> = self.store.servers.iter().filter(|s| self.store.server_in(s, p)).map(|s| s.id).collect();
+            let shown = member.folders_shown(&self.store, active);
+            // a hop of a shown server stays in the list, whatever its Space: the server's form needs to name it
+            let mut ids: Vec<u64> = self.store.servers.iter().filter(|s| member.server_shows(s.id, active)).map(|s| s.id).collect();
             for id in ids.clone() {
                 ids.extend(self.store.jump_chain(id).into_iter().map(|h| h.id));
             }
             (self.store.folders.iter().filter(|f| shown.contains(&f.id)).collect(), self.store.servers.iter().filter(|s| ids.contains(&s.id)).collect())
         };
-        // a server also says which profile it ends up in (its own or its folder's)
+        // a server also says which Spaces it is in (none: General), and which one lists it itself
+        let own = |sp: &Space, id: u64| sp.servers.contains(&id);
         let servers: Vec<Value> = servers
             .into_iter()
             .map(|s| {
                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
-                v["profile_eff"] = self.store.server_profile(s).map(Value::from).unwrap_or(Value::Null);
+                v["spaces_of"] = member.spaces_of_server(s.id).into();
+                v["space"] = self.spaces.list().iter().find(|sp| own(sp, s.id)).map(|sp| Value::from(sp.id)).unwrap_or(Value::Null);
                 v["vault_key"] = self.vault.links(s.id).key.map(Value::from).unwrap_or(Value::Null);
                 v["vault_totp"] = self.vault.links(s.id).totp.map(Value::from).unwrap_or(Value::Null);
                 v
             })
             .collect();
-        serde_json::json!({ "folders": folders, "servers": servers, "profiles": self.store.profiles, "proxies": self.store.proxies, "active_profile": self.active_profile, "view_all": self.view_all })
+        let folders: Vec<Value> = folders
+            .into_iter()
+            .map(|f| {
+                let mut v = serde_json::to_value(f).unwrap_or(Value::Null);
+                v["space"] = self.spaces.list().iter().find(|sp| sp.server_folders.contains(&f.id)).map(|sp| Value::from(sp.id)).unwrap_or(Value::Null);
+                v
+            })
+            .collect();
+        serde_json::json!({ "folders": folders, "servers": servers, "proxies": self.store.proxies, "active_space": active, "view_all": self.view_all })
     }
 
-    // ---------------------------------------------------------------- profiles
+    // ---------------------------------------------------------------- the Space in use
 
-    pub fn profiles(&self) -> &[Profile] {
-        &self.store.profiles
+    /// The Space the window works in (`None`: General).
+    pub fn active_space(&self) -> Option<u64> {
+        self.active_space
     }
 
-    pub fn active_profile(&self) -> &str {
-        &self.active_profile
-    }
-
-    pub fn set_active_profile(&mut self, id: &str) -> Result<()> {
-        if !self.store.profiles.iter().any(|p| p.id == id) {
-            bail!("there is no profile {id:?}");
+    pub fn set_active_space(&mut self, id: Option<u64>) -> Result<()> {
+        if id.is_some_and(|i| self.spaces.get(i).is_none()) {
+            bail!("this Space no longer exists");
         }
-        self.active_profile = id.to_string();
-        crate::settings::save_key_in(&self.config_dir(), "active_profile", id.into());
+        self.active_space = id;
+        crate::settings::save_key_in(&self.config_dir(), "active_space", id.map(Value::from).unwrap_or(Value::Null));
         Ok(())
     }
 
     pub fn set_view_all(&mut self, all: bool) {
         self.view_all = all;
-        crate::settings::save_key_in(&self.config_dir(), "view_all_profiles", all.into());
+        crate::settings::save_key_in(&self.config_dir(), "view_all", all.into());
     }
 
-    /// Adds a profile (`id` empty) or renames one. Returns its id.
-    pub fn profile_save(&mut self, id: &str, name: &str) -> Result<String> {
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("a profile needs a name");
+    /// Puts a server in one Space, or (`None`) in General.
+    pub fn server_set_space(&mut self, id: u64, space: Option<u64>) -> Result<()> {
+        if self.store.server(id).is_none() {
+            bail!("this server no longer exists");
         }
-        if id.is_empty() {
-            let id = slug(name);
-            if id.is_empty() {
-                bail!("a profile name needs letters or digits");
-            }
-            if self.store.profiles.iter().any(|p| p.id == id) {
-                bail!("there is already a profile called {name:?}");
-            }
-            self.store.profiles.push(Profile { id: id.clone(), name: name.to_string(), ..Default::default() });
-            self.store.save()?;
-            return Ok(id);
-        }
-        let p = self.store.profiles.iter_mut().find(|p| p.id == id).context("this profile no longer exists")?;
-        p.name = name.to_string();
-        self.store.save()?;
-        Ok(id.to_string())
+        self.spaces.move_item(Item::Server(id), space)
     }
 
-    /// Deletes a profile; what belonged to it moves to the default one. The vault must be unlocked, so that no
-    /// secret of the profile is left without it (and so shown in every profile).
-    pub fn profile_delete(&mut self, id: &str) -> Result<()> {
-        if id == DEFAULT_PROFILE {
-            bail!("the default profile cannot be deleted");
-        }
-        if !self.store.profiles.iter().any(|p| p.id == id) {
-            return Ok(());
-        }
-        if !self.vault.is_unlocked() && self.vault.exists() {
-            bail!("unlock the vault first: its secrets of this profile move to the default one");
-        }
-        for m in self.vault.list().into_iter().filter(|m| m.profile.as_deref() == Some(id)) {
-            self.vault.save_secret(SecretMeta { profile: Some(DEFAULT_PROFILE.into()), ..m }, None)?;
-        }
-        let mine = Some(id.to_string());
-        let default = Some(DEFAULT_PROFILE.to_string());
-        for s in self.store.servers.iter_mut().filter(|s| s.profile == mine) {
-            s.profile = default.clone();
-        }
-        for f in self.store.folders.iter_mut().filter(|f| f.profile == mine) {
-            f.profile = default.clone();
-        }
-        self.store.profiles.retain(|p| p.id != id);
-        self.store.save()?;
-        if self.active_profile == id {
-            self.set_active_profile(DEFAULT_PROFILE)?;
-        }
-        Ok(())
+    /// Puts a folder (and what is in it) in one Space, or (`None`) in General.
+    pub fn folder_set_space(&mut self, id: u64, space: Option<u64>) -> Result<()> {
+        self.spaces.move_item(Item::Folder(id), space)
+    }
+
+    /// Puts a secret in one Space, or (`None`) in General.
+    pub fn secret_set_space(&mut self, id: u64, space: Option<u64>) -> Result<()> {
+        self.spaces.move_item(Item::Secret(id), space)
+    }
+
+    /// Which Space lists this secret itself (`None`: General).
+    pub fn secret_space(&self, id: u64) -> Option<u64> {
+        self.spaces.list().iter().find(|s| s.secrets.contains(&id)).map(|s| s.id)
+    }
+
+    /// The secrets of the vault, each with the Space it is in (`None`: General): what the Secrets window and the Space form show.
+    pub fn secret_spaces(&self) -> HashMap<u64, u64> {
+        self.spaces.list().iter().flat_map(|s| s.secrets.iter().map(move |id| (*id, s.id))).collect()
     }
 
     // ---------------------------------------------------------------- ssh keys and oso's agent
@@ -791,15 +802,23 @@ impl Engine {
         }
     }
 
-    /// The keys of a Space (an id of a key that is not in the vault any more is simply not there).
+    /// The keys in reach of a Space (`0`: General): the ones of no Space, and the Space's own. A key that is not in the
+    /// vault any more is simply not there, and a Space that is gone has none.
+    fn keys_in_reach(&self, space: u64) -> Vec<(u64, ssh_key::PrivateKey, String)> {
+        if space != 0 && self.spaces.get(space).is_none() {
+            return vec![];
+        }
+        let keys = self.parsed_keys();
+        let ids = self.spaces.secrets_in_scope((space != 0).then_some(space), keys.iter().map(|(id, _, _)| *id));
+        keys.into_iter().filter(|(id, _, _)| ids.contains(id)).collect()
+    }
+
     pub fn space_identities(&self, space: u64) -> Vec<(Vec<u8>, String)> {
-        let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
-        self.parsed_keys().iter().filter(|(id, _, _)| ids.contains(id)).filter_map(|(_, k, name)| agent::identity_of(k, name)).collect()
+        self.keys_in_reach(space).iter().filter_map(|(_, k, name)| agent::identity_of(k, name)).collect()
     }
 
     pub fn space_sign(&self, space: u64, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>> {
-        let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
-        let (_, key, _) = self.parsed_keys().into_iter().filter(|(id, _, _)| ids.contains(id)).find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
+        let (_, key, _) = self.keys_in_reach(space).into_iter().find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
         agent::sign_with(&key, data, flags)
     }
 
@@ -830,7 +849,8 @@ impl Engine {
         let kinds = self.agent_kinds();
         let live: std::collections::HashSet<u64> = self.sessions.keys().copied().collect();
         let mut found = HashMap::new();
-        for (sid, procs) in crate::procscan::scan_panes() {
+        let Some(socket) = self.daemon.as_ref().map(|d| d.socket.clone()) else { return vec![] };
+        for (sid, procs) in crate::procscan::scan_panes_of(&socket) {
             if !live.contains(&sid) {
                 continue;
             }
@@ -870,7 +890,11 @@ impl Engine {
     /// Deletes a Space. Terminals that were opened in it stay open, but an agent running there is refused from now on.
     pub fn space_delete(&mut self, id: u64) -> Result<()> {
         self.space_agents.remove(&id);
-        self.spaces.delete(id)
+        self.spaces.delete(id)?;
+        if self.active_space == Some(id) {
+            self.set_active_space(None)?;
+        }
+        Ok(())
     }
 
     /// The keys of the vault that can sign (an encrypted one cannot), with the secret's name as comment.
@@ -1003,7 +1027,7 @@ impl Engine {
                 continue;
             }
             let plain = zeroize::Zeroizing::new(key.to_openssh(ssh_key::LineEnding::LF).map_err(|e| anyhow!("{name}: {e}"))?.to_string());
-            let meta = SecretMeta { id: 0, name: name.clone(), kind: crate::vault::SecretKind::SshKey, profile: None, env_var: None, agent_visible: false, notes: format!("imported from {}", path.display()), updated: 0 };
+            let meta = SecretMeta { id: 0, name: name.clone(), kind: crate::vault::SecretKind::SshKey, env_var: None, agent_visible: false, notes: format!("imported from {}", path.display()), updated: 0 };
             let id = self.vault.save_secret(meta, Some(plain.as_str()))?;
             by_path.insert(path.clone(), id);
             out.keys_added.push(name);
@@ -1104,43 +1128,25 @@ impl Engine {
         .map_err(|m| anyhow!("{m}"))
     }
 
-    /// The accounts a profile asks for (`None`: leave the tool alone).
-    pub fn profile_set_accounts(&mut self, profile: &str, gh_user: Option<String>, tailscale_account: Option<String>) -> Result<()> {
-        let clean = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
-        p.gh_user = clean(gh_user);
-        p.tailscale_account = clean(tailscale_account);
-        self.store.save()
-    }
-
-    /// Makes `id` the active profile and puts the accounts it asks for in use. A switch that fails is reported in the
-    /// answer, and does not stop the others.
-    pub fn switch_profile(&mut self, id: &str) -> Result<Vec<String>> {
-        self.set_active_profile(id)?;
-        let p = self.store.profiles.iter().find(|p| p.id == id).cloned().unwrap_or_default();
-        let mut problems = vec![];
-        if let Some(user) = p.gh_user.as_deref() {
+    /// The accounts a Space (or General) asks for that are not the ones in use: what to ask the person before switching.
+    /// A tool that is not installed, or that the Space does not ask anything of, is left out.
+    pub fn account_changes(&self, space: Option<u64>) -> Vec<AccountChange> {
+        let set = self.spaces.settings_of(space);
+        let mut out = vec![];
+        if let Some(user) = set.gh_user.as_deref() {
             let view = accounts::github(&*self.runner);
-            if !view.installed {
-                problems.push("GitHub: `gh` is not installed".to_string());
-            } else if !accounts::is_active(&view, user) {
+            if view.installed && !accounts::is_active(&view, user) {
                 let id = view.accounts.iter().find(|a| [&a.id, &a.name].iter().any(|x| x.eq_ignore_ascii_case(user))).map(|a| a.id.clone()).unwrap_or_else(|| user.to_string());
-                if let Err(e) = accounts::github_switch(&*self.runner, &id) {
-                    problems.push(e);
-                }
+                out.push(AccountChange { tool: "github", wanted: user.to_string(), id, current: accounts::active_name(&view).unwrap_or_else(|| "none".into()) });
             }
         }
-        if let Some(acct) = p.tailscale_account.as_deref() {
+        if let Some(acct) = set.tailscale_account.as_deref() {
             let view = accounts::tailscale(&*self.runner);
-            if !view.installed {
-                problems.push("Tailscale: `tailscale` is not installed".to_string());
-            } else if !accounts::is_active(&view, acct) {
-                if let Err(e) = accounts::tailscale_switch(&*self.runner, acct) {
-                    problems.push(e);
-                }
+            if view.installed && !accounts::is_active(&view, acct) {
+                out.push(AccountChange { tool: "tailscale", wanted: acct.to_string(), id: acct.to_string(), current: accounts::active_name(&view).unwrap_or_else(|| "none".into()) });
             }
         }
-        Ok(problems)
+        out
     }
 
     /// For a server on `tailscale:<account>`: `(wanted, in use)` when they differ. Once the question was answered
@@ -1174,9 +1180,6 @@ impl Engine {
         if let Some(why) = p.problem() {
             bail!("{why}");
         }
-        if p.profile.as_ref().is_some_and(|x| !self.store.profiles.iter().any(|y| &y.id == x)) {
-            bail!("there is no such profile");
-        }
         let id = if p.id == 0 {
             let id = self.store.proxies.iter().map(|x| x.id).max().unwrap_or(0) + 1;
             p.id = id;
@@ -1198,29 +1201,16 @@ impl Engine {
         for s in self.store.servers.iter_mut().filter(|s| s.proxy == Some(id)) {
             s.proxy = None;
         }
-        for p in self.store.profiles.iter_mut().filter(|p| p.proxy == Some(id)) {
-            p.proxy = None;
+        // a Space (or General) that used it goes direct
+        let mut general = self.spaces.general.clone();
+        if general.proxy == Some(id) {
+            general.proxy = None;
+            self.spaces.set_general(general)?;
         }
-        self.store.save()
-    }
-
-    /// The proxy local terminals of a profile go out through (`None`: none).
-    pub fn profile_set_proxy(&mut self, profile: &str, proxy: Option<u64>) -> Result<()> {
-        if proxy.is_some_and(|p| self.store.proxy(p).is_none()) {
-            bail!("this proxy no longer exists");
-        }
-        let p = self.store.profiles.iter_mut().find(|p| p.id == profile).context("this profile no longer exists")?;
-        p.proxy = proxy;
-        self.store.save()
-    }
-
-    /// Puts a folder (and what is in it) in a profile, or in none.
-    pub fn set_folder_profile(&mut self, id: u64, profile: Option<String>) -> Result<()> {
-        if profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
-            bail!("there is no such profile");
-        }
-        if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
-            f.profile = profile;
+        let users: Vec<Space> = self.spaces.list().iter().filter(|s| s.settings.proxy == Some(id)).cloned().collect();
+        for mut sp in users {
+            sp.settings.proxy = None;
+            self.spaces.save_space(&sp)?;
         }
         self.store.save()
     }
@@ -1228,9 +1218,6 @@ impl Engine {
     /// Adds a server (`id == 0`) or updates it. The secrets go to the vault, never to the store: `None` leaves
     /// a saved one alone, `Some("")` removes it.
     pub fn save_server(&mut self, mut s: Server, login: Option<&str>, sudo: Option<&str>) -> Result<u64> {
-        if s.profile.as_ref().is_some_and(|p| !self.store.profiles.iter().any(|x| &x.id == p)) {
-            bail!("there is no such profile");
-        }
         if s.proxy.is_some_and(|p| self.store.proxy(p).is_none()) {
             bail!("this proxy no longer exists");
         }
@@ -1617,7 +1604,6 @@ mod tests {
             has_sudo: false,
             has_totp: false,
             forwards: vec![],
-            profile: None,
             notes: String::new(),
             env_kind: None,
             proxy: None,
@@ -1744,7 +1730,7 @@ mod tests {
         let (mut e, _log) = engine("secrets");
         assert!(e.secret_list().is_err(), "locked");
         e.vault_unlock("master").unwrap();
-        let meta = |name: &str, kind| SecretMeta { id: 0, name: name.into(), kind, profile: None, env_var: None, agent_visible: false, notes: String::new(), updated: 0 };
+        let meta = |name: &str, kind| SecretMeta { id: 0, name: name.into(), kind, env_var: None, agent_visible: false, notes: String::new(), updated: 0 };
         let key = e.secret_save(SecretMeta { env_var: Some("ANTHROPIC_API_KEY".into()), agent_visible: true, ..meta("anthropic", SecretKind::ApiKey) }, Some("TRAP-API-VALUE")).unwrap();
         assert!(e.secret_list().unwrap().iter().find(|m| m.id == key).unwrap().agent_visible);
         let tok = e.secret_save(meta("gh", SecretKind::Token), Some("TRAP-TOKEN-VALUE")).unwrap();
@@ -1775,95 +1761,122 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_shows_the_active_profile_and_everything_when_asked() {
-        let (mut e, _log) = engine("profiles");
-        let work = e.profile_save("", "Work").unwrap();
-        assert_eq!(work, "work");
-        let home = e.profile_save("", "Home").unwrap();
+    fn the_tree_shows_general_and_the_space_in_use_and_everything_when_asked() {
+        let (mut e, _log) = engine("spaces-tree");
         let folder = e.add_folder("clients".into(), None).unwrap();
-        e.set_folder_profile(folder, Some(work.clone())).unwrap();
-        e.save_server(Server { parent: Some(folder), auth: Auth::Agent, ..server("acme") }, None, None).unwrap();
-        e.save_server(Server { profile: Some(home.clone()), auth: Auth::Agent, ..server("nas") }, None, None).unwrap();
+        e.save_server(Server { parent: Some(folder), auth: Auth::Agent, ..server("shop-api") }, None, None).unwrap();
+        let nas = e.save_server(Server { auth: Auth::Agent, ..server("nas") }, None, None).unwrap();
         e.save_server(Server { auth: Auth::Agent, ..server("everywhere") }, None, None).unwrap();
-        e.set_active_profile(&work).unwrap();
+        let work = e.space_save(&Space { name: "Work".into(), server_folders: vec![folder], ..Default::default() }).unwrap();
+        let home = e.space_save(&Space { name: "Home".into(), servers: vec![nas], ..Default::default() }).unwrap();
+        // General (the default): only what is in no Space
+        assert_eq!(e.active_space(), None);
         let t = e.tree();
-        assert_eq!(names(&t, "servers"), vec!["acme", "everywhere"]);
+        assert_eq!(names(&t, "servers"), vec!["everywhere"]);
+        assert!(names(&t, "folders").is_empty(), "a folder of a Space is not General's");
+        e.set_active_space(Some(work)).unwrap();
+        let t = e.tree();
+        assert_eq!(names(&t, "servers"), vec!["shop-api", "everywhere"], "the Space's own, and General's, which is everywhere");
         assert_eq!(names(&t, "folders"), vec!["clients"]);
-        assert_eq!(t["servers"][0]["profile_eff"], "work", "it says where it ended up");
-        e.set_active_profile(&home).unwrap();
+        assert_eq!(t["servers"][0]["spaces_of"], serde_json::json!([work]), "it says where it is");
+        assert_eq!(t["servers"][1]["spaces_of"], serde_json::json!([]), "General's are in none");
+        assert_eq!(t["folders"][0]["space"], work);
+        e.set_active_space(Some(home)).unwrap();
         let t = e.tree();
         assert_eq!(names(&t, "servers"), vec!["nas", "everywhere"]);
         assert!(names(&t, "folders").is_empty());
-        // a hop of a shown server is listed even when it belongs to another profile
-        let hop = e.store.servers.iter().find(|s| s.name == "nas").unwrap().id;
+        // a hop of a shown server is listed even when it is in another Space
         let mut ev = e.store.servers.iter().find(|s| s.name == "everywhere").unwrap().clone();
-        ev.jump = Some(hop);
+        ev.jump = Some(nas);
         e.save_server(ev, None, None).unwrap();
-        e.set_active_profile(&work).unwrap();
-        assert_eq!(names(&e.tree(), "servers"), vec!["acme", "nas", "everywhere"]);
-        e.set_active_profile(&home).unwrap();
+        e.set_active_space(None).unwrap();
+        assert_eq!(names(&e.tree(), "servers"), vec!["nas", "everywhere"]);
+        e.set_active_space(Some(work)).unwrap();
         e.set_view_all(true);
         assert_eq!(names(&e.tree(), "servers").len(), 3);
-        assert!(e.set_active_profile("nope").is_err());
-        assert!(e.save_server(Server { profile: Some("nope".into()), ..server("x") }, None, None).is_err());
+        assert!(e.set_active_space(Some(999)).is_err());
     }
 
     #[test]
-    fn the_active_profile_is_remembered_next_to_the_other_files() {
-        let (mut e, _log) = engine("profile-memory");
-        let work = e.profile_save("", "Work").unwrap();
-        e.set_active_profile(&work).unwrap();
+    fn a_server_a_folder_and_a_secret_are_moved_to_a_space_or_back_to_general() {
+        let (mut e, _log) = engine("spaces-move");
+        e.vault_unlock("m").unwrap();
+        let a = e.space_save(&Space { name: "A".into(), ..Default::default() }).unwrap();
+        let b = e.space_save(&Space { name: "B".into(), ..Default::default() }).unwrap();
+        let srv = e.save_server(Server { auth: Auth::Agent, ..server("one") }, None, None).unwrap();
+        let folder = e.add_folder("f".into(), None).unwrap();
+        let key = e.secret_save(api_key("k", "K_VAR", true), Some("kv")).unwrap();
+        e.server_set_space(srv, Some(a)).unwrap();
+        e.folder_set_space(folder, Some(a)).unwrap();
+        e.secret_set_space(key, Some(a)).unwrap();
+        assert_eq!((e.spaces.get(a).unwrap().servers.clone(), e.spaces.get(a).unwrap().server_folders.clone(), e.spaces.get(a).unwrap().secrets.clone()), (vec![srv], vec![folder], vec![key]));
+        // moving takes it out of the other: it is in one Space at most
+        e.server_set_space(srv, Some(b)).unwrap();
+        assert!(e.spaces.get(a).unwrap().servers.is_empty() && e.spaces.get(b).unwrap().servers == vec![srv]);
+        e.server_set_space(srv, None).unwrap();
+        assert!(e.spaces.get(b).unwrap().servers.is_empty(), "back in General");
+        assert_eq!(e.secret_space(key), Some(a));
+        e.secret_set_space(key, None).unwrap();
+        assert_eq!(e.secret_space(key), None);
+        assert!(e.server_set_space(srv, Some(999)).is_err() && e.server_set_space(12345, Some(a)).is_err());
+    }
+
+    #[test]
+    fn the_space_in_use_is_remembered_next_to_the_other_files() {
+        let (mut e, _log) = engine("space-memory");
+        let work = e.space_save(&Space { name: "Work".into(), ..Default::default() }).unwrap();
+        e.set_active_space(Some(work)).unwrap();
         e.set_view_all(true);
         let dir = e.store_path().parent().unwrap().to_path_buf();
         let again = Engine::new(Store::load_from(e.store_path()).unwrap(), Vault::new(dir.join("vault.json")), Arc::new(|_, _| {}));
-        assert_eq!(again.active_profile(), "work");
+        assert_eq!(again.active_space(), Some(work));
         assert!(again.tree()["view_all"].as_bool().unwrap());
     }
 
     #[test]
-    fn deleting_a_profile_moves_what_was_in_it_to_the_default_one() {
-        let (mut e, _log) = engine("profile-delete");
+    fn deleting_the_space_in_use_sends_what_was_in_it_back_to_general() {
+        let (mut e, _log) = engine("space-delete");
         e.vault_unlock("m").unwrap();
-        let work = e.profile_save("", "Work").unwrap();
-        let sid = e.save_server(Server { profile: Some(work.clone()), auth: Auth::Agent, ..server("a") }, None, None).unwrap();
-        let key = e.secret_save(SecretMeta { id: 0, name: "k".into(), kind: SecretKind::ApiKey, profile: Some(work.clone()), env_var: None, agent_visible: false, notes: String::new(), updated: 0 }, Some("v")).unwrap();
-        e.set_active_profile(&work).unwrap();
-        assert!(e.profile_delete("default").is_err());
-        e.vault_lock();
-        assert!(e.profile_delete(&work).is_err(), "a locked vault could leave a secret in every profile");
-        e.vault_unlock("m").unwrap();
-        e.profile_delete(&work).unwrap();
-        assert_eq!(e.active_profile(), "default");
-        assert_eq!(e.store.server(sid).unwrap().profile.as_deref(), Some("default"));
-        assert_eq!(e.vault.meta(key).unwrap().profile.as_deref(), Some("default"));
-        assert!(e.profile_save("", "").is_err() && e.profile_save("", "Default").is_err());
+        let sid = e.save_server(Server { auth: Auth::Agent, ..server("a") }, None, None).unwrap();
+        let key = e.secret_save(api_key("k", "K_VAR", true), Some("v")).unwrap();
+        let work = e.space_save(&Space { name: "Work".into(), servers: vec![sid], secrets: vec![key], ..Default::default() }).unwrap();
+        e.set_active_space(Some(work)).unwrap();
+        assert_eq!(e.secrets_in_reach(None), Vec::<u64>::new(), "General does not see it");
+        e.space_delete(work).unwrap();
+        assert_eq!(e.active_space(), None, "General again");
+        assert!(e.store.server(sid).is_some() && e.vault.meta(key).is_some(), "nothing but the Space is gone");
+        assert_eq!(e.secrets_in_reach(None), vec![key], "and the secret is General's now");
+        assert!(names(&e.tree(), "servers").contains(&"a".to_string()));
     }
 
-    fn api_key(name: &str, var: &str, profile: Option<&str>, visible: bool) -> SecretMeta {
-        SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, profile: profile.map(str::to_string), env_var: Some(var.into()), agent_visible: visible, notes: String::new(), updated: 0 }
+    fn api_key(name: &str, var: &str, visible: bool) -> SecretMeta {
+        SecretMeta { id: 0, name: name.into(), kind: SecretKind::ApiKey, env_var: Some(var.into()), agent_visible: visible, notes: String::new(), updated: 0 }
     }
 
     #[test]
-    fn a_local_terminal_gets_the_variables_of_its_profile_and_no_others() {
+    fn a_local_terminal_gets_the_variables_of_general_and_of_its_space_and_no_others() {
         let (mut e, log) = engine("local-env");
         e.vault_unlock("m").unwrap();
-        let work = e.profile_save("", "Work").unwrap();
-        e.secret_save(api_key("a", "SHARED_KEY", None, true), Some("shared-v")).unwrap();
-        e.secret_save(api_key("b", "WORK_KEY", Some(&work), true), Some("work-v")).unwrap();
-        e.secret_save(api_key("c", "DEFAULT_KEY", Some("default"), true), Some("default-v")).unwrap();
-        e.secret_save(api_key("d", "HIDDEN_KEY", None, false), Some("hidden-v")).unwrap();
-        e.set_active_profile(&work).unwrap();
-        let s = e.open(LOCAL, 24, 120, true).unwrap();
-        assert_eq!(s.title, "Local · Work");
-        e.write(s.sid, b"echo [$OSO/$OSO_PROFILE] s=$SHARED_KEY w=$WORK_KEY d=$DEFAULT_KEY h=$HIDDEN_KEY .\r");
-        assert!(wait_for(&log, s.sid, "[1/work] s=shared-v w=work-v d= h= ."), "{:?}", text_of(&log, s.sid));
-        e.close(s.sid);
-        // and the other way round
-        e.set_active_profile("default").unwrap();
+        let general = e.secret_save(api_key("a", "GENERAL_KEY", true), Some("general-v")).unwrap();
+        let work_key = e.secret_save(api_key("b", "WORK_KEY", true), Some("work-v")).unwrap();
+        let home_key = e.secret_save(api_key("c", "HOME_KEY", true), Some("home-v")).unwrap();
+        e.secret_save(api_key("d", "HIDDEN_KEY", false), Some("hidden-v")).unwrap();
+        let _ = general;
+        let work = e.space_save(&Space { name: "Work".into(), secrets: vec![work_key], ..Default::default() }).unwrap();
+        e.space_save(&Space { name: "Home".into(), secrets: vec![home_key], ..Default::default() }).unwrap();
+        // in General: what is in no Space
+        e.set_active_space(None).unwrap();
         let s = e.open(LOCAL, 24, 120, true).unwrap();
         assert_eq!(s.title, "Local");
-        e.write(s.sid, b"echo [$OSO_PROFILE] w=$WORK_KEY d=$DEFAULT_KEY .\r");
-        assert!(wait_for(&log, s.sid, "[default] w= d=default-v ."), "{:?}", text_of(&log, s.sid));
+        e.write(s.sid, b"echo [$OSO/$OSO_SPACE] g=$GENERAL_KEY w=$WORK_KEY h=$HOME_KEY x=$HIDDEN_KEY .\r");
+        assert!(wait_for(&log, s.sid, "[1/General] g=general-v w= h= x= ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // in a Space: its own, and General's (which is everywhere), and not another Space's
+        e.set_active_space(Some(work)).unwrap();
+        let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(work), cwd: None }).unwrap();
+        assert_eq!(s.title, "Local · Work");
+        e.write(s.sid, b"echo [$OSO_SPACE] g=$GENERAL_KEY w=$WORK_KEY h=$HOME_KEY x=$HIDDEN_KEY .\r");
+        assert!(wait_for(&log, s.sid, "[Work] g=general-v w=work-v h= x= ."), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
     }
 
@@ -1871,17 +1884,18 @@ mod tests {
     fn a_terminal_of_a_space_gets_its_secrets_its_folder_and_its_name_and_no_others() {
         let (mut e, log) = engine("space-env");
         e.vault_unlock("m").unwrap();
-        let inside = e.secret_save(api_key("in", "SPACE_KEY", None, true), Some("space-v")).unwrap();
-        let hidden = e.secret_save(api_key("hid", "HIDDEN_KEY", None, false), Some("hidden-v")).unwrap();
-        e.secret_save(api_key("out", "OTHER_KEY", None, true), Some("other-v")).unwrap();
+        let inside = e.secret_save(api_key("in", "SPACE_KEY", true), Some("space-v")).unwrap();
+        let hidden = e.secret_save(api_key("hid", "HIDDEN_KEY", false), Some("hidden-v")).unwrap();
+        let other = e.secret_save(api_key("out", "OTHER_KEY", true), Some("other-v")).unwrap();
         let dir = temp("space-cwd");
-        let id = e.space_save(&Space { name: "Acme".into(), secrets: vec![inside, hidden], folders: vec![dir.to_string_lossy().into_owned()], ..Default::default() }).unwrap();
+        let id = e.space_save(&Space { name: "Example".into(), secrets: vec![inside, hidden], folders: vec![dir.to_string_lossy().into_owned()], ..Default::default() }).unwrap();
+        e.space_save(&Space { name: "Other".into(), secrets: vec![other], ..Default::default() }).unwrap();
         assert!(e.space_ok(), "the server of this version keeps the Space of a session");
         let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: None }).unwrap();
-        assert_eq!(s.title, "Local · Acme");
+        assert_eq!(s.title, "Local · Example");
         assert_eq!(s.meta["space"], id, "the window learns which Space it belongs to");
         e.write(s.sid, b"echo [$OSO_SPACE] s=$SPACE_KEY o=$OTHER_KEY h=$HIDDEN_KEY p=$PWD .\r");
-        let want = format!("[Acme] s=space-v o= h= p={} .", dir.display());
+        let want = format!("[Example] s=space-v o= h= p={} .", dir.display());
         assert!(wait_for(&log, s.sid, &want), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
         // another folder, asked for by the window, wins over the Space's first one
@@ -1899,7 +1913,7 @@ mod tests {
     fn a_terminal_keeps_its_space_and_folder_in_its_meta_so_that_opening_it_again_puts_it_back() {
         let (mut e, _log) = engine("space-meta");
         let dir = temp("space-meta-dir");
-        let id = e.space_save(&Space { name: "Acme".into(), ..Default::default() }).unwrap();
+        let id = e.space_save(&Space { name: "Example".into(), ..Default::default() }).unwrap();
         let live = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: Some(dir.to_string_lossy().into_owned()) }).unwrap();
         let meta = e.meta_of(live.sid).unwrap();
         assert_eq!((meta["space"].as_u64(), meta["cwd"].as_str()), (Some(id), dir.to_str()));
@@ -1948,7 +1962,7 @@ mod tests {
     fn with_the_vault_locked_the_terminal_opens_without_secrets_and_says_so() {
         let (mut e, log) = engine("local-locked");
         e.vault_unlock("m").unwrap();
-        e.secret_save(api_key("a", "SOME_KEY", None, true), Some("some-v")).unwrap();
+        e.secret_save(api_key("a", "SOME_KEY", true), Some("some-v")).unwrap();
         e.vault_lock();
         let s = e.open(LOCAL, 24, 120, true).unwrap();
         assert_eq!(s.title, "Local · vault locked");
@@ -1973,7 +1987,7 @@ mod tests {
     }
 
     fn socks_proxy(name: &str) -> Proxy {
-        Proxy { id: 0, name: name.into(), kind: crate::store::ProxyKind::Socks5, host: "proxy.corp".into(), port: 1080, profile: None }
+        Proxy { id: 0, name: name.into(), kind: crate::store::ProxyKind::Socks5, host: "proxy.corp".into(), port: 1080 }
     }
 
     #[test]
@@ -1985,12 +1999,14 @@ mod tests {
         let again = Store::load_from(e.store_path()).unwrap();
         assert_eq!(again.proxies.len(), 1, "saved in proxies.json");
         let s = e.save_server(Server { proxy: Some(id), auth: Auth::Agent, ..server("a") }, None, None).unwrap();
-        e.profile_set_proxy("default", Some(id)).unwrap();
+        let work = e.space_save(&Space { name: "Work".into(), settings: SpaceSettings { proxy: Some(id), ..Default::default() }, ..Default::default() }).unwrap();
+        e.space_set_settings(None, SpaceSettings { proxy: Some(id), ..Default::default() }).unwrap();
         assert!(e.save_server(Server { proxy: Some(99), ..server("b") }, None, None).is_err());
-        assert!(e.profile_set_proxy("default", Some(99)).is_err());
+        assert!(e.space_set_settings(None, SpaceSettings { proxy: Some(99), ..Default::default() }).is_err());
         e.proxy_delete(id).unwrap();
         assert_eq!(e.store.server(s).unwrap().proxy, None);
-        assert_eq!(e.store.profiles[0].proxy, None);
+        assert_eq!(e.space_settings(None).proxy, None, "General goes direct");
+        assert_eq!(e.space_settings(Some(work)).proxy, None, "and so does a Space");
     }
 
     #[test]
@@ -2004,20 +2020,23 @@ mod tests {
     }
 
     #[test]
-    fn a_local_terminal_of_a_proxied_profile_uses_the_proxy_and_the_others_do_not() {
+    fn a_local_terminal_of_a_proxied_space_uses_the_proxy_and_the_others_do_not() {
         let (mut e, log) = engine("local-proxy");
         let id = e.proxy_save(socks_proxy("corp")).unwrap();
-        let work = e.profile_save("", "Work").unwrap();
-        e.profile_set_proxy(&work, Some(id)).unwrap();
-        e.set_active_profile(&work).unwrap();
-        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        let work = e.space_save(&Space { name: "Work".into(), settings: SpaceSettings { proxy: Some(id), ..Default::default() }, ..Default::default() }).unwrap();
+        let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(work), cwd: None }).unwrap();
         e.write(s.sid, b"echo p=$ALL_PROXY n=$no_proxy .\r");
         assert!(wait_for(&log, s.sid, "p=socks5h://proxy.corp:1080 n=localhost,127.0.0.1,::1 ."), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
-        e.set_active_profile("default").unwrap();
         let s = e.open(LOCAL, 24, 120, true).unwrap();
         e.write(s.sid, b"echo [$HTTPS_PROXY] .\r");
         assert!(wait_for(&log, s.sid, "[] ."), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // General can have one too
+        e.space_set_settings(None, SpaceSettings { proxy: Some(id), ..Default::default() }).unwrap();
+        let s = e.open(LOCAL, 24, 120, true).unwrap();
+        e.write(s.sid, b"echo p=$ALL_PROXY .\r");
+        assert!(wait_for(&log, s.sid, "p=socks5h://proxy.corp:1080 ."), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
     }
 
@@ -2049,52 +2068,35 @@ mod tests {
     }
 
     #[test]
-    fn switching_profile_switches_the_accounts_it_asks_for_and_only_those() {
+    fn a_space_that_asks_for_other_accounts_says_which_and_changes_nothing_by_itself() {
         let (mut e, _log, calls) = engine_with_tools(
             "accounts",
             vec![("gh auth status", Some((true, GH_TWO, ""))), ("gh auth switch", Some((true, "", ""))), ("tailscale status", Some((true, TS_STATUS, ""))), ("tailscale switch --list", Some((true, TS_LIST, ""))), ("tailscale switch 9fe2", Some((true, "", "")))],
         );
-        let work = e.profile_save("", "Work").unwrap();
-        e.profile_set_accounts(&work, Some("work-user".into()), Some("9fe2".into())).unwrap();
-        let problems = e.switch_profile(&work).unwrap();
-        assert!(problems.is_empty(), "{problems:?}");
+        let work = e.space_save(&Space { name: "Work".into(), settings: SpaceSettings { gh_user: Some("work-user".into()), tailscale_account: Some("9fe2".into()), ..Default::default() }, ..Default::default() }).unwrap();
+        calls.lock().unwrap().clear();
+        let changes = e.account_changes(Some(work));
+        assert_eq!(changes.iter().map(|c| (c.tool, c.wanted.as_str(), c.current.as_str())).collect::<Vec<_>>(), vec![("github", "work-user", "me"), ("tailscale", "9fe2", "me@corp.example.com")]);
+        assert!(!calls.lock().unwrap().iter().any(|c| c.contains("switch") && !c.contains("--list")), "asking switches nothing: {:?}", calls.lock().unwrap());
+        // the person says yes: the window hands the ids to `account_use`
+        for c in &changes {
+            e.account_use(c.tool, &c.id).unwrap();
+        }
         let ran = calls.lock().unwrap().join("\n");
         assert!(ran.contains("gh auth switch --hostname github.com --user work-user"), "{ran}");
         assert!(ran.contains("tailscale switch 9fe2"), "{ran}");
-        assert_eq!(e.active_profile(), "work");
-        // a profile that asks for nothing touches nothing
-        calls.lock().unwrap().clear();
-        assert!(e.switch_profile("default").unwrap().is_empty());
-        assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock().unwrap());
-        // an account that is already in use is left alone
-        e.profile_set_accounts("default", Some("me".into()), Some("corp.example.com".into())).unwrap();
-        calls.lock().unwrap().clear();
-        e.switch_profile("default").unwrap();
-        assert!(!calls.lock().unwrap().iter().any(|c| c.contains("switch 9") || c.contains("auth switch") || c.starts_with("tailscale switch ") && !c.contains("--list")), "{:?}", calls.lock().unwrap());
+        // General asks for nothing, so nothing is asked
+        assert!(e.account_changes(None).is_empty());
+        // an account that is already in use is not asked about
+        e.space_set_settings(None, SpaceSettings { gh_user: Some("me".into()), tailscale_account: Some("corp.example.com".into()), ..Default::default() }).unwrap();
+        assert!(e.account_changes(None).is_empty(), "{:?}", e.account_changes(None));
     }
 
     #[test]
-    fn a_switch_that_fails_is_reported_and_the_other_still_happens() {
-        let (mut e, _log, calls) = engine_with_tools(
-            "accounts-fail",
-            vec![("gh auth status", Some((true, GH_TWO, ""))), ("gh auth switch", Some((false, "", "no such user\n"))), ("tailscale status", Some((true, TS_STATUS, ""))), ("tailscale switch --list", Some((true, TS_LIST, ""))), ("tailscale switch 9fe2", Some((true, "", "")))],
-        );
-        let work = e.profile_save("", "Work").unwrap();
-        e.profile_set_accounts(&work, Some("work-user".into()), Some("9fe2".into())).unwrap();
-        let problems = e.switch_profile(&work).unwrap();
-        assert_eq!(problems, vec!["GitHub: no such user".to_string()]);
-        assert!(calls.lock().unwrap().iter().any(|c| c == "tailscale switch 9fe2"), "Tailscale was switched anyway");
-        assert_eq!(e.active_profile(), "work", "the profile changed anyway");
-    }
-
-    #[test]
-    fn a_tool_that_is_missing_is_a_note_not_a_failure() {
+    fn a_tool_that_is_missing_is_left_out_not_a_failure() {
         let (mut e, _log, _calls) = engine_with_tools("accounts-missing", vec![("gh", None), ("tailscale", None)]);
-        let work = e.profile_save("", "Work").unwrap();
-        e.profile_set_accounts(&work, Some("me".into()), None).unwrap();
-        let problems = e.switch_profile(&work).unwrap();
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].contains("not installed"));
+        let work = e.space_save(&Space { name: "Work".into(), settings: SpaceSettings { gh_user: Some("me".into()), ..Default::default() }, ..Default::default() }).unwrap();
+        assert!(e.account_changes(Some(work)).is_empty());
         let v = e.accounts();
         assert!(!v.github.installed && !v.tailscale.installed, "hidden in the window");
     }
@@ -2118,25 +2120,24 @@ mod tests {
     }
 
     #[test]
-    fn a_local_terminal_gets_the_cloud_settings_of_its_profile() {
+    fn a_local_terminal_gets_the_cloud_settings_of_its_space() {
         let (mut e, log) = engine("cloud");
-        let work = e.profile_save("", "Work").unwrap();
-        e.profile_set_cloud(&work, Some("acme-prod".into()), Some("~/.kube/acme.yaml".into()), true).unwrap();
-        assert!(e.profile_set_cloud(&work, Some("bad name".into()), None, false).is_err());
-        assert!(e.store.profiles.iter().find(|p| p.id == work).unwrap().production, "a refused change changed nothing");
-        e.set_active_profile(&work).unwrap();
-        let s = e.open(LOCAL, 24, 160, true).unwrap();
+        let work = e.space_save(&Space { name: "Work".into(), ..Default::default() }).unwrap();
+        e.space_set_settings(Some(work), SpaceSettings { aws_profile: Some("my-aws".into()), kubeconfig: Some("~/.kube/mine.yaml".into()), production: true, ..Default::default() }).unwrap();
+        assert!(e.space_set_settings(Some(work), SpaceSettings { aws_profile: Some("bad name".into()), ..Default::default() }).is_err());
+        assert!(e.space_settings(Some(work)).production, "a refused change changed nothing");
+        let s = e.open_in(LOCAL, 24, 160, true, OpenCtx { space: Some(work), cwd: None }).unwrap();
         e.write(s.sid, b"echo aws=$AWS_PROFILE kube=$KUBECONFIG .\r");
         let home = directories::BaseDirs::new().unwrap().home_dir().to_string_lossy().into_owned();
-        assert!(wait_for(&log, s.sid, &format!("aws=acme-prod kube={home}/.kube/acme.yaml .")), "{:?}", text_of(&log, s.sid));
+        assert!(wait_for(&log, s.sid, &format!("aws=my-aws kube={home}/.kube/mine.yaml .")), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
-        e.set_active_profile("default").unwrap();
         let s = e.open(LOCAL, 24, 160, true).unwrap();
         e.write(s.sid, b"echo [$AWS_PROFILE] [$KUBECONFIG] .\r");
-        assert!(wait_for(&log, s.sid, "[] [] ."), "another profile does not get them: {:?}", text_of(&log, s.sid));
+        assert!(wait_for(&log, s.sid, "[] [] ."), "General does not get them: {:?}", text_of(&log, s.sid));
         e.close(s.sid);
         // and they survive a restart
-        let again = Store::load_from(e.store_path()).unwrap();
-        assert_eq!(again.profiles.iter().find(|p| p.id == work).unwrap().aws_profile.as_deref(), Some("acme-prod"));
+        let dir = e.store_path().parent().unwrap().to_path_buf();
+        let again = Engine::new(Store::load_from(e.store_path()).unwrap(), Vault::new(dir.join("vault.json")), Arc::new(|_, _| {}));
+        assert_eq!(again.space_settings(Some(work)).aws_profile.as_deref(), Some("my-aws"));
     }
 }

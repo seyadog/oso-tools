@@ -1,9 +1,9 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Backend, Space, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Backend, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { MenuItem, clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
-import { SpacesCtx, newSpace, renderSpaces } from "./spaces_ui";
+import { SpacesCtx, editSpace, newSpace, renderSpaces } from "./spaces_ui";
 import { emptySpace, openSpaces, tabFor, withTab } from "./spaces";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
@@ -29,7 +29,7 @@ import { soundsDialog } from "./sounds_ui";
 import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
-import { profileBar, profileOptions } from "./profiles_ui";
+import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
 import { KIND_LABEL, secretForm, secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel } from "./tunnels";
 import { switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
@@ -50,7 +50,9 @@ interface Drag {
 
 export class App {
   ws = new Workspace();
-  tree: TreeData = { folders: [], servers: [], profiles: [], proxies: [], active_profile: "default", view_all: false };
+  tree: TreeData = { folders: [], servers: [], proxies: [], active_space: null, view_all: false };
+  /** What General fixes (accounts, proxy, cloud): the Spaces carry their own. */
+  private general: SpaceSettings | null = null;
   vault: VaultStatus = { exists: false, unlocked: false };
   panes = new Map<Id, Pane>();
   private early = new Map<Id, SessionEvent[]>();
@@ -73,12 +75,14 @@ export class App {
   private watches = new Map<Id, Watch>();
   private alerts = new Set<Id>();
   private transfers!: Transfers;
-  /** Which servers are production, kept for those the profile filter hides while their terminal is open. */
+  /** Which servers are production, kept for those the Space filter hides while their terminal is open. */
   private prod = new Map<number, boolean>();
   private tunnelStatus = new Map<string, TunnelStatus>();
   private accountsView: AccountsView | null = null;
   /** The secrets (names and types only) while the vault is unlocked: the left panel lists them. */
   private secretsMeta: SecretMeta[] | null = null;
+  /** The secret that is this computer's sudo password (null: none, or the vault is locked). */
+  private localSudoId: number | null = null;
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
@@ -109,7 +113,7 @@ export class App {
   private tabsEl = el("div", { class: "tabs" });
   private toolsEl = el("div", { class: "tools" });
   private treeEl = el("div", { class: "tree", tabindex: "0" });
-  private profileEl = el("div", { class: "profile-slot" });
+  private spaceEl = el("div", { class: "space-slot" });
   private search = el("input", { type: "search", placeholder: "Search servers", autocomplete: "off", spellcheck: "false" });
   private dividers: HTMLElement[] = [];
 
@@ -186,6 +190,8 @@ export class App {
       const n = migrated.imported.length;
       toast(`Your saved groups are Spaces now (${n} moved${migrated.skipped.length ? `, ${migrated.skipped.length} could not be read: ${migrated.skipped.join(", ")}` : ""}). Find them under Spaces on the left.`, 9000);
     }
+    const pm = await this.be.spaceProfileMigration().catch(() => null);
+    if (pm) toast(`Your profiles are Spaces now (${pm.spaces.join(", ") || "none"}). What was in no profile is General. A copy of the old files is in ${pm.backup}.`, 12000);
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
     void this.refreshAccounts();
@@ -239,8 +245,17 @@ export class App {
           return `${sel}: x=${Math.round(r.x)} y=${Math.round(r.y)} w=${Math.round(r.width)} h=${Math.round(r.height)} scrollTop=${e.scrollTop}`;
         };
         report.push(`window ${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio} doc.scrollTop=${document.documentElement.scrollTop} body.scrollTop=${document.body.scrollTop} scrollY=${window.scrollY} docH=${document.documentElement.scrollHeight}`);
-        for (const sel of ["#app", "#rail", "#side", "#main", "#topbar", "#stage", "#rpanel", "#rtoggle", ".profile-slot", ".tree"]) report.push(box(sel));
+        for (const sel of ["#app", "#rail", "#side", "#main", "#topbar", "#stage", "#rpanel", "#rtoggle", ".space-slot", ".tree"]) report.push(box(sel));
         await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
+      if (want.startsWith("open:")) {
+        // opens the Space of that name and leaves the window as it is: for looking at it (or taking a picture of it)
+        await wait(1500);
+        const sp = this.spaces.find((x) => x.name === want.slice(5));
+        if (sp) await this.openSpace(sp);
+        await wait(4000);
+        await this.be.writeConfig("selftest.out", sp ? `opened ${sp.name}` : `no Space called ${want.slice(5)}`);
         return;
       }
       if (want === "settings") {
@@ -429,7 +444,7 @@ export class App {
   async openServer(serverId: number, useVault = true, place?: Place): Promise<void> {
     this.measure();
     try {
-      const info = await this.be.open(serverId, this.guessRows(), this.guessCols(), useVault);
+      const info = await this.be.open(serverId, this.guessRows(), this.guessCols(), useVault, this.tree.active_space === null ? undefined : { space: this.tree.active_space });
       if (serverId === LOCAL) localStorage.setItem("oso.openedLocal", "1");
       this.addSession(info, place);
     } catch (e) {
@@ -1035,7 +1050,7 @@ export class App {
   }
 
   private startState(): StartState {
-    return { profiles: this.tree.profiles.length, apiKeys: this.secretsMeta ? this.secretsMeta.filter((m) => m.kind === "api_key").length : null, openedLocal: localStorage.getItem("oso.openedLocal") === "1", aiConnected: this.aiConnected };
+    return { spaces: this.spaces.length, apiKeys: this.secretsMeta ? this.secretsMeta.filter((m) => m.kind === "api_key").length : null, openedLocal: localStorage.getItem("oso.openedLocal") === "1", aiConnected: this.aiConnected };
   }
 
   private aiConnected = false;
@@ -1051,24 +1066,10 @@ export class App {
 
   /** The button of a step of "Getting started". */
   private async startStep(id: StepId) {
-    if (id === "profile") return void this.newProfile();
+    if (id === "space") return void newSpace(this.spacesCtx());
     if (id === "key") return void this.newSecret({ kind: "api_key", agent_visible: true });
     if (id === "terminal") return void this.openServer(LOCAL);
     return void connectAiDialog(this.be, () => void this.refreshAi());
-  }
-
-  /** "+ New profile": asks for a name, creates it and switches to it. */
-  async newProfile() {
-    const name = await promptBox("New profile", "", "text", "A profile keeps servers, secrets and accounts together: work, personal, a client…");
-    if (!name?.trim()) return;
-    try {
-      const id = await this.be.profileSave("", name);
-      const problems = await this.be.setActiveProfile(id);
-      if (problems.length) toast(problems.join(" · "), 8000);
-      await this.refreshTree();
-    } catch (e) {
-      toast((e as Error).message, 6000);
-    }
   }
 
   shortcutsSheet() {
@@ -1090,7 +1091,7 @@ export class App {
       done.onclick = close;
       return el("div", {}, el("h2", {}, "Help"), el("div", { class: "ways" },
         item("help-shortcuts", `Shortcuts  (${this.keyText("help.open")} or ?)`, "Every shortcut, as they are set right now", () => this.shortcutsSheet()),
-        item("help-start", "Getting started", "Profile, API key, local terminal, connect your AI", () => {
+        item("help-start", "Getting started", "Space, API key, local terminal, connect your AI", () => {
           localStorage.removeItem("oso.start");
           this.render();
           openModal((closeStart) => {
@@ -1279,12 +1280,14 @@ export class App {
     });
   }
 
-  /** The cloud account the active profile points the local terminals at, in red when it is a production one. */
+  /** The cloud account the active Space (or General) points the local terminals at, in red when it is a production one. */
   private cloudChip(): HTMLElement | null {
-    const p = this.tree.profiles.find((x) => x.id === this.tree.active_profile);
+    const sp = this.tree.active_space === null ? null : this.spaces.find((x) => x.id === this.tree.active_space) ?? null;
+    const p: SpaceSettings | null = sp ?? this.general;
     if (!p || (!p.production && !p.aws_profile && !p.kubeconfig)) return null;
-    const parts = [p.name, p.aws_profile ? `aws ${p.aws_profile}` : "", p.kubeconfig ? `k8s ${p.kubeconfig.split("/").pop()}` : ""].filter(Boolean);
-    return el("span", { class: `cloud-chip${p.production ? " prod" : ""}`, title: p.production ? "A production profile: its terminals point at real machines" : "Where this profile's local terminals point", "data-chip": p.id }, parts.join(" · "));
+    const name = sp ? sp.name : "General";
+    const parts = [name, p.aws_profile ? `aws ${p.aws_profile}` : "", p.kubeconfig ? `k8s ${p.kubeconfig.split("/").pop()}` : ""].filter(Boolean);
+    return el("span", { class: `cloud-chip${p.production ? " prod" : ""}`, title: p.production ? "A production Space: its terminals point at real machines" : "Where this Space's local terminals point", "data-chip": String(sp?.id ?? 0) }, parts.join(" · "));
   }
 
   // ------------------------------------------------------------ sidebar
@@ -1316,7 +1319,7 @@ export class App {
     this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
     const grip = el("div", { id: "lgrip", title: "Drag to change the width" });
     grip.addEventListener("pointerdown", (e) => this.startLeftResize(e, grip));
-    this.side.append(this.profileEl, searchWrap, this.treeEl, grip);
+    this.side.append(this.spaceEl, searchWrap, this.treeEl, grip);
     this.renderRail();
   }
 
@@ -1485,8 +1488,21 @@ export class App {
   renderSidebar() {
     this.syncFocus();
     if (this.side.hidden) return;
-    clear(this.profileEl);
-    this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree(), () => void this.newProfile()));
+    clear(this.spaceEl);
+    this.spaceEl.append(
+      spaceBar(
+        { spaces: this.spaces, active: this.tree.active_space, all: this.tree.view_all, production: !!this.activeSettings()?.production },
+        {
+          select: async (id) => void (await this.selectSpace(id)),
+          newSpace: () => void newSpace(this.spacesCtx()),
+          manage: () => void this.manageSpace(),
+          setAll: async (all): Promise<void> => {
+            await this.be.setViewAll(all);
+            await this.refreshTree();
+          },
+        },
+      ),
+    );
     clear(this.treeEl);
     this.searchWrap.hidden = this.leftSection !== "servers";
     switch (this.leftSection) {
@@ -1587,7 +1603,62 @@ export class App {
 
   async refreshSpaces() {
     this.spaces = await this.be.spaceList().catch(() => [] as Space[]);
+    this.general = await this.be.spaceSettings(null).catch(() => null);
     this.renderSidebar();
+    this.render();
+  }
+
+  /** What the Space in use (or General) fixes. */
+  private activeSettings(): SpaceSettings | null {
+    return (this.tree.active_space === null ? null : this.spaces.find((x) => x.id === this.tree.active_space)) ?? this.general;
+  }
+
+  /** The options of a "Space" select: General first (`general` is its text), then each Space. Values are ids, `""` is General. */
+  private spaceOptions(general: string): [string, string][] {
+    return [["", general], ...this.spaces.map((sp): [string, string] => [String(sp.id), sp.name])];
+  }
+
+  /** The Space (id as text, `""` for General) a server, folder or secret is in. */
+  private spaceOf(kind: "server" | "folder", id: number): string {
+    const sp = this.spaces.find((x) => (kind === "server" ? x.servers : x.server_folders).includes(id));
+    return sp ? String(sp.id) : "";
+  }
+
+  /**
+   * Works in a Space (null: General). If it asks for other GitHub/Tailscale accounts than the ones in use, asks first and
+   * switches only if told to. False when the person cancelled.
+   */
+  async selectSpace(id: number | null): Promise<boolean> {
+    if (id === this.tree.active_space) return true;
+    const name = id === null ? "General" : this.spaces.find((x) => x.id === id)?.name ?? "this Space";
+    const changes = await this.be.spaceAccountChanges(id).catch(() => []);
+    let answer: "switch" | "keep" | "cancel" = "keep";
+    if (changes.length) answer = await accountsAsk(name, changes);
+    if (answer === "cancel") {
+      this.renderSidebar();
+      return false;
+    }
+    if (answer === "switch") {
+      for (const c of changes) await this.be.accountUse(c.tool, c.id).catch((e) => toast(`${c.tool}: ${(e as Error).message}`, 6000));
+      void this.refreshAccounts();
+    }
+    await this.be.setActiveSpace(id);
+    await this.refreshTree();
+    return true;
+  }
+
+  /** "Manage": the form of the Space in use, or General's settings. */
+  private async manageSpace() {
+    const sp = this.tree.active_space === null ? null : this.spaces.find((x) => x.id === this.tree.active_space);
+    if (sp) await editSpace(this.spacesCtx(), sp);
+    else await generalDialog(this.be, () => this.tree.proxies, () => this.refreshAll());
+  }
+
+  /** The form of a new secret from inside another form: resolves when it is closed. */
+  private async addSecretFromForm() {
+    if ((await this.unlockDialog(false)) !== "unlocked") return;
+    await new Promise<void>((done) => secretForm(this.secretsCtx(), null, () => done(), { agent_visible: false }));
+    await this.refreshSecrets();
   }
 
   private spacesCtx(): SpacesCtx {
@@ -1595,12 +1666,18 @@ export class App {
       be: this.be,
       tree: () => this.tree,
       secrets: () => this.secretsMeta,
+      proxies: () => this.tree.proxies,
+      localSudo: () => this.localSudoId,
+      addSecret: () => this.addSecretFromForm(),
       spaces: () => this.spaces,
       openCount: (id) => openSpaces(this.ws.tabs.values()).get(id) ?? 0,
       open: (sp, again) => void this.openSpace(sp, again),
       newTerminal: (sp) => void this.newSpaceTerminal(sp),
       newAgent: (sp) => this.newAgent(sp),
-      changed: () => this.refreshSpaces(),
+      changed: async () => {
+        await this.refreshSpaces();
+        await this.refreshTree();
+      },
       emptyBox: (text, buttons) => this.emptyBox(text, buttons),
     };
   }
@@ -1663,14 +1740,11 @@ export class App {
     toast(`Saved in “${target.name}”. It opens again with the Space.`);
   }
 
-  /** Opens a Space: its profile, its tunnels and its saved tabs. One that is already open is only brought forward. */
+  /** Opens a Space: it becomes the one in use, then its tunnels and its saved tabs. One that is already open is only brought forward. */
   async openSpace(sp: Space, again = false) {
     const here = [...this.ws.tabs.values()].find((t) => t.space === sp.id && !t.dead);
     if (here && !again) return void this.focusSession(here.sid);
-    if (sp.profile && sp.profile !== this.tree.active_profile && this.tree.profiles.some((p) => p.id === sp.profile)) {
-      await this.be.setActiveProfile(sp.profile).catch((e) => toast(`Could not switch to the profile of this Space: ${(e as Error).message}`));
-      await this.refreshTree();
-    }
+    if (this.tree.active_space !== sp.id && !(await this.selectSpace(sp.id))) return;
     for (const t of sp.tunnels) {
       if (this.tree.servers.some((s) => s.id === t.server && s.forwards.some((f) => f.id === t.forward))) await this.be.tunnelStart(t.server, t.forward, true).catch((e) => toast(`A tunnel of “${sp.name}” did not start: ${(e as Error).message}`, 6000));
     }
@@ -1838,7 +1912,7 @@ export class App {
   }
 
   private secretsCtx() {
-    return { be: this.be, importSsh: () => void this.importSsh(), importEnv: () => void envImportDialog(this.importCtx(), () => void this.vaultDialog()), importProton: () => void protonImportDialog(this.importCtx(), () => void this.vaultDialog()), showCode: (id: number, name: string) => void showCode(this.be, id, name), profiles: () => this.tree.profiles, activeProfile: () => this.tree.active_profile, lockVault: () => this.lockVault(), changed: () => void this.refreshSecrets() };
+    return { be: this.be, spaces: () => this.spaces.map((x) => ({ id: x.id, name: x.name })), importSsh: () => void this.importSsh(), importEnv: () => void envImportDialog(this.importCtx(), () => void this.vaultDialog()), importProton: () => void protonImportDialog(this.importCtx(), () => void this.vaultDialog()), showCode: (id: number, name: string) => void showCode(this.be, id, name), lockVault: () => this.lockVault(), changed: () => void this.refreshSecrets() };
   }
 
   private importCtx() {
@@ -1852,11 +1926,12 @@ export class App {
   /** "Add" on the Secrets section: asks for the vault if it is locked, then the form. */
   async newSecret(preset: Partial<SecretMeta> = {}) {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretForm(this.secretsCtx(), null, () => void this.refreshSecrets(), { profile: null, ...preset });
+    secretForm(this.secretsCtx(), null, () => void this.refreshSecrets(), preset);
   }
 
   async refreshSecrets() {
     this.secretsMeta = this.vault.unlocked ? await this.be.secretList().catch(() => null) : null;
+    this.localSudoId = this.vault.unlocked ? await this.be.localSudoSecret().catch(() => null) : null;
     this.renderSidebar();
     this.render();
   }
@@ -1884,7 +1959,7 @@ export class App {
     this.treeEl.append(head);
     if (!open) return;
     if (v && any) return void accountsRows(this.treeEl, v, this.be, () => this.refreshAccounts());
-    this.treeEl.append(this.emptyBox("Switch your GitHub and Tailscale accounts here, and per profile. It needs `gh` and `tailscale` installed; oso never keeps their tokens.", [["Check again", () => void this.refreshAccounts(), false, "empty-check-accounts"]]));
+    this.treeEl.append(this.emptyBox("Switch your GitHub and Tailscale accounts here, and per Space. It needs `gh` and `tailscale` installed; oso never keeps their tokens.", [["Check again", () => void this.refreshAccounts(), false, "empty-check-accounts"]]));
   }
 
   // ------------------------------------------------------------ snippets
@@ -2021,7 +2096,7 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretsDialog(this.secretsCtx(), { profile: this.tree.view_all ? "" : this.tree.active_profile });
+    secretsDialog(this.secretsCtx(), { space: this.tree.view_all || this.tree.active_space === null ? "" : String(this.tree.active_space) });
   }
 
   async lockVault() {
@@ -2049,8 +2124,8 @@ export class App {
   private renameFolder(f: Folder) {
     openModal((close) => {
       const name = el("input", { value: f.name, name: "name", autocomplete: "off" });
-      const profile = makeSelect(profileOptions(this.tree.profiles, "Inherit, or every profile"), f.profile ?? "", { "data-name": "folder-profile" });
-      const form = el("form", {}, el("h2", {}, "Folder"), field("Name", name), field("Profile of what is inside", profile));
+      const space = makeSelect(this.spaceOptions("General (every Space)"), this.spaceOf("folder", f.id), { "data-name": "folder-space" });
+      const form = el("form", {}, el("h2", {}, "Folder"), field("Name", name), field("Space", space));
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -2058,7 +2133,8 @@ export class App {
       form.onsubmit = async (e) => {
         e.preventDefault();
         if (name.value.trim() && name.value.trim() !== f.name) await this.be.renameFolder(f.id, name.value.trim());
-        if ((profile.value || null) !== f.profile) await this.be.setFolderProfile(f.id, profile.value || null);
+        if (space.value !== this.spaceOf("folder", f.id)) await this.be.moveToSpace("folder", f.id, space.value ? Number(space.value) : null);
+        await this.refreshSpaces();
         close();
         await this.refreshTree();
       };
@@ -2082,7 +2158,7 @@ export class App {
     const all = this.vault.unlocked ? await this.be.secretList().catch(() => []) : [];
     const keys = all.filter((k) => k.kind === "ssh_key");
     const seeds = all.filter((k) => k.kind === "totp");
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], profile: null, notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -2093,12 +2169,12 @@ export class App {
       const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
       const jump = makeSelect([["", "Direct"], ...this.tree.servers.filter((x) => x.id !== s.id).map((x): [string, string] => [String(x.id), x.name])], s.jump == null ? "" : String(s.jump), { "data-name": "jump" });
-      const profile = makeSelect(profileOptions(this.tree.profiles, "Its folder's, or every profile"), s.profile ?? "", { "data-name": "profile" });
+      const space = makeSelect(this.spaceOptions("General (every Space)"), existing ? this.spaceOf("server", s.id) : this.tree.active_space === null ? "" : String(this.tree.active_space), { "data-name": "space" });
       const envKind = makeSelect([["", "Not said"], ["production", "Production"], ["staging", "Staging"], ["dev", "Development"]], s.env_kind ?? "", { "data-name": "env-kind" });
       const proxy = makeSelect([["", "Direct"], ...this.tree.proxies.map((p): [string, string] => [String(p.id), p.name])], s.proxy == null ? "" : String(s.proxy), { "data-name": "proxy" });
       const network = el("input", { value: s.network ?? "", name: "network", autocomplete: "off", spellcheck: "false", placeholder: "tailscale:work-tailnet (optional)" });
       const aiPolicy = makeSelect([["ask", "Ask me every time"], ["read_only_auto", "Let commands that only read go through"], ["blocked", "Never let an agent use it"]], s.ai_policy, { "data-name": "ai-policy" });
-      const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false", placeholder: "nginx + API node, logs in /var/log/acme" }, s.notes);
+      const notes = el("textarea", { name: "notes", rows: "2", spellcheck: "false", placeholder: "nginx + API node, logs in /var/log/your-service" }, s.notes);
       const tunnelsBtn = el("button", { class: "btn", type: "button", "data-act": "server-tunnels" }, s.forwards.length ? `Tunnels (${s.forwards.length})…` : "Tunnels…");
       tunnelsBtn.onclick = () => {
         close();
@@ -2123,7 +2199,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Address", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Profile", profile), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Address", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Space", space), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -2133,7 +2209,7 @@ export class App {
         if (!host.value.trim()) return void (err.textContent = "The address is required");
         const portN = Number(port.value);
         if (!Number.isInteger(portN) || portN < 1 || portN > 65535) return void (err.textContent = "The port must be a number from 1 to 65535");
-        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, profile: profile.value || null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null, ai_policy: aiPolicy.value as Server["ai_policy"] };
+        const next: Server = { ...s, name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: portN, user: user.value.trim(), auth: auth.value as Server["auth"], key_path: key.value.trim(), jump: jump.value ? Number(jump.value) : null, parent: folder.value ? Number(folder.value) : null, env_kind: (envKind.value || null) as Server["env_kind"], proxy: proxy.value ? Number(proxy.value) : null, notes: notes.value.trim(), network: network.value.trim() || null, ai_policy: aiPolicy.value as Server["ai_policy"] };
         const loginSecret = auth.value === "agent" || auth.value === "vaultkey" ? (s.has_secret ? "" : null) : clearLogin.checked ? "" : login.value || null;
         const sudoSecret = sudo.value || null;
         if ((loginSecret || sudoSecret) && !this.vault.unlocked) {
@@ -2146,6 +2222,8 @@ export class App {
         }
         try {
           const id = await this.be.saveServer(next, loginSecret, sudoSecret);
+          if (space.value !== (existing ? this.spaceOf("server", id) : "") || (!existing && space.value)) await this.be.moveToSpace("server", id, space.value ? Number(space.value) : null);
+          await this.refreshSpaces();
           if (auth.value === "vaultkey") await this.be.serverSetKey(id, Number(vaultKey.value));
           const wantTotp = mfa.value ? Number(mfa.value) : null;
           if (wantTotp !== (s.vault_totp ?? null)) await this.be.serverSetTotp(id, wantTotp);

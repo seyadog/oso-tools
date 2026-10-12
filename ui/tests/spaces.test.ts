@@ -5,14 +5,14 @@ import { leaf } from "../src/tree";
 
 const tree = {
   folders: [
-    { id: 10, name: "prod", parent: null, expanded: true, profile: null },
-    { id: 11, name: "eu", parent: 10, expanded: true, profile: null },
-    { id: 12, name: "other", parent: null, expanded: true, profile: null },
+    { id: 10, name: "prod", parent: null, expanded: true },
+    { id: 11, name: "eu", parent: 10, expanded: true },
+    { id: 12, name: "other", parent: null, expanded: true },
   ],
   servers: [1, 2, 3, 4, 5].map((id) => ({ id, name: `s${id}`, parent: ({ 2: 10, 3: 11, 4: 12 } as Record<number, number>)[id] ?? null })),
 } as unknown as Pick<TreeData, "servers" | "folders">;
 
-const space = (over: Partial<Space> = {}): Space => ({ ...emptySpace(), name: "Acme", ...over });
+const space = (over: Partial<Space> = {}): Space => ({ ...emptySpace(), name: "Example", ...over });
 
 describe("what a Space covers", () => {
   it("is its servers and everything under its folders, any depth, without what was deleted", () => {

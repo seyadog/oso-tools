@@ -151,7 +151,7 @@ export function tunnelForm(ctx: Ctx, serverId: number | null, forward: Forward |
       const bind = el("input", { value: forward ? String(forward.bind_port) : "", inputmode: "numeric", name: "bind", autocomplete: "off" });
       const host = el("input", { value: forward?.host ?? "", name: "host", autocomplete: "off", spellcheck: "false", placeholder: "db.internal" });
       const port = el("input", { value: forward?.port ? String(forward.port) : "", inputmode: "numeric", name: "port", autocomplete: "off" });
-      const name = el("input", { value: forward?.name ?? "", name: "tunnel-name", autocomplete: "off", spellcheck: "false", placeholder: "postgres of acme (optional)" });
+      const name = el("input", { value: forward?.name ?? "", name: "tunnel-name", autocomplete: "off", spellcheck: "false", placeholder: "postgres of your-project (optional)" });
       const auto = el("input", { type: "checkbox", id: "tunnel-auto", name: "auto" }) as HTMLInputElement;
       auto.checked = forward?.auto ?? false;
       const bindLabel = el("label", {}, "");

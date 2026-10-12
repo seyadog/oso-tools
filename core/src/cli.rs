@@ -1,5 +1,5 @@
 //! oso's command line. Every command asks the running window (see `control`); there is no command that prints a
-//! secret. `oso run` hands a profile's secrets to a program you name, as environment variables.
+//! secret. `oso run` hands the secrets of a Space (or of General) to a program you name, as environment variables.
 
 use crate::control;
 use serde_json::{Value, json};
@@ -65,19 +65,19 @@ impl Term for RealTerm {
 }
 
 /// The commands of the command line, or `None` when `args` is not one of them (the window starts instead).
-pub const COMMANDS: [&str; 8] = ["status", "unlock", "lock", "profile", "run", "ssh", "host", "scan"];
+pub const COMMANDS: [&str; 8] = ["status", "unlock", "lock", "space", "run", "ssh", "host", "scan"];
 
 pub fn is_command(args: &[String]) -> bool {
     args.first().is_some_and(|a| COMMANDS.contains(&a.as_str()))
 }
 
 const USAGE: &str = "oso commands:
-  oso status                         is oso open, the vault locked, which profile
+  oso status                         is oso open, the vault locked, which Space
   oso unlock | lock                  the vault (the master password is asked here, not shown)
-  oso profile [use <name>]           list the profiles, or switch to one
-  oso run [-p profile] -- cmd...     run a program with the secrets of a profile in its environment
+  oso space [use <name>]             list the Spaces, or work in one (General: the things that are in no Space)
+  oso run [-s space] -- cmd...       run a program with the secrets of a Space (and General's) in its environment
   oso ssh <host>                     open a host in oso's window
-  oso host add <name> <address> [--user U] [--port N] [--auth agent|key|password] [--key FILE] [--profile P] [--notes TEXT]
+  oso host add <name> <address> [--user U] [--port N] [--auth agent|key|password] [--key FILE] [--space S] [--notes TEXT]
   oso scan <dir> [--import]          find .env files with secrets in a folder (and bring them into the vault)";
 
 fn ask(socket: &Path, req: Value, t: &mut dyn Term) -> Option<Value> {
@@ -105,7 +105,7 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
                 (_, Some(true)) => "unlocked",
                 _ => "locked",
             };
-            t.out(&format!("oso is open · vault: {vault} · profile: {}", v["profile"].as_str().unwrap_or("?")));
+            t.out(&format!("oso is open · vault: {vault} · Space: {}", v["space"].as_str().unwrap_or("?")));
             0
         }
         ["unlock"] => {
@@ -127,20 +127,21 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
             t.out("Vault locked.");
             0
         }
-        ["profile"] => {
-            let Some(v) = ask(socket, json!({ "cmd": "profiles" }), t) else { return 1 };
-            let active = v["active"].as_str().unwrap_or("");
-            for p in v["profiles"].as_array().into_iter().flatten() {
-                let id = p["id"].as_str().unwrap_or("");
-                t.out(&format!("{} {} ({id})", if id == active { "*" } else { " " }, p["name"].as_str().unwrap_or("")));
+        ["space"] => {
+            let Some(v) = ask(socket, json!({ "cmd": "spaces" }), t) else { return 1 };
+            let active = v["active"].as_str().unwrap_or("General");
+            for p in v["spaces"].as_array().into_iter().flatten() {
+                let name = p["name"].as_str().unwrap_or("");
+                t.out(&format!("{} {name}", if name == active { "*" } else { " " }));
             }
             0
         }
-        ["profile", "use", name] => {
-            let Some(v) = ask(socket, json!({ "cmd": "profile_use", "profile": name }), t) else { return 1 };
-            t.out(&format!("Profile: {}", v["profile"].as_str().unwrap_or(name)));
-            for p in v["problems"].as_array().into_iter().flatten() {
-                t.err(&format!("  {}", p.as_str().unwrap_or("")));
+        ["space", "use", name] => {
+            let Some(v) = ask(socket, json!({ "cmd": "space_use", "space": name }), t) else { return 1 };
+            t.out(&format!("Space: {}", v["space"].as_str().unwrap_or(name)));
+            // oso does not switch an account by itself: the window asks first
+            for c in v["changes"].as_array().into_iter().flatten() {
+                t.err(&format!("  this Space asks for the {} account {}, and {} is in use: switch it in oso's window", c["tool"].as_str().unwrap_or(""), c["wanted"].as_str().unwrap_or(""), c["current"].as_str().unwrap_or("none")));
             }
             0
         }
@@ -151,18 +152,18 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
         }
         ["run", rest @ ..] => {
             let (profile, command) = match rest {
-                ["-p", p, "--", cmd @ ..] | ["--profile", p, "--", cmd @ ..] => (Some(*p), cmd),
+                ["-s", p, "--", cmd @ ..] | ["--space", p, "--", cmd @ ..] => (Some(*p), cmd),
                 ["--", cmd @ ..] => (None, cmd),
                 _ => {
-                    t.err("usage: oso run [-p profile] -- command [arguments…]");
+                    t.err("usage: oso run [-s space] -- command [arguments…]");
                     return 2;
                 }
             };
             if command.is_empty() {
-                t.err("usage: oso run [-p profile] -- command [arguments…]");
+                t.err("usage: oso run [-s space] -- command [arguments…]");
                 return 2;
             }
-            let Some(v) = ask(socket, json!({ "cmd": "run_env", "profile": profile, "command": command }), t) else { return 1 };
+            let Some(v) = ask(socket, json!({ "cmd": "run_env", "space": profile, "command": command }), t) else { return 1 };
             let mut env: Vec<(String, String)> = std::env::vars().collect();
             for pair in v["env"].as_array().into_iter().flatten() {
                 if let (Some(k), Some(val)) = (pair[0].as_str(), pair[1].as_str()) {
@@ -181,7 +182,7 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
                     "--port" => "port",
                     "--auth" => "auth",
                     "--key" => "key",
-                    "--profile" => "profile",
+                    "--space" => "space",
                     "--notes" => "notes",
                     other => {
                         t.err(&format!("unknown option {other}\n{USAGE}"));

@@ -30,10 +30,10 @@ export interface Server {
   vault_totp?: number | null;
   /** The secret id of the key it logs in with, when that is a key of the vault (only in what `tree` returns, with the vault unlocked). */
   vault_key?: number | null;
-  /** Its own profile (null: its folder's, else every profile). */
-  profile: string | null;
-  /** Where it ended up: its own or its folder's (only in what `tree` returns). */
-  profile_eff?: string | null;
+  /** The Space that lists this server itself (null: none does; only in what `tree` returns). */
+  space?: number | null;
+  /** Every Space it is in, also through a folder (none: it is General's; only in what `tree` returns). */
+  spaces_of?: number[];
 }
 export interface Forward {
   /** 0 for one that is not saved yet. */
@@ -51,23 +51,37 @@ export interface Folder {
   name: string;
   parent: number | null;
   expanded: boolean;
-  profile: string | null;
+  /** The Space that lists this folder (and so everything in it) itself (null: none; only in what `tree` returns). */
+  space?: number | null;
 }
-export interface Profile {
-  id: string;
-  name: string;
+/** What a Space (or General) fixes for the machine while it is in use: all optional. */
+export interface SpaceSettings {
+  /** The Tailscale account to be on. oso asks before switching to it. */
+  tailscale_account: string | null;
+  /** The GitHub account (`host/login`) for `gh`. oso asks before switching to it. */
+  gh_user: string | null;
   /** Id of the proxy its local terminals go out through. */
   proxy: number | null;
-  /** The GitHub account (`host/login`) to use while it is active. */
-  gh_user: string | null;
-  /** The Tailscale account to be on while it is active. */
-  tailscale_account: string | null;
-  /** `AWS_PROFILE` for its local terminals. */
+  /** `AWS_PROFILE` for its local terminals (a name of `~/.aws/config`). */
   aws_profile: string | null;
   /** `KUBECONFIG` for them. */
   kubeconfig: string | null;
   /** Shown in red. */
   production: boolean;
+}
+/** An account a Space asks for that is not the one in use. */
+export interface AccountChange {
+  tool: "github" | "tailscale";
+  wanted: string;
+  /** What to hand to `accountUse`. */
+  id: string;
+  current: string;
+}
+/** What turning the old profiles into Spaces did (told once). */
+export interface ProfileMigration {
+  spaces: string[];
+  active: string | null;
+  backup: string;
 }
 export interface CloudOptions {
   aws_profiles: string[];
@@ -120,15 +134,14 @@ export interface Proxy {
   kind: "socks5" | "http";
   host: string;
   port: number;
-  profile: string | null;
 }
 export interface TreeData {
   folders: Folder[];
   servers: Server[];
-  profiles: Profile[];
   proxies: Proxy[];
-  active_profile: string;
-  /** The sidebar shows the hosts of every profile. */
+  /** The Space the window works in (null: General). */
+  active_space: number | null;
+  /** The sidebar shows what is in every Space. */
   view_all: boolean;
 }
 export interface VaultStatus {
@@ -155,7 +168,6 @@ export interface SecretMeta {
   id: number;
   name: string;
   kind: SecretKind;
-  profile: string | null;
   env_var: string | null;
   agent_visible: boolean;
   notes: string;
@@ -202,7 +214,7 @@ export interface ImportResult {
 export interface ApprovalRequest {
   id: number;
   pane: number;
-  /** "Claude in acme-api, pane 2". */
+  /** "Claude in example-api, pane 2". */
   label: string;
   agent: string;
   action: "run" | "sudo" | "run_with" | "tunnel";
@@ -272,11 +284,10 @@ export interface TunnelRef {
   forward: number;
 }
 /** One unit of work: what it uses, its notes, and the layout of its tabs. */
-export interface Space {
+export interface Space extends SpaceSettings {
   /** 0: not saved yet. */
   id: number;
   name: string;
-  profile: string | null;
   folders: string[];
   servers: number[];
   server_folders: number[];
@@ -354,21 +365,28 @@ export interface Backend {
   vaultReveal(serverId: number, sudo: boolean): Promise<string | null>;
   vaultSet(serverId: number, sudo: boolean, secret: string | null): Promise<void>;
   vaultChangeMaster(master: string): Promise<void>;
-  /** Adds a profile (`id` empty) or renames one; returns its id. */
-  profileSave(id: string, name: string): Promise<string>;
-  profileDelete(id: string): Promise<void>;
-  /** Switches the profile and the accounts it asks for; returns what could not be switched, in words. */
-  setActiveProfile(id: string): Promise<string[]>;
+  /** Works in this Space (null: General). Nothing is switched by itself: see `spaceAccountChanges`. */
+  setActiveSpace(id: number | null): Promise<void>;
+  /** The accounts this Space (or General) asks for that are not the ones in use: what to ask before switching. */
+  spaceAccountChanges(id: number | null): Promise<AccountChange[]>;
+  /** What a Space (null: General) fixes. */
+  spaceSettings(id: number | null): Promise<SpaceSettings>;
+  spaceSetSettings(id: number | null, settings: SpaceSettings): Promise<void>;
+  /** Puts a server, a folder or a secret in one Space, or (null) in General. */
+  moveToSpace(kind: "server" | "folder" | "secret", id: number, space: number | null): Promise<void>;
+  /** The Space each secret is in (the ones that are not in the answer are General's). */
+  secretSpaces(): Promise<Record<number, number>>;
+  /** The secret that is this computer's sudo password, if there is one. */
+  localSudoSecret(): Promise<number | null>;
+  /** What turning the old profiles into Spaces did at start-up; null when nothing (or it was told). */
+  spaceProfileMigration(): Promise<ProfileMigration | null>;
   accounts(): Promise<AccountsView>;
   accountUse(tool: "github" | "tailscale", id: string): Promise<void>;
-  profileSetAccounts(profile: string, ghUser: string | null, tailscaleAccount: string | null): Promise<void>;
   /** "Connect anyway": the next open of this server skips the network question. */
   networkAccept(serverId: number): Promise<void>;
   setViewAll(all: boolean): Promise<void>;
-  setFolderProfile(id: number, profile: string | null): Promise<void>;
   proxySave(p: Proxy): Promise<number>;
   proxyDelete(id: number): Promise<void>;
-  profileSetProxy(profile: string, proxy: number | null): Promise<void>;
   /** What `~/.ssh` has that could come in (read only). */
   importPreview(): Promise<ImportPreview>;
   importApply(req: ImportRequest): Promise<ImportResult>;
@@ -385,7 +403,6 @@ export interface Backend {
   protonPreview(path: string): Promise<ProtonItem[]>;
   protonImport(path: string, which: number[]): Promise<ImportSummary>;
   cloudOptions(): Promise<CloudOptions>;
-  profileSetCloud(profile: string, awsProfile: string | null, kubeconfig: string | null, production: boolean): Promise<void>;
   onCli(f: (e: CliEvent) => void): void;
   integrationStatus(): Promise<{ claude: boolean; opencode: boolean; codex: boolean }>;
   /** What connecting (or removing) an agent would change in its files; writes nothing. */
