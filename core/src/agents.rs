@@ -1,5 +1,5 @@
 //! AI agents that run in a terminal of oso (claude, opencode, codex, or whatever the person lists): which ones run where,
-//! and what each is doing. This is the part herdr is used for.
+//! and what each is doing. This is what tells you which agent needs you.
 //!
 //! What an agent is doing comes from the most exact signal there is, in this order (the first that applies wins):
 //! 1. `approval`: it has a request waiting in oso → it needs you;

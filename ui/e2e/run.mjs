@@ -1337,9 +1337,9 @@ await page.evaluate(({ t1, t2, t3, now }) => {
   const m = globalThis.__osoMock;
   m.agents.length = 0;
   m.agents.push(
-    { sid: t1, kind: "claude", name: "Claude Code", pid: 11, cwd: "/home/seya/code/acme", folder: "acme", branch: "feature/login", state: "working", since: now - 60000, source: "hook" },
-    { sid: t2, kind: "opencode", name: "OpenCode", pid: 12, cwd: "/home/seya/code/api", folder: "api", branch: "main", state: "needs_you", since: now - 120000, source: "hook" },
-    { sid: t3, kind: "codex", name: "Codex", pid: 13, cwd: "/home/seya/code/web", folder: "web", branch: "", state: "needs_you", since: now - 30000, source: "hook" },
+    { sid: t1, kind: "claude", name: "Claude Code", pid: 11, cwd: "/home/me/code/acme", folder: "acme", branch: "feature/login", state: "working", since: now - 60000, source: "hook" },
+    { sid: t2, kind: "opencode", name: "OpenCode", pid: 12, cwd: "/home/me/code/api", folder: "api", branch: "main", state: "needs_you", since: now - 120000, source: "hook" },
+    { sid: t3, kind: "codex", name: "Codex", pid: 13, cwd: "/home/me/code/web", folder: "web", branch: "", state: "needs_you", since: now - 30000, source: "hook" },
   );
   return window.oso.pollAgents();
 }, { t1, t2, t3, now });

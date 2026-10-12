@@ -26,7 +26,7 @@
 
 oso es un vault de secretos con espacio de terminales para Linux (Fedora primero). Lo abres, pones tu master password y trabajas desde ahí todo el día. Guarda llaves SSH, contraseñas, API keys, y maneja cuentas (GitHub, Tailscale), proxies y túneles, organizado por **perfiles** ("trabajo", "personal"). Cambiar de perfil cambia todo junto.
 
-Cada terminal que oso abre, local o SSH, nace con los secretos de su perfil ya puestos, así que herdr, Claude Code, OpenCode o Codex funcionan sin `.env` ni credenciales pegadas en el chat. Cuando un agente de IA necesita tocar un servidor o usar `sudo`, no recibe la contraseña: le pide a oso que lo haga, y oso le muestra al usuario qué panel pide qué para que lo apruebe.
+Cada terminal que oso abre, local o SSH, nace con los secretos de su perfil ya puestos, así que Claude Code, OpenCode o Codex funcionan sin `.env` ni credenciales pegadas en el chat. Cuando un agente de IA necesita tocar un servidor o usar `sudo`, no recibe la contraseña: le pide a oso que lo haga, y oso le muestra al usuario qué panel pide qué para que lo apruebe.
 
 Ese acceso solo existe **dentro de oso**: cada terminal recibe un token único y el daemon lo exige. Un agente abierto fuera de oso no tiene acceso.
 
