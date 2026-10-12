@@ -283,7 +283,7 @@ pub fn needs_vault(store: &Store, id: u64) -> bool {
 pub fn opts_for(store: &Store, vault: &mut Vault, id: u64, argv: Vec<String>, rows: u16, cols: u16, use_vault: bool) -> SpawnOpts {
     let login_expected = id != LOCAL && store.server(id).is_some_and(|s| s.auth == Auth::Password);
     let fills = if use_vault && id != LOCAL { autofills(store, vault, id) } else { vec![] };
-    SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false }
+    SpawnOpts { argv, rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false, space: None }
 }
 
 /// The command, title and secrets to open `id`. `unlocked` says whether the saved secrets may be used.

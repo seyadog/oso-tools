@@ -475,3 +475,21 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .rp-detail .lbl { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-top: 2px; }
 .rp-detail .out { max-height: 20em; }
 .modal .cmd.has-sudo { border-color: var(--amber); }
+
+/* Block 3: Spaces */
+.row.space { cursor: pointer; }
+.row.space .gi { color: var(--accent); flex: none; display: inline-flex; }
+.row.space .tail { color: var(--green); font-size: 11.5px; min-width: 14px; text-align: right; }
+.row.space .acts { display: none; gap: 0; }
+.row.space:hover .acts, .row.space:focus-within .acts { display: inline-flex; }
+.row.space:hover .tail, .row.space:focus-within .tail { display: none; }
+.space-form .checklist { max-height: 170px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--bg); }
+.space-form .check { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; cursor: pointer; }
+.space-form .check input { width: auto; height: auto; margin-top: 3px; }
+.space-form .check small { display: block; color: var(--muted); font-size: 12px; }
+.space-form textarea { width: 100%; background: var(--bg); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 10px; color: inherit; font: inherit; resize: vertical; }
+.space-form textarea:focus { outline: none; border-color: var(--accent); }
+.space-form .hint.warn { color: var(--amber); }
+.space-form .dim { color: var(--muted); }
+.space-form .help { color: var(--muted); font-size: 12px; margin: 3px 0 10px; line-height: 1.4; }
+.space-form .space-tabs .keyrow, .space-form .space-folders .keyrow { padding: 2px 0; }

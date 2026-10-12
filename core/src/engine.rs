@@ -3,6 +3,7 @@
 //! is tested without a screen.
 
 use crate::accounts::{self, AccountsView, Runner};
+use crate::spaces::{Space, Spaces};
 use crate::agent::{self, KeyProvider};
 use crate::connect::{self, LOCAL};
 use crate::daemon::{self, Daemon, Sink, Stream};
@@ -141,13 +142,31 @@ pub struct Engine {
     network_ok: std::collections::HashSet<u64>,
     /// Where oso's own ssh-agent listens, once it runs (`start_agent`).
     pub agent_sock: Option<std::path::PathBuf>,
+    /// The agent that was there before oso's, which oso's agents hand on to.
+    agent_upstream: Option<std::path::PathBuf>,
+    /// This engine, as the agents of the Spaces need it (set by `start_agent_at`).
+    self_ref: Option<std::sync::Weak<std::sync::Mutex<Engine>>>,
+    /// One ssh-agent per Space that has had a terminal: it offers the keys of that Space and no others.
+    space_agents: HashMap<u64, agent::Agent>,
+    /// The Spaces (saved in `oso-spaces.json`).
+    pub spaces: Spaces,
+}
+
+/// Where and how a session is opened, beyond which server it is.
+#[derive(Default, Clone, Debug)]
+pub struct OpenCtx {
+    /// The Space it belongs to.
+    pub space: Option<u64>,
+    /// The folder a local terminal opens in (default: the first folder of its Space, else the home folder).
+    pub cwd: Option<String>,
 }
 
 impl Engine {
     pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
+        let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -197,6 +216,15 @@ impl Engine {
     /// Opens a session for `server_id` (`LOCAL` for this computer). Saved secrets are typed for you when the
     /// vault is unlocked; if the server needs one and it is locked, this says so instead of connecting.
     pub fn open(&mut self, server_id: u64, rows: u16, cols: u16, use_vault: bool) -> std::result::Result<SessionInfo, OpenError> {
+        self.open_in(server_id, rows, cols, use_vault, OpenCtx::default())
+    }
+
+    /// `open`, for a terminal that belongs to a Space and/or opens in a folder.
+    pub fn open_in(&mut self, server_id: u64, rows: u16, cols: u16, use_vault: bool, ctx: OpenCtx) -> std::result::Result<SessionInfo, OpenError> {
+        let space = match ctx.space {
+            Some(id) => Some(self.spaces.get(id).cloned().ok_or_else(|| OpenError::Other("this Space no longer exists".into()))?),
+            None => None,
+        };
         if server_id != LOCAL && self.store.server(server_id).is_none() {
             return Err(OpenError::NoSuchServer);
         }
@@ -216,24 +244,33 @@ impl Engine {
         }
         let mut plan = connect::plan(&self.store, &mut self.vault, server_id, rows, cols, use_vault).ok_or(OpenError::NoSuchServer)?;
         if server_id == LOCAL {
-            self.prepare_local(&mut plan, use_vault);
+            self.prepare_local(&mut plan, use_vault, space.as_ref(), ctx.cwd.as_deref());
         } else {
             self.agent_env(server_id, &mut plan.opts)?;
         }
         let title = plan.title.clone();
-        self.spawn(plan.opts, title, server_id).map_err(|e| OpenError::Other(format!("{e:#}")))
+        self.spawn(plan.opts, title, server_id, &ctx).map_err(|e| OpenError::Other(format!("{e:#}")))
     }
 
-    /// A terminal of this computer is born inside the active profile: its environment says so, and (when the vault is
-    /// unlocked) carries the secrets the profile fills in, and the sudo password is typed at sudo's prompt.
-    fn prepare_local(&mut self, plan: &mut connect::Plan, use_vault: bool) {
-        let profile = self.active_profile.clone();
+    /// A terminal of this computer is born inside the active profile (or the one of its Space): its environment says so,
+    /// and (when the vault is unlocked) carries the secrets the profile fills in, and the sudo password is typed at sudo's
+    /// prompt. In a Space it carries the Space's secrets instead of the profile's, its own ssh-agent, and the Space's
+    /// first folder (or `cwd`) as its working folder.
+    fn prepare_local(&mut self, plan: &mut connect::Plan, use_vault: bool, space: Option<&Space>, cwd: Option<&str>) {
+        let profile = space.and_then(|s| s.profile.clone()).filter(|p| self.store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| self.active_profile.clone());
         let mut env = connect::client_env();
         env.push(("OSO".into(), "1".into()));
         env.push(("OSO_PROFILE".into(), profile.clone()));
+        if let Some(sp) = space {
+            env.push(("OSO_SPACE".into(), sp.name.clone()));
+        }
         let unlocked = use_vault && self.vault.is_unlocked();
         if unlocked {
-            for (name, value) in self.vault.env_for(&profile, true) {
+            let vars = match space {
+                Some(sp) => self.vault.env_for_ids(&sp.secrets, true),
+                None => self.vault.env_for(&profile, true),
+            };
+            for (name, value) in vars {
                 env.retain(|(k, _)| *k != name);
                 env.push((name, value.to_string()));
             }
@@ -244,16 +281,37 @@ impl Engine {
             env.retain(|(name, _)| *name != k);
             env.push((k, v));
         }
-        // git and ssh in this terminal find oso's agent (which hands on to the agent that was there before)
-        if let Some(sock) = &self.agent_sock {
+        // git and ssh in this terminal find oso's agent (which hands on to the agent that was there before); a Space
+        // gets one that offers only its own keys
+        let sock = match space {
+            Some(sp) => self.space_agent_sock(sp.id).or_else(|| self.agent_sock.clone()),
+            None => self.agent_sock.clone(),
+        };
+        if let Some(sock) = sock {
             env.retain(|(k, _)| k != "SSH_AUTH_SOCK");
             env.push(("SSH_AUTH_SOCK".into(), sock.to_string_lossy().into_owned()));
         }
         plan.opts.env = Some(env);
-        plan.opts.agent = self.agent_ok();
+        // a terminal of a Space only gets a token from a background server that keeps the Space (an older one would
+        // forget it, and the agent would then see more than its Space): without that, no token at all
+        plan.opts.agent = self.agent_ok() && (space.is_none() || self.space_ok());
+        if let (Some(sp), true) = (space, plan.opts.agent) {
+            plan.opts.space = Some(sp.id);
+        }
+        let folder = cwd.map(crate::spaces::expand_home).or_else(|| space.and_then(Space::first_folder)).filter(|p| p.is_dir());
+        if folder.is_some() {
+            plan.opts.cwd = folder;
+        }
         let name = self.store.profiles.iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or(profile.clone());
-        if profile != DEFAULT_PROFILE {
-            plan.title = format!("{} · {name}", plan.title);
+        match space {
+            Some(sp) => {
+                plan.title = format!("{} · {}", plan.title, sp.name);
+                if !plan.opts.agent {
+                    plan.title.push_str(" · no agent access (restart oso's background server)");
+                }
+            }
+            None if profile != DEFAULT_PROFILE => plan.title = format!("{} · {name}", plan.title),
+            None => {}
         }
         if self.vault.exists() && !unlocked {
             plan.title.push_str(" · vault locked");
@@ -313,6 +371,13 @@ impl Engine {
         self.store.save()
     }
 
+    /// Does the background server in use keep the Space of a session (version 0.4 and later)?
+    pub fn space_ok(&self) -> bool {
+        let v = self.daemon.as_ref().map(|d| d.server_version.as_str()).unwrap_or("");
+        let mut parts = v.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (0, 4)
+    }
+
     /// Does the background server in use know about tokens (an older one, still running, does not)?
     pub fn agent_ok(&self) -> bool {
         let v = self.daemon.as_ref().map(|d| d.server_version.as_str()).unwrap_or("");
@@ -320,12 +385,18 @@ impl Engine {
         (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (0, 2)
     }
 
-    fn spawn(&mut self, opts: SpawnOpts, title: String, server_id: u64) -> Result<SessionInfo> {
+    fn spawn(&mut self, opts: SpawnOpts, title: String, server_id: u64, ctx: &OpenCtx) -> Result<SessionInfo> {
         let make = self.sink_for();
         let d = self.daemon.as_ref().context("the background server is not running")?;
         let session = d.spawn_stream(opts, make)?;
         let sid = session.sid();
-        let meta = serde_json::json!({ "title": title, "server_id": server_id });
+        let mut meta = serde_json::json!({ "title": title, "server_id": server_id });
+        if let Some(id) = ctx.space {
+            meta["space"] = id.into();
+        }
+        if let Some(c) = &ctx.cwd {
+            meta["cwd"] = c.clone().into();
+        }
         session.set_meta(&meta);
         self.sessions.insert(sid, session);
         Ok(SessionInfo { sid, title, server_id, meta })
@@ -335,7 +406,8 @@ impl Engine {
     pub fn reconnect(&mut self, sid: u64, rows: u16, cols: u16, use_vault: bool) -> std::result::Result<SessionInfo, OpenError> {
         let meta = self.sessions.get(&sid).map(|_| ()).and(self.meta_of(sid));
         let server_id = meta.as_ref().and_then(|m| m.get("server_id")).and_then(Value::as_u64).ok_or(OpenError::NoSuchServer)?;
-        let mut info = self.open(server_id, rows, cols, use_vault)?;
+        let ctx = OpenCtx { space: meta.as_ref().and_then(|m| m.get("space")).and_then(Value::as_u64), cwd: meta.as_ref().and_then(|m| m.get("cwd")).and_then(Value::as_str).map(str::to_string) };
+        let mut info = self.open_in(server_id, rows, cols, use_vault, ctx)?;
         // the new session keeps what the window had stored for the old one (its screen and place)
         if let Some(old) = meta {
             let mut merged = old;
@@ -676,11 +748,61 @@ impl Engine {
 
     pub fn start_agent_at(engine: &Arc<std::sync::Mutex<Engine>>, path: std::path::PathBuf, upstream: Option<std::path::PathBuf>) -> Result<agent::Agent> {
         let keys: Arc<dyn KeyProvider> = Arc::clone(engine) as Arc<dyn KeyProvider>;
-        let a = agent::start(path.clone(), keys, upstream)?;
+        let a = agent::start(path.clone(), keys, upstream.clone())?;
         if let Ok(mut e) = engine.lock() {
             e.agent_sock = Some(path);
+            e.agent_upstream = upstream;
+            e.self_ref = Some(Arc::downgrade(engine));
         }
         Ok(a)
+    }
+
+    /// The socket of the ssh-agent of a Space (started the first time it is needed). It offers the keys of the Space and
+    /// no other key of the vault, and hands on to the agent that was there before oso's.
+    pub fn space_agent_sock(&mut self, space: u64) -> Option<std::path::PathBuf> {
+        if let Some(a) = self.space_agents.get(&space) {
+            return Some(a.path().to_path_buf());
+        }
+        let base = self.agent_sock.clone()?;
+        let me = self.self_ref.clone()?;
+        let path = base.with_file_name(format!("agent-space-{space}.sock"));
+        let keys: Arc<dyn KeyProvider> = Arc::new(SpaceKeys { engine: me, space });
+        match agent::start(path.clone(), keys, self.agent_upstream.clone()) {
+            Ok(a) => {
+                self.space_agents.insert(space, a);
+                Some(path)
+            }
+            // never fall back to the agent that offers every key: better the one the person had before oso
+            Err(_) => self.agent_upstream.clone(),
+        }
+    }
+
+    /// The keys of a Space (an id of a key that is not in the vault any more is simply not there).
+    pub fn space_identities(&self, space: u64) -> Vec<(Vec<u8>, String)> {
+        let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
+        self.parsed_keys().iter().filter(|(id, _, _)| ids.contains(id)).filter_map(|(_, k, name)| agent::identity_of(k, name)).collect()
+    }
+
+    pub fn space_sign(&self, space: u64, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>> {
+        let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
+        let (_, key, _) = self.parsed_keys().into_iter().filter(|(id, _, _)| ids.contains(id)).find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
+        agent::sign_with(&key, data, flags)
+    }
+
+    // ---------------------------------------------------------------- spaces
+
+    pub fn spaces_list(&self) -> Vec<Space> {
+        self.spaces.list().to_vec()
+    }
+
+    pub fn space_save(&mut self, space: &Space) -> Result<u64> {
+        self.spaces.save_space(space)
+    }
+
+    /// Deletes a Space. Terminals that were opened in it stay open, but an agent running there is refused from now on.
+    pub fn space_delete(&mut self, id: u64) -> Result<()> {
+        self.space_agents.remove(&id);
+        self.spaces.delete(id)
     }
 
     /// The keys of the vault that can sign (an encrypted one cannot), with the secret's name as comment.
@@ -1320,6 +1442,22 @@ fn check_ssh_key(text: &str) -> Result<String> {
 }
 
 /// The window's engine is also the key source of oso's agent: the keys exist while the vault is unlocked.
+/// The keys of one Space, for its own ssh-agent.
+struct SpaceKeys {
+    engine: std::sync::Weak<std::sync::Mutex<Engine>>,
+    space: u64,
+}
+
+impl KeyProvider for SpaceKeys {
+    fn identities(&self) -> Vec<(Vec<u8>, String)> {
+        self.engine.upgrade().and_then(|e| e.lock().ok().map(|e| e.space_identities(self.space))).unwrap_or_default()
+    }
+
+    fn sign(&self, blob: &[u8], data: &[u8], flags: u32) -> Option<Vec<u8>> {
+        self.engine.upgrade()?.lock().ok()?.space_sign(self.space, blob, data, flags)
+    }
+}
+
 impl KeyProvider for std::sync::Mutex<Engine> {
     fn identities(&self) -> Vec<(Vec<u8>, String)> {
         self.lock().map(|e| e.agent_identities()).unwrap_or_default()
@@ -1659,6 +1797,48 @@ mod tests {
         e.write(s.sid, b"echo [$OSO_PROFILE] w=$WORK_KEY d=$DEFAULT_KEY .\r");
         assert!(wait_for(&log, s.sid, "[default] w= d=default-v ."), "{:?}", text_of(&log, s.sid));
         e.close(s.sid);
+    }
+
+    #[test]
+    fn a_terminal_of_a_space_gets_its_secrets_its_folder_and_its_name_and_no_others() {
+        let (mut e, log) = engine("space-env");
+        e.vault_unlock("m").unwrap();
+        let inside = e.secret_save(api_key("in", "SPACE_KEY", None, true), Some("space-v")).unwrap();
+        let hidden = e.secret_save(api_key("hid", "HIDDEN_KEY", None, false), Some("hidden-v")).unwrap();
+        e.secret_save(api_key("out", "OTHER_KEY", None, true), Some("other-v")).unwrap();
+        let dir = temp("space-cwd");
+        let id = e.space_save(&Space { name: "Acme".into(), secrets: vec![inside, hidden], folders: vec![dir.to_string_lossy().into_owned()], ..Default::default() }).unwrap();
+        assert!(e.space_ok(), "the server of this version keeps the Space of a session");
+        let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: None }).unwrap();
+        assert_eq!(s.title, "Local · Acme");
+        assert_eq!(s.meta["space"], id, "the window learns which Space it belongs to");
+        e.write(s.sid, b"echo [$OSO_SPACE] s=$SPACE_KEY o=$OTHER_KEY h=$HIDDEN_KEY p=$PWD .\r");
+        let want = format!("[Acme] s=space-v o= h= p={} .", dir.display());
+        assert!(wait_for(&log, s.sid, &want), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // another folder, asked for by the window, wins over the Space's first one
+        let other = temp("space-cwd2");
+        let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: Some(other.to_string_lossy().into_owned()) }).unwrap();
+        e.write(s.sid, b"echo p=$PWD .\r");
+        assert!(wait_for(&log, s.sid, &format!("p={} .", other.display())), "{:?}", text_of(&log, s.sid));
+        e.close(s.sid);
+        // a Space that is gone opens nothing
+        e.space_delete(id).unwrap();
+        assert!(matches!(e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: None }), Err(OpenError::Other(m)) if m.contains("no longer exists")));
+    }
+
+    #[test]
+    fn a_terminal_keeps_its_space_and_folder_in_its_meta_so_that_opening_it_again_puts_it_back() {
+        let (mut e, _log) = engine("space-meta");
+        let dir = temp("space-meta-dir");
+        let id = e.space_save(&Space { name: "Acme".into(), ..Default::default() }).unwrap();
+        let live = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: Some(id), cwd: Some(dir.to_string_lossy().into_owned()) }).unwrap();
+        let meta = e.meta_of(live.sid).unwrap();
+        assert_eq!((meta["space"].as_u64(), meta["cwd"].as_str()), (Some(id), dir.to_str()));
+        let plain = e.open(LOCAL, 24, 120, true).unwrap();
+        assert!(e.meta_of(plain.sid).unwrap().get("space").is_none(), "a plain terminal belongs to no Space");
+        e.close(live.sid);
+        e.close(plain.sid);
     }
 
     #[test]

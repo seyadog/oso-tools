@@ -78,6 +78,9 @@ pub struct SpawnOpts {
     pub sudo_fill: Option<String>,
     /// The background server gives the session its token and `OSO_*` variables (see `daemon`).
     pub agent: bool,
+    /// The Space this terminal belongs to. The background server keeps it next to the token and hands it to the window
+    /// with every request of an agent that runs here, so what the agent may touch is decided there, not by the agent.
+    pub space: Option<u64>,
 }
 
 pub struct PtySession {
@@ -99,7 +102,7 @@ impl PtySession {
     /// belongs to it appears. `login_expected` says the first generic `Password:` prompt is the login
     /// (password auth) rather than a later `su`.
     pub fn spawn_with(opts: SpawnOpts) -> Result<Self> {
-        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env, tap, sudo_fill, agent: _ } = opts;
+        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env, tap, sudo_fill, agent: _, space: _ } = opts;
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -339,7 +342,7 @@ enum Backend {
 impl Session {
     #[cfg(all(test, unix))]
     pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
-        let opts = SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false };
+        let opts = SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None, sudo_fill: None, agent: false, space: None };
         Self::spawn_with(opts, None)
     }
 
@@ -563,7 +566,7 @@ mod tests {
     #[cfg(unix)]
     fn with_sudo_fill(script: &str, want: &str) -> String {
         let argv = vec!["sh".to_string(), "-c".into(), script.into()];
-        let opts = SpawnOpts { argv, rows: 24, cols: 100, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: Some("local-pw".into()), agent: false };
+        let opts = SpawnOpts { argv, rows: 24, cols: 100, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: Some("local-pw".into()), agent: false, space: None };
         let mut s = Session::spawn_with(opts, None).unwrap();
         wait_for(&mut s, want)
     }

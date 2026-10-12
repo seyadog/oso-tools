@@ -86,7 +86,7 @@ fn add_server(r: &Rig, sshd: &Sshd, name: &str, env: Option<EnvKind>, policy: Ai
 }
 
 fn call(r: &Rig, tool: &str, args: Value) -> Value {
-    r.handler.handle(AgentCall { sid: 2, title: "acme-api".into(), body: json!({ "tool": tool, "args": args, "agent": "claude-code" }) })
+    r.handler.handle(AgentCall { sid: 2, space: None, title: "acme-api".into(), body: json!({ "tool": tool, "args": args, "agent": "claude-code" }) })
 }
 
 fn audit(r: &Rig) -> Vec<Value> {
@@ -429,7 +429,7 @@ fn chain(name: &str) -> Chain {
 fn terminal(c: &Chain, name: &str) -> (u64, String, u64, RemoteHold) {
     let file = c.rig.dir.join(format!("{name}.env"));
     let script = format!("echo \"$OSO_PANE $OSO_TOKEN $OSO_SOCKET\" > {}; sleep 60", file.display());
-    let opts = SpawnOpts { argv: vec!["sh".into(), "-c".into(), script], rows: 24, cols: 80, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: None, agent: true };
+    let opts = SpawnOpts { argv: vec!["sh".into(), "-c".into(), script], rows: 24, cols: 80, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: None, agent: true, space: None };
     let session = c.daemon.spawn(opts).unwrap();
     let end = Instant::now() + Duration::from_secs(5);
     while !file.exists() && Instant::now() < end {

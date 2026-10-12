@@ -147,6 +147,46 @@ fn the_agent_signs_with_the_vault_open_and_has_nothing_when_it_is_locked() {
     assert!(identities(&sock).is_empty());
 }
 
+#[test]
+fn the_agent_of_a_space_offers_the_keys_of_that_space_and_signs_with_no_other() {
+    let dir = temp("space-agent");
+    let (a_text, _) = need_keygen!(dir, "acme", "ed25519");
+    let (b_text, _) = need_keygen!(dir, "beta", "ed25519");
+    let engine = engine_in(&dir);
+    let (a_id, _b_id) = {
+        let mut e = engine.lock().unwrap();
+        (e.secret_save(meta("acme key", SecretKind::SshKey), Some(&a_text)).unwrap(), e.secret_save(meta("beta key", SecretKind::SshKey), Some(&b_text)).unwrap())
+    };
+    let sock = dir.join("agent.sock");
+    let _agent = Engine::start_agent_at(&engine, sock.clone(), None).unwrap();
+    assert_eq!(identities(&sock).len(), 2, "the ordinary agent offers every key of the vault");
+    let space = engine.lock().unwrap().space_save(&oso_core::spaces::Space { name: "Acme".into(), secrets: vec![a_id], ..Default::default() }).unwrap();
+    let space_sock = engine.lock().unwrap().space_agent_sock(space).expect("the Space has its own agent");
+    assert_ne!(space_sock, sock);
+    assert_eq!(std::fs::metadata(&space_sock).unwrap().permissions().mode_bits(), 0o600);
+    let ids = identities(&space_sock);
+    assert_eq!(ids.iter().map(|i| i.1.as_str()).collect::<Vec<_>>(), ["acme key"], "only the Space's key");
+    let acme = ssh_key::PrivateKey::from_openssh(&a_text).unwrap().public_key().clone();
+    let beta = ssh_key::PrivateKey::from_openssh(&b_text).unwrap().public_key().clone();
+    assert!(verifies(&acme, b"data", &sign(&space_sock, &acme.to_bytes().unwrap(), b"data", 0).expect("signs with its own key")));
+    assert!(sign(&space_sock, &beta.to_bytes().unwrap(), b"data", 0).is_none(), "and with no key of another Space");
+    // the same socket is used again, and changing the Space changes what it offers without a restart
+    assert_eq!(engine.lock().unwrap().space_agent_sock(space), Some(space_sock.clone()));
+    let mut changed = engine.lock().unwrap().spaces_list()[0].clone();
+    changed.secrets.clear();
+    engine.lock().unwrap().space_save(&changed).unwrap();
+    assert!(identities(&space_sock).is_empty(), "a Space without keys offers none");
+    // locked: nothing, as everywhere
+    changed.secrets = vec![a_id];
+    engine.lock().unwrap().space_save(&changed).unwrap();
+    engine.lock().unwrap().vault_lock();
+    assert!(identities(&space_sock).is_empty());
+    // deleting the Space takes its agent away
+    engine.lock().unwrap().space_delete(space).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!space_sock.exists());
+}
+
 trait ModeBits {
     fn mode_bits(&self) -> u32;
 }

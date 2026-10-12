@@ -82,7 +82,7 @@ export const LABELS: Record<string, string> = {
   "tab.close": "Close this terminal",
   "tab.rename": "Rename this terminal",
   "broadcast.toggle": "Type in every terminal of the tab (broadcast), on or off",
-  "group.save": "Save this tab as a group",
+  "group.save": "Save this tab in a Space",
   "watch.toggle": "Tell me when this terminal is done, on or off",
   "files.open": "Copy files to or from this terminal's server",
   "tunnels.open": "Tunnels (port forwards)",

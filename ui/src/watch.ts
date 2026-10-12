@@ -1,7 +1,7 @@
 // "Tell me when this terminal is done": you start a long command, switch the watch on, and go do something else.
 // These are the rules for when it speaks, kept apart from the window so they can be tested.
 
-import { looksReady } from "./groups";
+import { looksReady } from "./layout";
 
 /** Output stopped and the terminal shows a prompt again: the command ended. */
 export const QUIET_AT_PROMPT_MS = 2500;

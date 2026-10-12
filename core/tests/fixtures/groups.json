@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "name": "ops",
+    "broadcast": true,
+    "shape": { "kind": "split", "side": true, "pm": 500, "a": { "kind": "leaf", "id": 0 }, "b": { "kind": "split", "side": false, "pm": 500, "a": { "kind": "leaf", "id": 1 }, "b": { "kind": "leaf", "id": 2 } } },
+    "panes": [
+      { "server": 2, "name": "web-1", "command": "tail -f /var/log/nginx/error.log" },
+      { "server": 3, "name": "db-1", "command": "" },
+      { "server": 0, "name": "Local", "command": "git status" }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "just a shell",
+    "broadcast": false,
+    "shape": { "kind": "leaf", "id": 0 },
+    "panes": [ { "server": 0, "name": "Local", "command": "" } ]
+  },
+  {
+    "id": 3,
+    "name": "edited by hand and wrong",
+    "broadcast": false,
+    "shape": { "kind": "split", "side": true, "pm": 500, "a": { "kind": "leaf", "id": 0 }, "b": { "kind": "leaf", "id": 7 } },
+    "panes": [ { "server": 2, "name": "web-1", "command": "" }, { "server": 3, "name": "db-1", "command": "" } ]
+  }
+]

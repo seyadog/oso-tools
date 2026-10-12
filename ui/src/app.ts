@@ -1,8 +1,10 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Activity, ApprovalRequest, Backend, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Activity, ApprovalRequest, Backend, Space, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
-import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
+import { looksReady, withoutPanes } from "./layout";
+import { SpacesCtx, newSpace, renderSpaces } from "./spaces_ui";
+import { emptySpace, openSpaces, tabFor, withTab } from "./spaces";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
 import { Transfers, filesDialog } from "./files_ui";
@@ -47,7 +49,8 @@ export class App {
   private early = new Map<Id, SessionEvent[]>();
   private bindings = buildBindings(null).bindings;
   userKeys: Record<string, unknown> | null = null;
-  groups: SavedGroup[] = [];
+  /** The Spaces (saved by the engine). */
+  spaces: Space[] = [];
   focusArea: "terminal" | "sidebar" = "terminal";
   selected: { kind: "folder" | "server"; id: number } | null = null;
   filter = "";
@@ -163,7 +166,13 @@ export class App {
     window.setInterval(() => void this.pollTunnels(), 3000);
     await this.loadKeys();
     this.snippets = (await this.readJson<{ name: string; command: string }[]>("snippets.json")) ?? [];
-    this.groups = parseGroups(await this.be.readConfig("groups.json").catch(() => null));
+    await this.refreshSpaces();
+    // the saved groups of an older version became Spaces when the engine started: say so once
+    const migrated = await this.be.spaceMigration().catch(() => null);
+    if (migrated && (migrated.imported.length || migrated.skipped.length)) {
+      const n = migrated.imported.length;
+      toast(`Your saved groups are Spaces now (${n} moved${migrated.skipped.length ? `, ${migrated.skipped.length} could not be read: ${migrated.skipped.join(", ")}` : ""}). Find them under Spaces on the left.`, 9000);
+    }
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
     void this.refreshAccounts();
@@ -187,7 +196,7 @@ export class App {
     const saved = await this.readJson<ReturnType<Workspace["save"]>>("workspace.json");
     this.ws.restore(
       saved,
-      live.map((s) => ({ sid: s.sid, title: s.title, serverId: s.server_id, screen: Number(s.meta.screen ?? 0) })),
+      live.map((s) => ({ sid: s.sid, title: s.title, serverId: s.server_id, screen: Number(s.meta.screen ?? 0), ...(s.meta.space != null ? { space: Number(s.meta.space) } : {}), ...(s.meta.cwd ? { cwd: String(s.meta.cwd) } : {}) })),
     );
     this.render();
     this.toastKeyProblems();
@@ -222,9 +231,12 @@ export class App {
         this.ws.prepareSplit("right");
         await this.openServer(LOCAL);
         const sh = this.ws.shape()!;
-        this.groups = [{ id: 1, name: "selftest", broadcast: false, shape: sh.shape, panes: [{ server: LOCAL, name: "Local", command: "echo group-ok-$((6*7))" }, { server: LOCAL, name: "Local", command: "" }] }];
+        const tab = tabFor("selftest", sh.shape, false, [{ server: LOCAL, name: "Local", cwd: "" }, { server: LOCAL, name: "Local", cwd: "" }]);
+        tab.panes[0].command = "echo group-ok-$((6*7))";
+        const spaceId = await this.be.spaceSave({ ...emptySpace(), name: "selftest", tabs: [tab] });
+        await this.refreshSpaces();
         for (const id of [...this.ws.tabs.keys()]) await this.closeSession(id);
-        await this.openGroup(this.groups[0]);
+        await this.openSpace(this.spaces.find((x) => x.id === spaceId)!);
         await wait(4000);
         const sids = this.ws.tabsHere().map((t) => t.sid);
         report.push(`group: ${this.ws.screen.groups.length} tab, ${sids.length} terminals, mosaic ${this.ws.screen.mode}`);
@@ -328,7 +340,7 @@ export class App {
       void this.be.writeConfig("workspace.json", JSON.stringify(this.ws.save()));
       this.ws.tabs.forEach((t) => {
         const order = this.ws.screens[t.screen].order.indexOf(t.sid);
-        void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order, opened: this.opened.get(t.sid) });
+        void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order, opened: this.opened.get(t.sid), ...(t.space != null ? { space: t.space } : {}), ...(t.cwd ? { cwd: t.cwd } : {}) });
       });
     }, 300);
   }
@@ -446,7 +458,7 @@ export class App {
   private addSession(info: SessionInfo, place?: Place) {
     this.since.set(info.sid, Date.now());
     this.opened.set(info.sid, Date.now());
-    this.ws.addTab({ sid: info.sid, title: info.title, serverId: info.server_id }, place);
+    this.ws.addTab({ sid: info.sid, title: info.title, serverId: info.server_id, ...(info.meta.space != null ? { space: Number(info.meta.space) } : {}), ...(info.meta.cwd ? { cwd: String(info.meta.cwd) } : {}) }, place);
     this.focusArea = "terminal";
     this.ensurePane(info.sid);
     const buffered = this.early.get(info.sid);
@@ -1009,7 +1021,7 @@ export class App {
         e.preventDefault();
         ws.focus(g.active);
         contextMenu(e.clientX, e.clientY, [
-          { label: "Save as group…", run: () => void this.saveAsGroup() },
+          { label: "Save in a Space…", run: () => void this.saveTabToSpace() },
           { label: "Rename", run: () => void this.renameTab(g.active) },
           { label: ids.length > 1 ? `Close tab (${ids.length} terminals)` : "Close", run: () => void this.closeTab(ids), danger: true },
         ]);
@@ -1052,7 +1064,7 @@ export class App {
       { label: "Type in every terminal of this tab", hint: hint("broadcast.toggle"), checked: ws.broadcasting, run: () => this.toggleBroadcast() },
       { label: "Tell me when this terminal is done", hint: hint("watch.toggle"), checked: ws.screen.active != null && this.watches.has(ws.screen.active), run: () => this.toggleWatch() },
       { label: "Copy files to or from this server…", hint: hint("files.open"), run: () => this.openFiles() },
-      { label: "Save this tab as a group…", hint: hint("group.save"), run: () => void this.saveAsGroup() },
+      { label: "Save this tab in a Space…", hint: hint("group.save"), run: () => void this.saveTabToSpace() },
       { label: "Snippets…", run: () => this.snippetsDialog() },
       { label: "Open a server…", hint: hint("search"), run: () => void this.hostPicker() },
       { label: this.focusMode ? "Leave focus mode" : "Focus mode: only the terminals", hint: hint("focus.toggle"), run: () => this.setFocusMode(!this.focusMode) },
@@ -1278,7 +1290,7 @@ export class App {
         break;
       }
       case "spaces":
-        this.renderGroups();
+        this.renderSpacesPanel();
         break;
       case "secrets":
         this.renderSecrets();
@@ -1410,45 +1422,145 @@ export class App {
     });
   }
 
-  // ------------------------------------------------------------ groups
+  // ------------------------------------------------------------ spaces
 
-  private saveGroups() {
-    void this.be.writeConfig("groups.json", JSON.stringify(this.groups, null, 2));
+  async refreshSpaces() {
+    this.spaces = await this.be.spaceList().catch(() => [] as Space[]);
+    this.renderSidebar();
   }
 
-  /** The tab on show, kept as a group: its servers, its arrangement and whether it is in broadcast. */
-  async saveAsGroup() {
+  private spacesCtx(): SpacesCtx {
+    return {
+      be: this.be,
+      tree: () => this.tree,
+      secrets: () => this.secretsMeta,
+      spaces: () => this.spaces,
+      openCount: (id) => openSpaces(this.ws.tabs.values()).get(id) ?? 0,
+      open: (sp, again) => void this.openSpace(sp, again),
+      newTerminal: (sp) => void this.newSpaceTerminal(sp),
+      changed: () => this.refreshSpaces(),
+      emptyBox: (text, buttons) => this.emptyBox(text, buttons),
+    };
+  }
+
+  /** The Spaces section: its header with "+ New Space", then one row per Space (or what a Space is, when there is none). */
+  private renderSpacesPanel() {
+    const { head } = this.secHead("spaces", "Spaces", this.spaces.length ? String(this.spaces.length) : "", [["+ New Space", "Make a Space: the folders, servers, secrets and tabs of a piece of work", () => void newSpace(this.spacesCtx())]]);
+    this.treeEl.append(head);
+    renderSpaces(this.treeEl, this.spacesCtx());
+  }
+
+  /** The tab on show, kept in a Space (an existing one, or a new one made on the spot). */
+  async saveTabToSpace() {
     const cur = this.ws.shape();
     if (!cur) return toast("Open a terminal first, then save its tab");
     const panes = cur.sids.map((sid) => {
       const t = this.ws.tabs.get(sid)!;
-      return { server: t.serverId, name: this.tree.servers.find((s) => s.id === t.serverId)?.name ?? t.title, command: "" };
+      return { server: t.serverId, name: this.tree.servers.find((s) => s.id === t.serverId)?.name ?? t.title, cwd: t.cwd ?? "" };
     });
-    const first = this.ws.tabs.get(cur.sids[0])?.title ?? "Group";
-    const name = await promptBox("Save this tab as a group", panes.length > 1 ? `${first} + ${panes.length - 1}` : first, "text", `${panes.length} terminal${panes.length > 1 ? "s" : ""}, as they are arranged now. You will find it on the left, under Groups.`);
-    if (!name?.trim()) return;
-    this.groups.push({ id: nextGroupId(this.groups), name: name.trim(), broadcast: this.ws.broadcasting, shape: cur.shape, panes });
-    this.saveGroups();
-    localStorage.setItem("oso.groups", "open");
-    this.renderSidebar();
-    toast(`Saved as “${name.trim()}”. Double-click it under Groups to open it again.`);
+    const first = this.ws.tabs.get(cur.sids[0])?.title ?? "Tab";
+    const tab = tabFor(panes.length > 1 ? `${first} + ${panes.length - 1}` : first, cur.shape, this.ws.broadcasting, panes);
+    const belongs = this.ws.tabs.get(cur.sids[0])?.space;
+    let target: Space | null | "new" = this.spaces.find((x) => x.id === belongs) ?? null;
+    if (!target || this.spaces.length > 1) {
+      const options: [string, string][] = [...this.spaces.map((x): [string, string] => [String(x.id), x.name]), ["new", "+ New Space…"]];
+      const choice = await new Promise<string | null>((resolve) => {
+        let answered = false;
+        openModal(
+          (close) => {
+            const sel = makeSelect(options, target && target !== "new" ? String(target.id) : this.spaces.length ? String(this.spaces[0].id) : "new", { "data-name": "space-choice" });
+            const ok = el("button", { class: "btn primary", type: "button", "data-act": "space-choice-ok" }, "Save");
+            const no = el("button", { class: "btn", type: "button" }, "Cancel");
+            const finish = (v: string | null) => {
+              answered = true;
+              resolve(v);
+              close();
+            };
+            ok.onclick = () => finish(sel.value);
+            no.onclick = () => finish(null);
+            queueMicrotask(() => sel.focus());
+            return el("div", {}, el("h2", {}, "Save this tab in a Space"), el("div", { class: "hint", style: "margin:0 0 10px" }, `${panes.length} terminal${panes.length > 1 ? "s" : ""}, as they are arranged now. It opens again with the Space.`), field("Space", sel), el("div", { class: "actions" }, no, ok));
+          },
+          // closing the window any other way (Escape) is a no
+          () => {
+            if (!answered) resolve(null);
+          },
+        );
+      });
+      if (choice == null) return;
+      target = choice === "new" ? "new" : (this.spaces.find((x) => String(x.id) === choice) ?? null);
+    }
+    if (target === "new") {
+      const id = await newSpace(this.spacesCtx(), { name: first, servers: [...new Set(panes.map((p) => p.server).filter((s) => s !== 0))], tabs: [tab] });
+      if (id == null) return;
+      return void toast("Saved. Open the Space from the left to see it come back.");
+    }
+    if (!target) return;
+    await this.be.spaceSave(withTab(target, tab));
+    await this.refreshSpaces();
+    toast(`Saved in “${target.name}”. It opens again with the Space.`);
   }
 
-  /** Opens every terminal of a saved group together, as one tab, arranged as it was saved. */
-  async openGroup(g: SavedGroup) {
+  /** Opens a Space: its profile, its tunnels and its saved tabs. One that is already open is only brought forward. */
+  async openSpace(sp: Space, again = false) {
+    const here = [...this.ws.tabs.values()].find((t) => t.space === sp.id && !t.dead);
+    if (here && !again) return void this.focusSession(here.sid);
+    if (sp.profile && sp.profile !== this.tree.active_profile && this.tree.profiles.some((p) => p.id === sp.profile)) {
+      await this.be.setActiveProfile(sp.profile).catch((e) => toast(`Could not switch to the profile of this Space: ${(e as Error).message}`));
+      await this.refreshTree();
+    }
+    for (const t of sp.tunnels) {
+      if (this.tree.servers.some((s) => s.id === t.server && s.forwards.some((f) => f.id === t.forward))) await this.be.tunnelStart(t.server, t.forward, true).catch((e) => toast(`A tunnel of “${sp.name}” did not start: ${(e as Error).message}`, 6000));
+    }
+    void this.pollTunnels();
+    if (!sp.tabs.length) return void toast(`“${sp.name}” has no saved tabs yet. Open a terminal from it (the terminal button on its row), or arrange a tab and save it in the Space.`, 6000);
+    for (const tab of sp.tabs) await this.openLayout(tab, sp);
+  }
+
+  /** A new local terminal in a Space's first folder, with its secrets and its ssh key. */
+  async newSpaceTerminal(sp: Space) {
+    const info = await this.openIn(sp, LOCAL, sp.folders[0] ?? "");
+    if (info) toast(`Terminal opened in “${sp.name}”`);
+  }
+
+  /** One session of a Space, put in a new tab. `null` when it could not be opened (the person was told). */
+  private async openIn(sp: Space, server: number, cwd: string): Promise<SessionInfo | null> {
+    this.measure();
+    let useVault = true;
+    for (;;) {
+      try {
+        const info = await this.be.open(server, this.guessRows(), this.guessCols(), useVault, { space: sp.id, ...(cwd ? { cwd } : {}) });
+        this.addSession(info);
+        return info;
+      } catch (e) {
+        if (e instanceof VaultLockedError) {
+          const c = await this.unlockDialog(true);
+          if (c === "cancel") return null;
+          if (c === "without") useVault = false;
+          continue;
+        }
+        toast(`Could not open it: ${(e as Error).message}`);
+        return null;
+      }
+    }
+  }
+
+  /** Opens the terminals of one saved tab together, as one tab, arranged as it was saved. */
+  async openLayout(g: SpaceTab, sp?: Space) {
     const gone = new Set<number>();
     g.panes.forEach((p, i) => {
       if (p.server !== LOCAL && !this.tree.servers.some((s) => s.id === p.server)) gone.add(i);
     });
     const use = gone.size ? withoutPanes(g, gone) : { shape: g.shape, panes: g.panes };
     if (!use) return toast(`The servers of “${g.name}” no longer exist`);
-    if (gone.size) toast(`${gone.size} server${gone.size > 1 ? "s" : ""} of this group no longer exist${gone.size > 1 ? "" : "s"}: ${[...gone].map((i) => g.panes[i].name).join(", ")}`, 6000);
+    if (gone.size) toast(`${gone.size} server${gone.size > 1 ? "s" : ""} of this tab no longer exist${gone.size > 1 ? "" : "s"}: ${[...gone].map((i) => g.panes[i].name).join(", ")}`, 6000);
     this.measure();
     const opened: SessionInfo[] = [];
     let useVault = true;
     for (let i = 0; i < use.panes.length; i++) {
       try {
-        opened.push(await this.be.open(use.panes[i].server, this.guessRows(), this.guessCols(), useVault));
+        const pane = use.panes[i];
+        opened.push(await this.be.open(pane.server, this.guessRows(), this.guessCols(), useVault, { ...(sp ? { space: sp.id } : {}), ...(pane.server === LOCAL && pane.cwd ? { cwd: pane.cwd } : {}) }));
       } catch (e) {
         if (e instanceof VaultLockedError) {
           const c = await this.unlockDialog(true);
@@ -1469,9 +1581,12 @@ export class App {
     const fit = failed.size ? withoutPanes(use, failed) : use;
     const live = opened.filter(Boolean);
     if (!fit || !live.length) return;
-    live.forEach((o) => this.since.set(o.sid, Date.now()));
+    live.forEach((o) => {
+      this.since.set(o.sid, Date.now());
+      this.opened.set(o.sid, Date.now());
+    });
     this.ws.addGroup(
-      live.map((o) => ({ sid: o.sid, title: o.title, serverId: o.server_id })),
+      live.map((o) => ({ sid: o.sid, title: o.title, serverId: o.server_id, ...(o.meta.space != null ? { space: Number(o.meta.space) } : {}), ...(o.meta.cwd ? { cwd: String(o.meta.cwd) } : {}) })),
       fit.shape,
       g.broadcast,
     );
@@ -1502,40 +1617,6 @@ export class App {
     toast(`The command “${command}” was not typed: the terminal never showed a prompt`, 6000);
   }
 
-  private async editGroup(g: SavedGroup) {
-    openModal((close) => {
-      const name = el("input", { value: g.name, autocomplete: "off" });
-      const bc = el("input", { type: "checkbox", id: "gbc" }) as HTMLInputElement;
-      bc.checked = g.broadcast;
-      const cmds = g.panes.map((p) => el("input", { value: p.command, autocomplete: "off", spellcheck: "false", placeholder: "command to type when it opens (optional)" }) as HTMLInputElement);
-      const rows = g.panes.map((p, i) => el("div", { class: "group-pane" }, el("span", { class: "who", title: p.name }, el("span", { class: "dot", style: `background:${serverColor(p.server)}` }), `${i + 1}  ${p.name || "Local"}`), cmds[i]));
-      const form = el("form", {}, el("h2", {}, "Edit group"), field("Name", name), el("div", { class: "hint", style: "margin:10px 0 0" }, "Terminals, in the order they were saved:"), ...rows);
-      if (g.panes.length > 1) form.append(el("label", { class: "group-check" }, bc, "Type in every terminal at once (broadcast) when it opens"));
-      const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
-      const no = el("button", { class: "btn", type: "button" }, "Cancel");
-      no.onclick = close;
-      form.append(el("div", { class: "actions" }, no, ok));
-      form.onsubmit = (e) => {
-        e.preventDefault();
-        g.name = name.value.trim() || g.name;
-        g.broadcast = bc.checked && g.panes.length > 1;
-        g.panes.forEach((p, i) => (p.command = cmds[i].value));
-        this.saveGroups();
-        close();
-        this.renderSidebar();
-      };
-      return form;
-    });
-  }
-
-  private async deleteGroup(g: SavedGroup) {
-    if (!(await confirmBox(`Delete the group “${g.name}”?`, "Only the saved group goes; terminals that are open stay open.", "Delete"))) return;
-    this.groups = this.groups.filter((x) => x.id !== g.id);
-    this.saveGroups();
-    this.renderSidebar();
-  }
-
-  /** The Groups section at the top of the left list. */
   /** The saved tunnels of every host shown, each with a switch (name → port, how it is doing). */
   private renderTunnels() {
     const all = this.tree.servers.flatMap((s) => s.forwards.map((f) => ({ s, f })));
@@ -1642,43 +1723,6 @@ export class App {
     if (!open) return;
     if (v && any) return void accountsRows(this.treeEl, v, this.be, () => this.refreshAccounts());
     this.treeEl.append(this.emptyBox("Switch your GitHub and Tailscale accounts here, and per profile. It needs `gh` and `tailscale` installed; oso never keeps their tokens.", [["Check again", () => void this.refreshAccounts(), false, "empty-check-accounts"]]));
-  }
-
-  private renderGroups() {
-    const { head } = this.secHead("spaces", "Spaces", this.groups.length ? String(this.groups.length) : "", [["+ Save tab", "Keep the tab on show as a saved arrangement", () => void this.saveAsGroup()]]);
-    this.treeEl.append(head);
-    if (!this.groups.length) this.treeEl.append(el("div", { class: "hint-row" }, `Arrange some terminals in a tab, then save it here (the menu at the top right, or right-click the tab) to open all of them again with a double click.`));
-    for (const g of this.groups) {
-      const row = el("div", { class: "row group", "data-group": String(g.id), title: g.panes.map((p) => p.name || "Local").join(", ") });
-      const gi = el("span", { class: "gi" });
-      gi.append(icon("grid", 15));
-      const tail = el("span", { class: "tail", title: "Opens in broadcast" });
-      if (g.broadcast) tail.append(icon("broadcast", 14));
-      const acts = el("span", { class: "acts" });
-      const stop = (f: () => void) => (e: Event) => {
-        e.stopPropagation();
-        f();
-      };
-      const play = this.ibtn("play", "Open this group", () => {});
-      const edit = this.ibtn("edit", "Edit", () => {});
-      const del = this.ibtn("trash", "Delete", () => {});
-      [play, edit, del].forEach((b) => (b.style.cssText = "width:24px;height:24px"));
-      play.onclick = stop(() => void this.openGroup(g));
-      edit.onclick = stop(() => void this.editGroup(g));
-      del.onclick = stop(() => void this.deleteGroup(g));
-      acts.append(play, edit, del);
-      row.append(gi, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `${g.panes.length} terminal${g.panes.length > 1 ? "s" : ""} · ${summary(g)}`)), tail, acts);
-      row.ondblclick = () => void this.openGroup(g);
-      row.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        contextMenu(e.clientX, e.clientY, [
-          { label: "Open", run: () => void this.openGroup(g) },
-          { label: "Edit…", run: () => void this.editGroup(g) },
-          { label: "Delete", run: () => void this.deleteGroup(g), danger: true },
-        ]);
-      });
-      this.treeEl.append(row);
-    }
   }
 
   // ------------------------------------------------------------ snippets
@@ -2130,7 +2174,7 @@ export class App {
       case "tunnels.open":
         return this.openTunnels();
       case "group.save":
-        return void this.saveAsGroup();
+        return void this.saveTabToSpace();
       case "search":
         return void this.hostPicker();
       case "sudo.fill":

@@ -21,6 +21,10 @@ export interface Tab {
   screen: number;
   /** The session ended (shows "Enter: reconnect"). */
   dead: boolean;
+  /** The Space it was opened in. */
+  space?: number;
+  /** The folder it was opened in (a local terminal). */
+  cwd?: string;
 }
 
 /** One tab of a screen: a single terminal, or several tiled together. */

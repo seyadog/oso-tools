@@ -585,6 +585,19 @@ impl Vault {
             .collect()
     }
 
+    /// Like `env_for`, but for the secrets of a Space: the ones in `ids` that have a variable (and, when
+    /// `agent_visible_only`, are marked visible to agents), whatever profile they were made in.
+    pub fn env_for_ids(&mut self, ids: &[u64], agent_visible_only: bool) -> Vec<(String, Zeroizing<String>)> {
+        let Some(st) = self.state.as_mut() else { return vec![] };
+        st.last_used = Instant::now();
+        st.data
+            .secrets
+            .values()
+            .filter(|s| ids.contains(&s.id) && (!agent_visible_only || s.agent_visible))
+            .filter_map(|s| s.env_var.clone().map(|v| (v, Zeroizing::new(s.value.clone()))))
+            .collect()
+    }
+
     /// Re-encrypts everything under a new master password (the vault must be unlocked).
     pub fn change_master(&mut self, new_master: &str) -> Result<()> {
         let st = self.state.as_mut().context("the vault is locked")?;

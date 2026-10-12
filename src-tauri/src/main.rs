@@ -66,7 +66,7 @@ fn open_err(e: OpenError) -> String {
 /// Only the files the window itself keeps may be read or written through the window.
 fn config_path(name: &str) -> Res<std::path::PathBuf> {
     match name {
-        "workspace.json" | "hotkeys.json" | "snippets.json" | "groups.json" | "selftest.flag" | "selftest.out" => Ok(Store::config_dir().join(name)),
+        "workspace.json" | "hotkeys.json" | "snippets.json" | "selftest.flag" | "selftest.out" => Ok(Store::config_dir().join(name)),
         _ => Err("not allowed".into()),
     }
 }
@@ -377,8 +377,31 @@ fn move_into(state: State<AppState>, kind: String, id: u64, dest: Option<u64>) -
 }
 
 #[tauri::command]
-fn open_session(state: State<AppState>, server_id: u64, rows: u16, cols: u16, use_vault: bool) -> Res<SessionInfo> {
-    engine!(state).open(server_id, rows, cols, use_vault).map_err(open_err)
+fn open_session(state: State<AppState>, server_id: u64, rows: u16, cols: u16, use_vault: bool, space: Option<u64>, cwd: Option<String>) -> Res<SessionInfo> {
+    engine!(state).open_in(server_id, rows, cols, use_vault, oso_core::engine::OpenCtx { space, cwd }).map_err(open_err)
+}
+
+/// The saved Spaces.
+#[tauri::command]
+fn space_list(state: State<AppState>) -> Res<Vec<oso_core::spaces::Space>> {
+    Ok(engine!(state).spaces_list())
+}
+
+/// Saves a Space (id 0: a new one) and returns its id.
+#[tauri::command]
+fn space_save(state: State<AppState>, space: oso_core::spaces::Space) -> Res<u64> {
+    engine!(state).space_save(&space).map_err(err)
+}
+
+#[tauri::command]
+fn space_delete(state: State<AppState>, id: u64) -> Res<()> {
+    engine!(state).space_delete(id).map_err(err)
+}
+
+/// What the migration of `groups.json` did at start-up, once (then `None`).
+#[tauri::command]
+fn space_migration(state: State<AppState>) -> Res<Option<oso_core::spaces::Migration>> {
+    Ok(engine!(state).spaces.take_migration())
 }
 
 #[tauri::command]
@@ -679,6 +702,10 @@ fn main() {
             delete_node,
             move_into,
             open_session,
+            space_list,
+            space_save,
+            space_delete,
+            space_migration,
             reconnect_session,
             restore_sessions,
             write_session,

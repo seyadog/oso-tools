@@ -61,6 +61,9 @@ enum Req {
         /// Give the session a token and the `OSO_*` variables (a terminal of oso where an agent may run).
         #[serde(default)]
         agent: bool,
+        /// The Space the window says this terminal belongs to (kept as it is for as long as the session lives).
+        #[serde(default)]
+        space: Option<u64>,
     },
     Attach { sid: u64, rows: u16, cols: u16 },
     Input { sid: u64, data: String },
@@ -107,7 +110,15 @@ enum Ev {
     Exit { sid: u64, code: u32 },
     Sudo { sid: u64, on: bool },
     /// To the window: an agent running in session `sid` asks for something.
-    AgentCall { call: u64, sid: u64, title: String, body: Value },
+    AgentCall {
+        call: u64,
+        sid: u64,
+        title: String,
+        body: Value,
+        /// The Space of the session, from what the server stored when it was created (never from the request).
+        #[serde(default)]
+        space: Option<u64>,
+    },
     /// To `oso mcp`: the answer.
     AgentResult { req: u64, result: Value },
 }
@@ -181,6 +192,8 @@ struct Sent {
 struct Hosted {
     /// The secret that proves a request comes from inside this session (see `session_for_token`).
     token: Option<String>,
+    /// The Space this session was opened in; sent to the window with every request of an agent that runs here.
+    space: Option<u64>,
     pty: Arc<Mutex<PtySession>>,
     meta: Value,
     subs: Subs,
@@ -361,7 +374,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
     };
     match req {
         Req::Hello { .. } => reply(Ev::Hello { proto: PROTO, version: env!("CARGO_PKG_VERSION").into() }),
-        Req::Spawn { req, argv, rows, cols, cwd, mut env, fills, login_expected, sudo_fill, agent } => {
+        Req::Spawn { req, argv, rows, cols, cwd, mut env, fills, login_expected, sudo_fill, agent, space } => {
             if argv.is_empty() {
                 return reply(Ev::Failed { req, error: "empty command".into() });
             }
@@ -398,11 +411,13 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                 tap: Some(tap),
                 sudo_fill,
                 agent,
+                space,
             };
             match PtySession::spawn_with(opts) {
                 Ok(pty) => {
                     let hosted = Hosted {
                         token,
+                        space: if agent { space } else { None },
                         pty: Arc::new(Mutex::new(pty)),
                         meta: Value::Null,
                         subs,
@@ -479,11 +494,11 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
         }
         Req::Agent { req, token, pane, call } => {
             let fail = |m: &str| reply(Ev::AgentResult { req, result: agent_error(m) });
-            let (title, alive) = {
+            let (title, alive, space) = {
                 let st = lock(&server.state);
                 match st.sessions.get(&pane).filter(|h| h.token.as_deref().is_some_and(|t| same_token(t, &token))) {
-                    Some(h) => (h.meta.get("title").and_then(Value::as_str).unwrap_or("terminal").to_string(), Some(Arc::clone(&h.pty))),
-                    None => (String::new(), None),
+                    Some(h) => (h.meta.get("title").and_then(Value::as_str).unwrap_or("terminal").to_string(), Some(Arc::clone(&h.pty)), h.space),
+                    None => (String::new(), None, None),
                 }
             };
             // an unknown token, a token of another session, a session that already closed: all the same answer
@@ -502,7 +517,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
             st.next_call += 1;
             let id = st.next_call;
             st.calls.insert(id, PendingCall { to: tx.clone(), req, handler: hid, since: Instant::now() });
-            if hand.try_send(Ev::AgentCall { call: id, sid: pane, title, body: call }).is_err() {
+            if hand.try_send(Ev::AgentCall { call: id, sid: pane, title, body: call, space }).is_err() {
                 st.calls.remove(&id);
                 drop(st);
                 fail("oso's window did not take the request.");
@@ -551,6 +566,8 @@ pub struct Remote {
 /// What an agent asked, as the window gets it.
 pub struct AgentCall {
     pub sid: u64,
+    /// The Space the terminal it runs in belongs to, as the background server stored it. `None`: no Space.
+    pub space: Option<u64>,
     /// The title of the terminal it runs in.
     pub title: String,
     pub body: Value,
@@ -646,13 +663,13 @@ impl ClientShared {
                 }
             }
             Ev::Hello { .. } => {}
-            Ev::AgentCall { call, sid, title, body } => {
+            Ev::AgentCall { call, sid, title, body, space } => {
                 let handler = lock(&self.agent_handler).clone();
                 let me = self.me.upgrade();
                 if let (Some(handler), Some(me)) = (handler, me) {
                     // the person may take minutes to answer: not on the thread that reads the socket
                     std::thread::spawn(move || {
-                        let result = handler(AgentCall { sid, title, body });
+                        let result = handler(AgentCall { sid, space, title, body });
                         me.send(&Req::AgentReply { call, result });
                     });
                 } else {
@@ -751,7 +768,7 @@ impl Daemon {
         let argv = opts.argv.clone();
         let cwd = opts.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
         let login_expected = opts.login_expected;
-        let (sudo_fill, agent) = (opts.sudo_fill.take(), opts.agent);
+        let (sudo_fill, agent, space) = (opts.sudo_fill.take(), opts.agent, opts.space);
         let ev = self.shared.ask(|req| Req::Spawn {
             req,
             argv,
@@ -763,6 +780,7 @@ impl Daemon {
             login_expected,
             sudo_fill,
             agent,
+            space,
         })?;
         match ev {
             Ev::Spawned { sid, .. } => Ok(self.attach_with(sid, rows, cols, sink.map(|make| make(sid)))),
@@ -988,6 +1006,7 @@ mod tests {
             tap: None,
             sudo_fill: None,
             agent: false,
+            space: None,
         }
     }
 

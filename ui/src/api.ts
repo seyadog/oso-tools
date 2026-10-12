@@ -1,3 +1,4 @@
+import type { Tree } from "./tree";
 // What the window asks of the engine. In the app these go to Rust (Tauri); in a plain browser (development and
 // tests) a small mock stands in, so the whole interface can be tried without a background server.
 
@@ -249,6 +250,47 @@ export interface Activity {
   note: string;
 }
 
+/** A terminal of a saved tab of a Space. */
+export interface SpacePane {
+  /** The server (0: this computer). */
+  server: number;
+  name: string;
+  /** Typed once the terminal shows its prompt. */
+  command: string;
+  /** Where a local terminal opens (empty: the Space's first folder). */
+  cwd: string;
+}
+export interface SpaceTab {
+  name: string;
+  broadcast: boolean;
+  /** The tiling tree, the terminals numbered 0, 1, 2… as in `panes`. */
+  shape: Tree;
+  panes: SpacePane[];
+}
+export interface TunnelRef {
+  server: number;
+  forward: number;
+}
+/** One unit of work: what it uses, its notes, and the layout of its tabs. */
+export interface Space {
+  /** 0: not saved yet. */
+  id: number;
+  name: string;
+  profile: string | null;
+  folders: string[];
+  servers: number[];
+  server_folders: number[];
+  secrets: number[];
+  tunnels: TunnelRef[];
+  notes: string;
+  tabs: SpaceTab[];
+}
+/** What turning `groups.json` into Spaces did (told once). */
+export interface SpaceMigration {
+  imported: string[];
+  skipped: string[];
+}
+
 export interface ActivityDetail {
   command: string;
   output: string;
@@ -350,7 +392,13 @@ export interface Backend {
   setFolderOpen(id: number, open: boolean): Promise<void>;
   deleteNode(kind: "folder" | "server", id: number): Promise<void>;
   moveInto(kind: "folder" | "server", id: number, dest: number | null): Promise<boolean>;
-  open(serverId: number, rows: number, cols: number, useVault?: boolean): Promise<SessionInfo>;
+  open(serverId: number, rows: number, cols: number, useVault?: boolean, opts?: { space?: number; cwd?: string }): Promise<SessionInfo>;
+  spaceList(): Promise<Space[]>;
+  /** Saves (id 0: a new one) and returns the id. */
+  spaceSave(space: Space): Promise<number>;
+  spaceDelete(id: number): Promise<void>;
+  /** What the first start with Spaces did to the old saved groups; `null` when nothing was migrated (or it was told). */
+  spaceMigration(): Promise<SpaceMigration | null>;
   reconnect(sid: number, rows: number, cols: number, useVault?: boolean): Promise<SessionInfo>;
   restore(rows: number, cols: number): Promise<SessionInfo[]>;
   write(sid: number, data: string): Promise<void>;

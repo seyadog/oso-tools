@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, Activity, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, Activity, Space, SpaceMigration, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -63,6 +63,10 @@ export function mockBackend(): Backend {
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
+  const spaces: Space[] = [];
+  let nextSpace = 1;
+  /** What a test says the migration of the old groups did, to be told once. */
+  const migration: { value: SpaceMigration | null } = { value: null };
   /** What the activity panel reads; tests add to it the way the audit log grows. */
   const activity: (Activity & { output?: string })[] = [];
   const deletedEnv: string[] = [];
@@ -80,6 +84,8 @@ export function mockBackend(): Backend {
     forgotten,
     deletedOriginals,
     approvalAnswers,
+    spaces,
+    migration,
     activity,
     deletedEnv,
     cli: (e: CliEvent) => cliHandler(e),
@@ -366,7 +372,7 @@ export function mockBackend(): Backend {
       n.parent = dest;
       return true;
     },
-    open: async (serverId, _rows, _cols, useVault = true) => {
+    open: async (serverId, _rows, _cols, useVault = true, opts) => {
       const s = servers.find((x) => x.id === serverId);
       if (serverId && !s) throw new Error("This server no longer exists");
       if (s?.auth === "vaultkey" && !vault.unlocked) throw new VaultLockedError();
@@ -377,7 +383,30 @@ export function mockBackend(): Backend {
       }
       if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
       const local = activeProfile === "default" ? "Local" : `Local · ${profiles.find((p) => p.id === activeProfile)?.name ?? activeProfile}`;
-      return make(s?.name ?? local, serverId);
+      const space = opts?.space != null ? spaces.find((x) => x.id === opts.space) : undefined;
+      if (opts?.space != null && !space) throw new Error("this Space no longer exists");
+      const title = serverId === 0 && space ? `${local} · ${space.name}` : (s?.name ?? local);
+      return make(title, serverId, { ...(space ? { space: space.id } : {}), ...(opts?.cwd ? { cwd: opts.cwd } : {}) });
+    },
+    spaceList: async () => JSON.parse(JSON.stringify(spaces)),
+    spaceSave: async (space) => {
+      const clean = { ...JSON.parse(JSON.stringify(space)), name: space.name.trim() } as Space;
+      if (!clean.name) throw new Error("a Space needs a name");
+      if (clean.id === 0) {
+        clean.id = nextSpace++;
+        spaces.push(clean);
+      } else {
+        const at = spaces.findIndex((x) => x.id === clean.id);
+        if (at < 0) throw new Error("this Space no longer exists");
+        spaces[at] = clean;
+      }
+      return clean.id;
+    },
+    spaceDelete: async (id) => void spaces.splice(0, spaces.length, ...spaces.filter((x) => x.id !== id)),
+    spaceMigration: async () => {
+      const m = migration.value;
+      migration.value = null;
+      return m;
     },
     reconnect: async (sid) => {
       const old = sessions.get(sid);
