@@ -511,6 +511,64 @@ fn notify(title: String, body: String) {
     }
 }
 
+/// A desktop notification about an agent. When it can (a `notify-send` that knows actions), clicking it raises oso and
+/// asks the window to go to that terminal.
+#[tauri::command]
+fn notify_agent(app: tauri::AppHandle, title: String, body: String, sid: u64) {
+    let cut = |s: String| s.chars().take(200).collect::<String>();
+    let child = std::process::Command::new("notify-send")
+        .args(["--app-name=oso", "--icon=oso", "--action=default=Open"])
+        .arg("--")
+        .arg(cut(title))
+        .arg(cut(body))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(c) = child {
+        std::thread::spawn(move || {
+            let Ok(out) = c.wait_with_output() else { return };
+            // it prints the name of the action when the notification was clicked
+            if String::from_utf8_lossy(&out.stdout).trim() == "default" {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+                let _ = app.emit("notify-click", sid);
+            }
+        });
+    }
+}
+
+/// The agents running in this window's terminals and what each is doing (`pending`: terminals with a request waiting).
+#[tauri::command]
+fn agent_status(state: State<AppState>, pending: Vec<u64>) -> Res<Vec<oso_core::agents::Status>> {
+    Ok(engine!(state).agent_status(&pending))
+}
+
+#[tauri::command]
+fn agent_ack(state: State<AppState>, sid: u64) -> Res<()> {
+    engine!(state).agent_ack(sid);
+    Ok(())
+}
+
+#[tauri::command]
+fn agent_kinds(state: State<AppState>) -> Res<Vec<oso_core::agents::AgentKind>> {
+    Ok(engine!(state).agent_kinds())
+}
+
+#[tauri::command]
+fn agent_kinds_save(state: State<AppState>, kinds: Vec<oso_core::agents::AgentKind>) -> Res<()> {
+    engine!(state).agent_kinds_save(&kinds)
+}
+
+/// `git worktree add -b <branch>` next to the repository; returns the new folder.
+#[tauri::command]
+fn worktree_add(repo: String, branch: String) -> Res<String> {
+    let repo = oso_core::spaces::expand_home(&repo);
+    oso_core::agents::worktree_add(&repo, branch.trim()).map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn read_config(name: String) -> Res<Option<String>> {
     let path = config_path(&name)?;
@@ -568,6 +626,14 @@ fn main() {
                 std::process::exit(1);
             }
             return;
+        }
+        // `oso hook <agent> <event>`: run by an agent's own hooks (see `integration`); always exits 0 and prints nothing
+        Some("hook") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            if let [agent, event] = args.as_slice() {
+                oso_core::mcp::hook(agent, event);
+            }
+            std::process::exit(0);
         }
         // `oso integration install|uninstall <agent>`
         Some("integration") => {
@@ -675,6 +741,12 @@ fn main() {
             agent_activity,
             agent_activity_detail,
             local_user,
+            notify_agent,
+            agent_status,
+            agent_ack,
+            agent_kinds,
+            agent_kinds_save,
+            worktree_add,
             integration_status,
             integration_plan,
             integration_apply,

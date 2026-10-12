@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Activity, ApprovalRequest, Backend, Space, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Backend, Space, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
 import { SpacesCtx, newSpace, renderSpaces } from "./spaces_ui";
@@ -18,7 +18,9 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
-import { AgentRow, RightPanel, agentsFromActivity } from "./rpanel";
+import { AgentRow, RightPanel } from "./rpanel";
+import { AgentState, AgentStatus, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
@@ -140,7 +142,7 @@ export class App {
     this.rpanel = new RightPanel({
       be: this.be,
       queue: this.approvals,
-      agents: (activity, pending) => this.agentRows(activity, pending),
+      agents: () => this.agentRows(),
       focus: (sid) => this.focusSession(sid),
       tabLabel: (pane) => this.tabLabel(pane),
       focusMode: () => this.focusMode,
@@ -154,6 +156,9 @@ export class App {
     void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
     window.setInterval(() => void this.rpanel.refresh(), 2000);
+    // which agents run in the terminals, and what each is doing; a notice when one needs you and oso is not in front
+    this.be.onNotifyClick((sid) => this.focusSession(sid));
+    window.setInterval(() => void this.pollAgents(), 1500);
     // `oso ssh <host>`, `oso host add`, `oso unlock` on the command line: the window follows
     this.be.onCli((e) => {
       if (e.event === "open" && e.data?.server_id != null) void this.openServer(e.data.server_id);
@@ -822,9 +827,62 @@ export class App {
     return [at >= 0 ? `tab ${at + 1}` : "", t.title, user].filter(Boolean).join(" · ");
   }
 
-  /** The rows of the Agents tab. */
-  private agentRows(activity: Activity[], pending: ApprovalRequest[]): AgentRow[] {
-    return agentsFromActivity(activity, pending, (pane) => this.tabLabel(pane) ?? "terminal closed");
+  // ------------------------------------------------------------ agents
+
+  /** What the engine says about the agents, as last asked. */
+  private agents: AgentStatus[] = [];
+  /** The state each agent was in the last time, so that only a change is news. */
+  private agentSeen = new Map<number, AgentState>();
+
+  /** Asks the engine which agents run where and what they are doing (a request waiting in oso is the exact signal). */
+  async pollAgents() {
+    const pending = this.approvals.list().map((r) => r.pane);
+    const list = await this.be.agentStatus(pending).catch(() => null);
+    if (!list) return;
+    this.agents = list;
+    const rows = this.agentRows();
+    const news = noticesFor(this.agentSeen, rows.map((r) => ({ sid: r.sid, name: r.name, state: r.state, where: r.where })));
+    this.agentSeen = new Map(rows.map((r) => [r.sid, r.state]));
+    if (!document.hasFocus()) for (const n of news) void this.be.notifyAgent(n.title, n.body, n.sid).catch(() => {});
+    // looking at a tab whose agent finished calms it down
+    const on = this.ws.screen.active;
+    if (on != null && document.hasFocus() && this.agents.some((a) => a.sid === on && a.state === "finished")) void this.be.agentAck(on).catch(() => {});
+    this.renderTopbar();
+    this.rpanel.render();
+  }
+
+  /** The rows of the Agents tab: the engine's states, and the screen's guess only where nothing exact is known. */
+  private agentRows(): AgentRow[] {
+    return this.agents.map((a) => {
+      const pane = this.panes.get(a.sid);
+      const guess = pane ? guessFromScreen(pane.tailLines(8), pane.lastOutputAt ? Date.now() - pane.lastOutputAt : -1) : null;
+      const e = effectiveState(a, guess);
+      const space = this.ws.tabs.get(a.sid)?.space;
+      return { sid: a.sid, name: a.name, where: this.tabLabel(a.sid) ?? "terminal closed", folder: a.folder, branch: a.branch, state: e.state, since: a.since, space: space != null ? (this.spaces.find((x) => x.id === space)?.name ?? "") : "", source: e.guessed ? "screen" : a.source };
+    });
+  }
+
+  /** `Alt+N`: the next agent that needs you (the one that has waited longest first); when nobody does, one that finished. */
+  jumpToAttention() {
+    const rows = this.agentRows().filter((r) => this.ws.tabs.has(r.sid));
+    const next = nextAttention(rows, this.ws.screen.active);
+    if (next == null) return toast("No agent needs you right now");
+    if (!rows.some((r) => r.state === "needs_you")) toast("Nobody needs you: this one finished");
+    this.focusSession(next);
+  }
+
+  private launchCtx(): LaunchCtx {
+    return {
+      be: this.be,
+      openLocal: (space, cwd) => this.openIn(space, LOCAL, cwd),
+      rename: (sid, title) => this.ws.setTitle(sid, title),
+      start: (sid, command) => void this.typeWhenReady(sid, command),
+    };
+  }
+
+  /** "New agent": which folder, which agent, in a worktree or not. */
+  newAgent(space: Space | null = null) {
+    void newAgentDialog(this.launchCtx(), space);
   }
 
   render() {
@@ -1003,6 +1061,8 @@ export class App {
         el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
         el("span", {}, t.title),
       );
+      const dot = tabDot(ids.flatMap((id) => this.agentRows().filter((r) => r.sid === id).map((r) => r.state)));
+      if (dot) tab.append(el("span", { class: "adot", "data-state": dot, title: { needs_you: "An agent here needs you", working: "An agent here is working", finished: "An agent here finished", idle: "An agent is running here" }[dot] }));
       if (ids.length > 1) tab.append(count);
       const watching = ids.some((id) => this.watches.has(id));
       const alerted = ids.some((id) => this.alerts.has(id));
@@ -1067,6 +1127,8 @@ export class App {
       { label: "Save this tab in a Space…", hint: hint("group.save"), run: () => void this.saveTabToSpace() },
       { label: "Snippets…", run: () => this.snippetsDialog() },
       { label: "Open a server…", hint: hint("search"), run: () => void this.hostPicker() },
+      { label: "New agent…", hint: hint("agent.new"), run: () => this.newAgent(null) },
+      { label: "Next agent that needs you", hint: hint("attention.next"), run: () => this.jumpToAttention() },
       { label: this.focusMode ? "Leave focus mode" : "Focus mode: only the terminals", hint: hint("focus.toggle"), run: () => this.setFocusMode(!this.focusMode) },
       { label: this.rpanel.open ? "Close the right panel" : "Open the right panel", hint: hint("rpanel.toggle"), run: () => this.run("rpanel.toggle") },
     ]);
@@ -1438,6 +1500,7 @@ export class App {
       openCount: (id) => openSpaces(this.ws.tabs.values()).get(id) ?? 0,
       open: (sp, again) => void this.openSpace(sp, again),
       newTerminal: (sp) => void this.newSpaceTerminal(sp),
+      newAgent: (sp) => this.newAgent(sp),
       changed: () => this.refreshSpaces(),
       emptyBox: (text, buttons) => this.emptyBox(text, buttons),
     };
@@ -1524,12 +1587,12 @@ export class App {
   }
 
   /** One session of a Space, put in a new tab. `null` when it could not be opened (the person was told). */
-  private async openIn(sp: Space, server: number, cwd: string): Promise<SessionInfo | null> {
+  private async openIn(sp: Space | null, server: number, cwd: string): Promise<SessionInfo | null> {
     this.measure();
     let useVault = true;
     for (;;) {
       try {
-        const info = await this.be.open(server, this.guessRows(), this.guessCols(), useVault, { space: sp.id, ...(cwd ? { cwd } : {}) });
+        const info = await this.be.open(server, this.guessRows(), this.guessCols(), useVault, { ...(sp ? { space: sp.id } : {}), ...(cwd ? { cwd } : {}) });
         this.addSession(info);
         return info;
       } catch (e) {
@@ -2063,6 +2126,11 @@ export class App {
         close();
         void auditDialog(this.be);
       };
+      const agentsBtn = el("button", { class: "btn", type: "button", "data-act": "agent-kinds" }, "Agents…");
+      agentsBtn.onclick = () => {
+        close();
+        void agentKindsDialog(this.be);
+      };
       const save = el("button", { class: "btn primary", type: "button" }, "Save");
       const cancel = el("button", { class: "btn", type: "button" }, "Cancel");
       cancel.onclick = close;
@@ -2088,7 +2156,7 @@ export class App {
         el("div", { class: "hint", style: "margin:10px 0 6px" }, "Click a shortcut and press the new keys; the cross puts it back. Saved in hotkeys.json, which you can also edit by hand."),
         list,
         warn,
-        el("div", { class: "actions" }, activity, cancel, save),
+        el("div", { class: "actions" }, activity, agentsBtn, cancel, save),
       );
     });
   }
@@ -2184,6 +2252,10 @@ export class App {
         return this.rpanel.toggle();
       case "focus.toggle":
         return this.setFocusMode(!this.focusMode);
+      case "attention.next":
+        return this.jumpToAttention();
+      case "agent.new":
+        return this.newAgent(null);
       case "panel.spaces":
       case "panel.servers":
       case "panel.secrets":

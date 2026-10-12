@@ -1,0 +1,102 @@
+// The agents of the window: what the engine reports (which agent runs in which terminal, and what each is doing), the
+// last-resort guess from the screen, who needs you next, and when to tell the person from outside the window.
+
+export type AgentState = "needs_you" | "working" | "finished" | "idle";
+
+/** What the engine knows about one agent (see `agents.rs`). */
+export interface AgentStatus {
+  sid: number;
+  kind: string;
+  name: string;
+  pid: number | null;
+  cwd: string;
+  folder: string;
+  branch: string;
+  state: AgentState;
+  /** When it got into this state (ms). */
+  since: number;
+  /** How the engine knows: `approval` (a request waits in oso), `hook` (its own hooks), `process` (only that it runs). */
+  source: "approval" | "hook" | "process";
+}
+
+export interface AgentKind {
+  id: string;
+  name: string;
+  command: string;
+}
+
+/** What a screen can say when nothing exact is known: the last lines look like a question to you, or output is arriving. */
+const ASKS = /\((?:y\/n|Y\/n|y\/N)\)|\[(?:y\/n|Y\/n|y\/N)\]|do you want to|would you like to|allow (?:this|once|always)|approve|press enter to|proceed\?|continue\?/i;
+
+export function guessFromScreen(lastLines: string[], msSinceOutput: number): "needs_you" | "working" | null {
+  const tail = lastLines.map((l) => l.trim()).filter(Boolean).slice(-6);
+  if (tail.some((l) => ASKS.test(l))) return "needs_you";
+  if (msSinceOutput >= 0 && msSinceOutput < 2000) return "working";
+  return null;
+}
+
+/**
+ * The state to show. The engine's exact signals are kept as they are; only when all it knows is that the program runs
+ * (`process`, "idle") does the screen get a say. Returns `guessed` when it did.
+ */
+export function effectiveState(s: AgentStatus, guess: "needs_you" | "working" | null): { state: AgentState; guessed: boolean } {
+  if (s.source === "process" && s.state === "idle" && guess) return { state: guess, guessed: true };
+  return { state: s.state, guessed: false };
+}
+
+/** An agent as the attention queue sees it. */
+export interface Waiting {
+  sid: number;
+  state: AgentState;
+  since: number;
+}
+
+/**
+ * The next terminal to go to: those that need you, the one that has waited longest first; then, when nobody does, those
+ * that finished, in the same order. From the one you are on (or the one you jumped to last) it goes to the next, and
+ * after the last it starts again. `null` when there is nobody.
+ */
+export function nextAttention(agents: Waiting[], current: number | null): number | null {
+  const order = (state: AgentState) => agents.filter((a) => a.state === state).sort((a, b) => a.since - b.since || a.sid - b.sid);
+  const list = order("needs_you").length ? order("needs_you") : order("finished");
+  if (!list.length) return null;
+  const at = list.findIndex((a) => a.sid === current);
+  return list[(at + 1) % list.length].sid;
+}
+
+export interface Notice {
+  sid: number;
+  title: string;
+  body: string;
+}
+
+/** What to say from outside the window: an agent that just started to need you, or just finished. Said once per change. */
+export function noticesFor(before: Map<number, AgentState>, now: { sid: number; name: string; state: AgentState; where: string }[]): Notice[] {
+  const out: Notice[] = [];
+  for (const a of now) {
+    const was = before.get(a.sid);
+    if (was === undefined || was === a.state) continue; // the first time it is seen is the baseline, not news
+    if (a.state === "needs_you") out.push({ sid: a.sid, title: `${a.name} needs you`, body: a.where });
+    else if (a.state === "finished" && was === "working") out.push({ sid: a.sid, title: `${a.name} finished`, body: a.where });
+  }
+  return out;
+}
+
+/** The one dot a tab shows when several terminals of it have agents: the most urgent state. */
+export function tabDot(states: AgentState[]): AgentState | null {
+  for (const s of ["needs_you", "working", "finished", "idle"] as AgentState[]) if (states.includes(s)) return s;
+  return null;
+}
+
+/** `oso/claude-241011-1430`: a branch name for a new worktree, to be edited. */
+export function proposedBranch(agentId: string, when: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${p(when.getFullYear() % 100)}${p(when.getMonth() + 1)}${p(when.getDate())}-${p(when.getHours())}${p(when.getMinutes())}`;
+  return `oso/${agentId.replace(/[^a-zA-Z0-9_-]/g, "") || "agent"}-${stamp}`;
+}
+
+/** The last part of a folder path. */
+export function baseName(path: string): string {
+  const t = path.replace(/\/+$/, "");
+  return t.slice(t.lastIndexOf("/") + 1) || t;
+}

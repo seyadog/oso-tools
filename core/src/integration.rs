@@ -262,6 +262,145 @@ fn md_uninstall(before: &str) -> Option<String> {
     if out.trim().is_empty() { None } else { Some(out) }
 }
 
+// ------------------------------------------------------------------ hooks: what the agent is doing
+
+/// The events of Claude Code's hooks that tell oso what it is doing (verified against its documentation: a handler is
+/// `{ "type": "command", "command": … }` inside a matcher group, under the name of the event, in `settings.json`).
+pub const CLAUDE_EVENTS: [&str; 6] = ["UserPromptSubmit", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"];
+
+/// `~/.claude/settings.json`, where Claude Code keeps its hooks.
+pub fn claude_settings(home: &Path) -> PathBuf {
+    home.join(".claude").join("settings.json")
+}
+
+/// The OpenCode plugin oso writes (a plugin is a JavaScript file in `~/.config/opencode/plugins/`).
+pub fn opencode_plugin(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode").join("plugins").join("oso.js")
+}
+
+/// The first line of the plugin: it says the file is oso's, so that it is the only kind of file oso removes.
+const PLUGIN_MARK: &str = "// oso-hook-plugin";
+
+fn shell_word(s: &str) -> String {
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c)) { s.to_string() } else { format!("'{}'", s.replace('\'', "'\\''")) }
+}
+
+fn claude_command(exe: &str, event: &str) -> String {
+    format!("{} hook claude {event}", shell_word(exe))
+}
+
+/// Is this hook handler one that oso wrote (it runs `<something named oso…> hook claude <Event>`)?
+fn is_ours(handler: &Value) -> bool {
+    let Some(cmd) = handler.get("command").and_then(Value::as_str) else { return false };
+    let Some((head, event)) = cmd.rsplit_once(" hook claude ") else { return false };
+    CLAUDE_EVENTS.contains(&event) && head.trim_matches('\'').rsplit('/').next().is_some_and(|n| n.starts_with("oso"))
+}
+
+fn claude_hooks_install(path: &Path, before: Option<&str>, exe: &str) -> Result<String> {
+    let mut v = parse_json(path, before.unwrap_or(""))?;
+    let obj = v.as_object_mut().expect("an object");
+    let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
+    let Some(hooks) = hooks.as_object_mut() else { bail!("`hooks` in {} is not an object", path.display()) };
+    for event in CLAUDE_EVENTS {
+        let groups = hooks.entry(event).or_insert_with(|| json!([]));
+        let Some(groups) = groups.as_array_mut() else { bail!("`hooks.{event}` in {} is not a list", path.display()) };
+        let want = json!({ "type": "command", "command": claude_command(exe, event) });
+        let has = |g: &Value| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| *h == want));
+        if groups.iter().any(has) {
+            continue;
+        }
+        // our handler from an older install (another path): replace it, never add a second one
+        let mut replaced = false;
+        for g in groups.iter_mut() {
+            if let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) {
+                for h in hs.iter_mut().filter(|h| is_ours(h)) {
+                    *h = want.clone();
+                    replaced = true;
+                }
+            }
+        }
+        if !replaced {
+            groups.push(json!({ "hooks": [want] }));
+        }
+    }
+    let after = dump_json(&v);
+    Ok(if before.is_some_and(|b| parse_json(path, b).ok().as_ref() == Some(&v)) { before.unwrap_or("").to_string() } else { after })
+}
+
+fn claude_hooks_uninstall(path: &Path, before: &str) -> Result<Option<String>> {
+    let mut v = parse_json(path, before)?;
+    let obj = v.as_object_mut().expect("an object");
+    let Some(hooks) = obj.get_mut("hooks").and_then(Value::as_object_mut) else { return Ok(Some(before.to_string())) };
+    let mut touched = false;
+    for event in CLAUDE_EVENTS {
+        let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else { continue };
+        for g in groups.iter_mut() {
+            if let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) {
+                let n = hs.len();
+                hs.retain(|h| !is_ours(h));
+                touched |= hs.len() != n;
+            }
+        }
+        // a matcher group that only had ours goes with it; one the user made stays
+        groups.retain(|g| g.get("hooks").and_then(Value::as_array).is_none_or(|hs| !hs.is_empty()));
+        if groups.is_empty() {
+            hooks.shift_remove(event);
+        }
+    }
+    if !touched {
+        return Ok(Some(before.to_string()));
+    }
+    if hooks.is_empty() {
+        obj.shift_remove("hooks");
+    }
+    Ok(if obj.is_empty() { None } else { Some(dump_json(&v)) })
+}
+
+fn js_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// The OpenCode plugin: on the events that mean "it asks you", "it works" and "it is done", it runs `oso hook opencode <event>`
+/// (inside an oso terminal only; anywhere else it does nothing).
+pub fn plugin_text(exe: &str) -> String {
+    format!(
+        r#"{PLUGIN_MARK}: written by `oso integration install opencode`. Tells oso when OpenCode needs you, works or is done.
+// Remove it with `oso integration uninstall opencode`.
+const OSO = {exe};
+
+export const OsoPlugin = async ({{ $ }}) => {{
+  const send = async (event) => {{
+    if (!process.env.OSO_PANE) return; // not inside a terminal of oso
+    try {{
+      await $`${{OSO}} hook opencode ${{event}}`.quiet().nothrow();
+    }} catch (_) {{}}
+  }};
+  return {{
+    event: async ({{ event }}) => {{
+      switch (event.type) {{
+        case "permission.asked":
+        case "permission.replied":
+        case "session.idle":
+        case "session.error":
+        case "session.created":
+          return send(event.type);
+        case "session.status": {{
+          const status = event.properties?.status;
+          if ((status?.type ?? status) === "busy") return send("session.busy");
+        }}
+      }}
+    }},
+  }};
+}};
+"#,
+        exe = js_string(exe)
+    )
+}
+
+fn plugin_ours(text: &str) -> bool {
+    text.starts_with(PLUGIN_MARK)
+}
+
 // ------------------------------------------------------------------ the plans
 
 /// What `install` would do to the two files of `agent` under `home`. `exe` is the program that answers `mcp`.
@@ -274,7 +413,26 @@ pub fn plan_install(agent: Agent, home: &Path, exe: &str) -> Result<Vec<Change>>
     };
     let before_md = read(&instr)?;
     let after_md = md_install(before_md.as_deref());
-    Ok(vec![Change { path: cfg, before: before_cfg, after: Some(after_cfg) }, Change { path: instr, before: before_md, after: Some(after_md) }])
+    let mut out = vec![Change { path: cfg, before: before_cfg, after: Some(after_cfg) }, Change { path: instr, before: before_md, after: Some(after_md) }];
+    // and the hooks that tell oso what the agent is doing (Codex has none)
+    match agent {
+        Agent::Claude => {
+            let path = claude_settings(home);
+            let before = read(&path)?;
+            let after = claude_hooks_install(&path, before.as_deref(), exe)?;
+            out.push(Change { path, before, after: Some(after) });
+        }
+        Agent::Opencode => {
+            let path = opencode_plugin(home);
+            let before = read(&path)?;
+            if before.as_deref().is_some_and(|t| !plugin_ours(t)) {
+                bail!("{} exists and was not written by oso: remove it or keep it as it is", path.display());
+            }
+            out.push(Change { path, before, after: Some(plugin_text(exe)) });
+        }
+        Agent::Codex => {}
+    }
+    Ok(out)
 }
 
 /// What `uninstall` would do: remove what `install` added and nothing else.
@@ -291,6 +449,22 @@ pub fn plan_uninstall(agent: Agent, home: &Path) -> Result<Vec<Change>> {
     if let Some(b) = read(&instr)? {
         let after = md_uninstall(&b);
         out.push(Change { path: instr, before: Some(b), after });
+    }
+    match agent {
+        Agent::Claude => {
+            let path = claude_settings(home);
+            if let Some(b) = read(&path)? {
+                let after = claude_hooks_uninstall(&path, &b)?;
+                out.push(Change { path, before: Some(b), after });
+            }
+        }
+        Agent::Opencode => {
+            let path = opencode_plugin(home);
+            if let Some(b) = read(&path)?.filter(|t| plugin_ours(t)) {
+                out.push(Change { path, before: Some(b), after: None });
+            }
+        }
+        Agent::Codex => {}
     }
     Ok(out)
 }
@@ -537,11 +711,97 @@ mod tests {
         let (r, text) = run(&["install", "claude", "--home", &hs]);
         assert!(r.is_ok() && text.contains("Done.") && h.join(".claude.json").exists(), "{text}");
         let (_, text) = run(&["install", "claude", "--home", &hs]);
-        assert!(text.contains("Already so") && text.matches("nothing to change").count() == 2, "{text}");
+        assert!(text.contains("Already so") && text.matches("nothing to change").count() == 3, "{text}");
         let (r, _) = run(&["uninstall", "claude", "--home", &hs]);
         assert!(r.is_ok() && !h.join(".claude.json").exists() || std::fs::read_to_string(h.join(".claude.json")).unwrap().trim() == "{}");
         assert!(run(&["install", "emacs", "--home", &hs]).0.is_err());
         assert!(run(&["install"]).0.is_err() && run(&["frobnicate", "claude"]).0.is_err() && run(&["install", "claude", "--bogus"]).0.is_err());
+    }
+
+    const SETTINGS: &str = r#"{
+  "theme": "dark",
+  "hooks": {
+    "Stop": [ { "hooks": [ { "type": "command", "command": "~/bin/my-stop-hook.sh" } ] } ],
+    "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "~/bin/guard.sh" } ] } ]
+  }
+}
+"#;
+
+    fn commands(v: &Value, event: &str) -> Vec<String> {
+        v["hooks"][event].as_array().map(|gs| gs.iter().flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default()).filter_map(|h| h["command"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn claude_gets_hooks_that_tell_oso_what_it_does_and_the_users_own_hooks_stay() {
+        let h = home("claude-hooks");
+        put(&h.join(".claude/settings.json"), SETTINGS);
+        let plan = run(Agent::Claude, &h);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        for event in CLAUDE_EVENTS {
+            assert!(commands(&v, event).contains(&format!("{EXE} hook claude {event}")), "{event}");
+        }
+        assert_eq!(commands(&v, "Stop"), ["~/bin/my-stop-hook.sh", &format!("{EXE} hook claude Stop")], "the user's hook is still there, first");
+        assert_eq!(commands(&v, "PreToolUse"), ["~/bin/guard.sh"], "an event of theirs that oso does not use is untouched");
+        assert!(plan.iter().any(|c| c.path.ends_with("settings.json") && c.changed()));
+        // twice: nothing changes, byte for byte
+        let before = std::fs::read_to_string(h.join(".claude/settings.json")).unwrap();
+        let again = run(Agent::Claude, &h);
+        assert!(again.iter().all(|c| !c.changed()), "{:?}", again.iter().map(|c| c.diff()).collect::<Vec<_>>());
+        assert_eq!(std::fs::read_to_string(h.join(".claude/settings.json")).unwrap(), before);
+        // another path for the program: our handler is replaced, never doubled
+        let moved = plan_install(Agent::Claude, &h, "/opt/oso/oso").unwrap();
+        apply(&moved).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(commands(&v, "Stop"), ["~/bin/my-stop-hook.sh", "/opt/oso/oso hook claude Stop"]);
+        // uninstall takes back exactly ours
+        apply(&plan_uninstall(Agent::Claude, &h).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(commands(&v, "Stop"), ["~/bin/my-stop-hook.sh"]);
+        assert_eq!(commands(&v, "PreToolUse"), ["~/bin/guard.sh"]);
+        assert!(v["hooks"].get("UserPromptSubmit").is_none() && v["hooks"].get("SessionEnd").is_none(), "events that only had ours are gone");
+        assert_eq!(v["theme"], "dark");
+    }
+
+    #[test]
+    fn hooks_written_from_nothing_are_removed_with_their_file_and_a_path_with_spaces_is_quoted() {
+        let h = home("claude-hooks-new");
+        apply(&plan_install(Agent::Claude, &h, "/home/me/my tools/oso").unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(commands(&v, "Stop"), ["'/home/me/my tools/oso' hook claude Stop"]);
+        apply(&plan_uninstall(Agent::Claude, &h).unwrap()).unwrap();
+        assert!(!h.join(".claude/settings.json").exists(), "oso made the file, oso takes it away");
+        // a settings.json with comments is never rewritten
+        put(&h.join(".claude/settings.json"), "{ // mine\n \"theme\": \"dark\" }");
+        assert!(plan_install(Agent::Claude, &h, EXE).unwrap_err().to_string().contains("comments"));
+    }
+
+    #[test]
+    fn opencode_gets_a_plugin_file_that_is_oso_s_and_only_that_kind_of_file_is_removed() {
+        let h = home("opencode-plugin");
+        let plan = run(Agent::Opencode, &h);
+        let path = opencode_plugin(&h);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(plan.iter().any(|c| c.path == path && c.changed()));
+        assert!(text.starts_with("// oso-hook-plugin") && text.contains(&format!("const OSO = {};", js_string(EXE))));
+        for event in ["permission.asked", "permission.replied", "session.idle", "session.error", "session.created"] {
+            assert!(text.contains(&format!("case \"{event}\"")), "{event}");
+        }
+        assert!(text.contains("session.busy") && text.contains("process.env.OSO_PANE"));
+        // the file is valid JavaScript (checked with node when it is here)
+        if let Ok(node) = std::process::Command::new("node").arg("--check").arg(&path).output() {
+            assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+        }
+        assert!(run(Agent::Opencode, &h).iter().all(|c| !c.changed()), "twice changes nothing");
+        apply(&plan_uninstall(Agent::Opencode, &h).unwrap()).unwrap();
+        assert!(!path.exists());
+        // a file with that name that is not oso's is neither overwritten nor removed
+        put(&path, "export const Mine = async () => ({});\n");
+        assert!(plan_install(Agent::Opencode, &h, EXE).unwrap_err().to_string().contains("not written by oso"));
+        assert!(plan_uninstall(Agent::Opencode, &h).unwrap().iter().all(|c| c.path != path));
+        // a program path with quotes and backslashes stays a valid string
+        let odd = plugin_text("/home/me/\"odd\"\\dir/oso");
+        assert!(odd.contains(r#"const OSO = "/home/me/\"odd\"\\dir/oso";"#), "{odd}");
     }
 
     #[test]

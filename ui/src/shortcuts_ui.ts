@@ -19,7 +19,7 @@ const GROUPS: { title: string; actions: string[] }[] = [
   { title: "Tabs", actions: ["tab.1", "tab.prev", "tab.next", "tab.close", "tab.rename", "group.save", "watch.toggle"] },
   { title: "Mosaic", actions: ["mode.toggle", "split.right", "split.down", "focus.left", "move.left", "broadcast.toggle"] },
   { title: "Files and tunnels", actions: ["files.open", "tunnels.open"] },
-  { title: "Secrets and agents", actions: ["secrets.open", "sudo.fill"] },
+  { title: "Secrets and agents", actions: ["secrets.open", "sudo.fill", "attention.next", "agent.new"] },
 ];
 
 /** Actions shown as one row with the others of their kind: `Alt+1 … Alt+9`, `Alt+Left …`. */

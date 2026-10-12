@@ -165,13 +165,29 @@ impl Daemon {
     }
 }
 
-impl Backend for Daemon {
-    fn call(&self, tool: &str, args: Value, agent: &str) -> Value {
+impl Daemon {
+    /// A request that is not worth waiting for as long as the person may take (what an agent's hooks send).
+    pub fn call_within(&self, tool: &str, args: Value, agent: &str, wait: std::time::Duration) -> Value {
         let body = json!({ "tool": tool, "args": args, "agent": agent });
-        match crate::daemon::agent_call(&self.socket, &self.token, self.pane, body, std::time::Duration::from_secs(900)) {
+        match crate::daemon::agent_call(&self.socket, &self.token, self.pane, body, wait) {
             Ok(v) => v,
             Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
         }
+    }
+}
+
+impl Backend for Daemon {
+    fn call(&self, tool: &str, args: Value, agent: &str) -> Value {
+        self.call_within(tool, args, agent, std::time::Duration::from_secs(900))
+    }
+}
+
+/// `oso hook <agent> <event>`: what an agent's own hook runs, to tell oso what it is doing. It prints nothing (what a hook
+/// prints can end up in the agent's context), never fails (a hook that fails can stop an agent) and waits at most 3 s.
+/// Outside a terminal of oso it does nothing.
+pub fn hook(agent: &str, event: &str) {
+    if let Ok(d) = Daemon::from_env() {
+        let _ = d.call_within("oso_event", json!({ "agent": agent, "event": event }), agent, std::time::Duration::from_secs(3));
     }
 }
 

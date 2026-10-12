@@ -4,6 +4,7 @@
 // before it is written.
 
 import { Activity, ActivityDetail, ApprovalDecision, ApprovalRequest, Backend } from "./api";
+import { AgentState } from "./agents";
 import { hasSudo, writeCommand } from "./sudo";
 import { ApprovalQueue, actionTitle } from "./agents_ui";
 import { clear, el } from "./dom";
@@ -125,8 +126,6 @@ export function markFor(pending: number, latest: number, seen: number): Mark {
 
 // ------------------------------------------------------------------ agents
 
-export type AgentState = "needs_you" | "working" | "finished" | "idle";
-
 /** One line of the Agents tab. */
 export interface AgentRow {
   /** The terminal it runs in (its session id). */
@@ -142,7 +141,7 @@ export interface AgentRow {
   since: number;
   /** The Space it belongs to ("" when none). */
   space: string;
-  /** How the state was learned: it is "guessed" when only the screen said so. */
+  /** How the state was learned: `approval`, `hook`, `process`, or `screen` (guessed). */
   source: string;
 }
 
@@ -154,35 +153,13 @@ export function sortAgents(rows: AgentRow[]): AgentRow[] {
   return [...rows].sort((a, b) => STATE_ORDER.indexOf(a.state) - STATE_ORDER.indexOf(b.state) || a.since - b.since || a.sid - b.sid);
 }
 
-/**
- * What the Agents tab shows when nothing watches the processes: the panes that asked something of oso, one row each,
- * "needs you" while a request of theirs is waiting. (The real detection replaces this; see agents.ts.)
- */
-export function agentsFromActivity(list: Activity[], pending: ApprovalRequest[], where: (pane: number) => string): AgentRow[] {
-  const byPane = new Map<number, Activity>();
-  for (const a of list) if (a.action !== "context" && a.action !== "hosts") byPane.set(a.pane, a);
-  for (const r of pending) if (!byPane.has(r.pane)) byPane.set(r.pane, { agent: r.agent, pane: r.pane, ts: 0, updated: 0 } as Activity);
-  const waiting = new Set(pending.map((r) => r.pane));
-  return [...byPane.values()].map((a) => ({
-    sid: a.pane,
-    name: agentName(a.agent),
-    where: where(a.pane),
-    folder: "",
-    branch: "",
-    state: waiting.has(a.pane) ? "needs_you" : a.state === "running" ? "working" : "idle",
-    since: (a.updated || a.ts) * 1000,
-    space: "",
-    source: "approval",
-  }));
-}
-
 // ------------------------------------------------------------------ the panel
 
 export interface PanelCtx {
   be: Backend;
   queue: ApprovalQueue;
-  /** The agents to list, given what the log says (the app adds what it knows from the processes). */
-  agents(activity: Activity[], pending: ApprovalRequest[]): AgentRow[];
+  /** The agents to list (what the engine knows, with the screen's say where it knows nothing else). */
+  agents(): AgentRow[];
   /** Goes to the tab of this terminal. */
   focus(sid: number): void;
   /** The tab as the person sees it ("tab 1 · Local · seya"), or `undefined` when that terminal is closed. */
@@ -384,7 +361,7 @@ export class RightPanel {
     const now = Date.now();
     const nowS = Math.floor(now / 1000);
     const pending = this.ctx.queue.list();
-    this.agentRows = sortAgents(this.ctx.agents(this.activity, pending));
+    this.agentRows = sortAgents(this.ctx.agents());
     const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
     if (!force && sig === this.sig) return;
     this.sig = sig;
@@ -416,7 +393,7 @@ export class RightPanel {
       const meta = [r.folder, r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
       const row = el(
         "div",
-        { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : ""}` },
+        { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
         el("span", { class: "sdot" }),
         el("div", { class: "txt" }, el("b", {}, r.name, el("span", { class: "st" }, STATE_WORD[r.state])), el("small", {}, r.where), meta ? el("small", {}, meta) : null),
       );

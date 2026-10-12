@@ -239,6 +239,11 @@ impl Handler {
             "oso_sudo" => self.sudo(&ctx, &args),
             "oso_run_with" => self.run_with(&ctx, &args),
             "oso_tunnel" => self.tunnel(&ctx, &args),
+            // not an MCP tool: what an agent's own hooks report (`oso hook`), for the Agents panel
+            "oso_event" => {
+                let (agent, event) = (args.get("agent").and_then(Value::as_str).unwrap_or(""), args.get("event").and_then(Value::as_str).unwrap_or(""));
+                ok(json!({ "known": self.engine().agent_event(ctx.pane, agent, event) }))
+            }
             other => no(format!("oso has no tool called {other:?}")),
         }
     }

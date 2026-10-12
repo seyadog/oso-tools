@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Activity, ApprovalRequest } from "../src/api";
 import { ApprovalQueue } from "../src/agents_ui";
 import { DEFAULTS, buildBindings } from "../src/hotkeys";
-import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, agentsFromActivity, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
+import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
 import { LEFT_DEFAULT, LEFT_MAX, LEFT_MIN, RAIL_WIDTH, SECTIONS, clampLeft, clickSection, readSection } from "../src/chrome";
 
 const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", has_output: false, note: "", ...over });
@@ -106,14 +106,6 @@ describe("the Agents tab", () => {
   it("puts who needs you first, then who is working, then finished, then idle; the longest wait first", () => {
     const sorted = sortAgents([row({ sid: 1, state: "idle" }), row({ sid: 2, state: "needs_you", since: 5000 }), row({ sid: 3, state: "working" }), row({ sid: 4, state: "needs_you", since: 2000 }), row({ sid: 5, state: "finished" })]);
     expect(sorted.map((r) => r.sid)).toEqual([4, 2, 3, 5, 1]);
-  });
-  it("is made from the log until the processes are watched: needs you while a request waits", () => {
-    const act = (pane: number, state: Activity["state"], agent = "claude-code"): Activity => ({ id: pane, ts: 100, updated: 100, pane, agent, action: "run", host: "h", command: "ls", decision: "allowed", policy: "", reason: "", state, exit_code: null, bytes_out: null, preview: "", has_output: false, note: "" });
-    const rows = agentsFromActivity([act(2, "finished"), act(3, "running", "opencode"), { ...act(9, "done"), action: "context" }], [req(1, { pane: 2 }), req(2, { pane: 7, agent: "codex" })], (p) => `tab ${p}`);
-    const by = Object.fromEntries(rows.map((r) => [r.sid, r]));
-    expect(Object.keys(by).sort()).toEqual(["2", "3", "7"]);
-    expect([by[2].state, by[3].state, by[7].state]).toEqual(["needs_you", "working", "needs_you"]);
-    expect([by[3].name, by[7].name, by[2].where]).toEqual(["Opencode", "Codex", "tab 2"]);
   });
 });
 

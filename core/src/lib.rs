@@ -3,6 +3,8 @@
 
 pub mod accounts;
 pub mod agent;
+pub mod agents;
+pub mod procscan;
 pub mod agent_api;
 pub mod approvals;
 pub mod audit;

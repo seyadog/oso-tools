@@ -150,6 +150,8 @@ pub struct Engine {
     space_agents: HashMap<u64, agent::Agent>,
     /// The Spaces (saved in `oso-spaces.json`).
     pub spaces: Spaces,
+    /// What each agent running in a terminal is doing.
+    tracker: crate::agents::Tracker,
 }
 
 /// Where and how a session is opened, beyond which server it is.
@@ -166,7 +168,7 @@ impl Engine {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default() }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -787,6 +789,49 @@ impl Engine {
         let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
         let (_, key, _) = self.parsed_keys().into_iter().filter(|(id, _, _)| ids.contains(id)).find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
         agent::sign_with(&key, data, flags)
+    }
+
+    // ---------------------------------------------------------------- agents
+
+    pub fn agent_kinds(&self) -> Vec<crate::agents::AgentKind> {
+        crate::agents::kinds_in(&self.config_dir())
+    }
+
+    pub fn agent_kinds_save(&mut self, kinds: &[crate::agents::AgentKind]) -> std::result::Result<(), String> {
+        crate::agents::save_kinds(&self.config_dir(), kinds)
+    }
+
+    /// The agents running in the terminals of this window, and what each is doing. `pending`: the terminals that have a
+    /// request waiting in oso (the window knows which: it is the one asked).
+    pub fn agent_status(&mut self, pending: &[u64]) -> Vec<crate::agents::Status> {
+        let kinds = self.agent_kinds();
+        let live: std::collections::HashSet<u64> = self.sessions.keys().copied().collect();
+        let mut found = HashMap::new();
+        for (sid, procs) in crate::procscan::scan_panes() {
+            if !live.contains(&sid) {
+                continue;
+            }
+            if let Some(d) = crate::agents::detect(&kinds, &procs, std::path::Path::new("/proc")) {
+                found.insert(sid, d);
+            }
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        self.tracker.update(now, &found, pending, &live)
+    }
+
+    /// An agent's own hook said something in terminal `sid` (the background server vouched for the terminal).
+    pub fn agent_event(&mut self, sid: u64, agent: &str, event: &str) -> bool {
+        let Some(state) = crate::agents::state_for(agent, event) else { return false };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let kinds = self.agent_kinds();
+        self.tracker.event(sid, agent, state, now, &kinds);
+        true
+    }
+
+    /// The person looked at this terminal.
+    pub fn agent_ack(&mut self, sid: u64) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        self.tracker.ack(sid, now);
     }
 
     // ---------------------------------------------------------------- spaces
@@ -1839,6 +1884,41 @@ mod tests {
         assert!(e.meta_of(plain.sid).unwrap().get("space").is_none(), "a plain terminal belongs to no Space");
         e.close(live.sid);
         e.close(plain.sid);
+    }
+
+    #[test]
+    fn an_agent_started_by_hand_in_a_terminal_is_found_and_its_state_follows_what_is_known_about_it() {
+        let (mut e, log) = engine("agent-detect");
+        let dir = temp("agent-detect-dir");
+        let s = e.open_in(LOCAL, 24, 120, true, OpenCtx { space: None, cwd: Some(dir.to_string_lossy().into_owned()) }).unwrap();
+        assert!(e.agent_status(&[]).is_empty(), "a shell is not an agent");
+        e.write(s.sid, b"exec -a claude sleep 60\r");
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        let mut found = vec![];
+        while found.is_empty() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+            found = e.agent_status(&[]);
+        }
+        let a = found.first().unwrap_or_else(|| panic!("claude not found: {:?}", text_of(&log, s.sid)));
+        assert_eq!((a.sid, a.kind.as_str(), a.state, a.source), (s.sid, "claude", crate::agents::State::Idle, "process"));
+        assert_eq!(std::path::Path::new(&a.cwd).canonicalize().unwrap(), dir.canonicalize().unwrap(), "its folder");
+        // what its own hooks say beats what the process says
+        assert!(e.agent_event(s.sid, "claude", "UserPromptSubmit"));
+        assert_eq!((e.agent_status(&[])[0].state, e.agent_status(&[])[0].source), (crate::agents::State::Working, "hook"));
+        assert!(!e.agent_event(s.sid, "claude", "SomethingNew"), "an event oso does not know says nothing");
+        // a request waiting beats the hooks
+        assert_eq!(e.agent_status(&[s.sid])[0].state, crate::agents::State::NeedsYou);
+        assert_eq!(e.agent_status(&[])[0].state, crate::agents::State::Working, "and goes back when answered");
+        // when the program ends it is finished, until the person looks
+        e.write(s.sid, &[3]);
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while e.agent_status(&[]).first().is_some_and(|a| a.state != crate::agents::State::Finished) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(e.agent_status(&[])[0].state, crate::agents::State::Finished);
+        e.agent_ack(s.sid);
+        assert!(e.agent_status(&[]).is_empty());
+        e.close(s.sid);
     }
 
     #[test]

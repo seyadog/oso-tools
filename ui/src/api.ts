@@ -291,6 +291,25 @@ export interface SpaceMigration {
   skipped: string[];
 }
 
+/** The agents running in this window's terminals. */
+export interface AgentStatusRow {
+  sid: number;
+  kind: string;
+  name: string;
+  pid: number | null;
+  cwd: string;
+  folder: string;
+  branch: string;
+  state: "needs_you" | "working" | "finished" | "idle";
+  since: number;
+  source: "approval" | "hook" | "process";
+}
+export interface AgentKindRow {
+  id: string;
+  name: string;
+  command: string;
+}
+
 export interface ActivityDetail {
   command: string;
   output: string;
@@ -379,6 +398,17 @@ export interface Backend {
   activityDetail(id: number): Promise<ActivityDetail | null>;
   /** The name of the person using this computer ("seya"). */
   localUser(): Promise<string>;
+  /** The agents that run in the terminals, and what each is doing. `pending`: terminals with a request waiting. */
+  agentStatus(pending: number[]): Promise<AgentStatusRow[]>;
+  /** The person looked at this terminal. */
+  agentAck(sid: number): Promise<void>;
+  agentKinds(): Promise<AgentKindRow[]>;
+  agentKindsSave(kinds: AgentKindRow[]): Promise<void>;
+  /** `git worktree add -b <branch>` next to the repository; the folder it made. */
+  worktreeAdd(repo: string, branch: string): Promise<string>;
+  /** A desktop notice about an agent; clicking it brings oso back and calls the `onNotifyClick` handler with `sid`. */
+  notifyAgent(title: string, body: string, sid: number): Promise<void>;
+  onNotifyClick(f: (sid: number) => void): void;
   /** What agents asked, one entry per request, oldest first. */
   agentActivity(limit: number): Promise<Activity[]>;
   secretList(): Promise<SecretMeta[]>;

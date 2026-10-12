@@ -214,6 +214,15 @@ export class Pane {
     return out.slice(mark + 1).join("\n");
   }
 
+  /** The last `n` lines of the screen, as text (kept in the window: only used to guess what an agent is doing). */
+  tailLines(n: number): string[] {
+    const b = this.term.buffer.active;
+    const end = b.baseY + this.term.rows;
+    const out: string[] = [];
+    for (let i = Math.max(0, end - n); i < end; i++) out.push(b.getLine(i)?.translateToString(true) ?? "");
+    return out;
+  }
+
   /** The line the cursor is on (what a prompt looks like when the shell is waiting). */
   cursorLine(): string {
     const b = this.term.buffer.active;

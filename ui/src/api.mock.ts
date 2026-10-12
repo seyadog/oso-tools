@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, Activity, Space, SpaceMigration, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, Activity, AgentStatusRow, Space, SpaceMigration, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -59,10 +59,16 @@ export function mockBackend(): Backend {
   };
 
   // For the tests: make a session end the way a dropped connection does.
-  const knobs = { failNext: 0, noTools: false, empty: false };
+  const knobs = { failNext: 0, noTools: false, empty: false, noRepo: false };
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
+  /** What the engine would say about the agents; a test changes it. */
+  const agents: AgentStatusRow[] = [];
+  const agentAcks: number[] = [];
+  const agentKinds = [{ id: "claude", name: "Claude Code", command: "claude" }, { id: "opencode", name: "OpenCode", command: "opencode" }, { id: "codex", name: "Codex", command: "codex" }];
+  const worktrees: [string, string][] = [];
+  let notifyClick: (sid: number) => void = () => {};
   const spaces: Space[] = [];
   let nextSpace = 1;
   /** What a test says the migration of the old groups did, to be told once. */
@@ -86,6 +92,11 @@ export function mockBackend(): Backend {
     approvalAnswers,
     spaces,
     migration,
+    agents,
+    agentAcks,
+    agentKinds,
+    worktrees,
+    clickNotice: (sid: number) => notifyClick(sid),
     activity,
     deletedEnv,
     cli: (e: CliEvent) => cliHandler(e),
@@ -313,6 +324,22 @@ export function mockBackend(): Backend {
       return a ? { command: a.command, output: a.output ?? a.preview, cut: false } : null;
     },
     localUser: async () => "seya",
+    agentStatus: async (pending) => {
+      // as the engine does: a request waiting makes its terminal "needs you", also when nothing else is known about the agent there
+      const rows: AgentStatusRow[] = agents.map((a) => ({ ...a, ...(pending.includes(a.sid) ? { state: "needs_you" as const, source: "approval" as const } : {}) }));
+      for (const sid of pending) if (sessions.has(sid) && !rows.some((r) => r.sid === sid)) rows.push({ sid, kind: "agent", name: "AI agent", pid: null, cwd: "", folder: "", branch: "", state: "needs_you", since: Date.now(), source: "approval" });
+      return rows;
+    },
+    agentAck: async (sid) => void agentAcks.push(sid),
+    agentKinds: async () => agentKinds.map((k) => ({ ...k })),
+    agentKindsSave: async (kinds) => void agentKinds.splice(0, agentKinds.length, ...kinds.map((k) => ({ ...k }))),
+    worktreeAdd: async (repo, branch) => {
+      if (knobs.noRepo) throw new Error(`${repo} is not inside a git repository`);
+      worktrees.push([repo, branch]);
+      return `${repo}.worktrees/${branch.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+    },
+    notifyAgent: async (title, body, sid) => void notices.push([`${title}|${sid}`, body]),
+    onNotifyClick: (f) => void (notifyClick = f),
     auditRecent: async () => [
       { ts: 1_800_000_000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", exit_code: 0, note: "" },
       { ts: 1_800_000_060, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "rm -rf /tmp/x", decision: "denied", exit_code: null, note: "" },

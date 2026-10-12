@@ -454,6 +454,24 @@ fn install(c: &Chain) {
 }
 
 #[test]
+fn what_an_agents_hooks_report_reaches_the_window_only_from_inside_its_terminal() {
+    let c = chain("hooks");
+    let (pane, token, _, _hold) = terminal(&c, "a");
+    install(&c);
+    let ask = |token: &str, pane: u64, agent: &str, event: &str| daemon::agent_call(&c.socket, token, pane, json!({ "tool": "oso_event", "args": { "agent": agent, "event": event } }), Duration::from_secs(10)).unwrap();
+    let r = ask(&token, pane, "claude", "Stop");
+    assert_eq!((r["ok"].as_bool(), r["result"]["known"].as_bool()), (Some(true), Some(true)), "{r}");
+    assert_eq!(ask(&token, pane, "opencode", "session.idle")["result"]["known"], true);
+    assert_eq!(ask(&token, pane, "claude", "SomethingNew")["result"]["known"], false, "an event oso does not know is not an error");
+    assert_eq!(ask(&token, pane, "codex", "Stop")["result"]["known"], false);
+    // a token that is not that terminal's is refused like any other request
+    let r = ask("0000", pane, "claude", "Stop");
+    assert_eq!(r["ok"], false, "{r}");
+    // and nothing of it is in the audit log: it is a signal, not something an agent asked for
+    assert!(!audit(&c.rig).iter().any(|l| l["action"] == "oso_event"));
+}
+
+#[test]
 fn a_request_from_inside_a_terminal_reaches_the_window_and_one_from_outside_does_not() {
     let c = chain("chain");
     let (pane, token, _, _hold) = terminal(&c, "a");

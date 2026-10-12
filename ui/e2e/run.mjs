@@ -1223,11 +1223,6 @@ await shot("10e-panel-sudo");
 await page.click('[data-approval="20"] [data-act="panel-deny"]');
 await settle(200);
 
-// the Agents tab: who needs you
-await page.click('[data-rtab="agents"]');
-await settle(150);
-check("Agents lists the agents that asked something, one row per terminal", (await page.$$("[data-agent-row]")).length === 3);
-
 // a request waiting: the panel opens by itself, on Activity, and it is answered there, with no window over everything
 await page.keyboard.press("Alt+j");
 await settle(200);
@@ -1245,7 +1240,6 @@ check("Allow once answers the agent and takes the card away", (await page.evalua
 await page.evaluate(() => globalThis.__osoMock.approval({ id: 22, pane: 3, label: "Opencode in Local, pane 3", agent: "opencode", action: "run", host: "staging", command: "systemctl restart nginx", production: true, can_remember: false }));
 await settle(200);
 check("production cannot be remembered, and is red", (await page.$('[data-approval="22"] [data-act="panel-always"]')) === null && (await page.$('[data-approval="22"] .badge-prod')) !== null);
-check("the Agents tab marks who needs you", (await page.textContent('[data-rtab="agents"] .pending-n')) === "1");
 await page.click('[data-approval="22"] [data-act="panel-deny"]');
 await settle(200);
 check("Deny answers no", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "22,deny");
@@ -1322,6 +1316,159 @@ const items = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.tex
 check("the top bar has one menu, with what used to be a row of icons", items.length >= 9 && items.some((t) => t.includes("Snippets")) && items.some((t) => t.includes("Focus mode")) && items.some((t) => t.includes("Copy files")) && (await page.$$(".tools .ib")).length <= 2);
 await page.keyboard.press("Escape");
 check("the sheet of shortcuts lists the new keys", await (async () => { await page.keyboard.press("Shift+Slash"); await settle(250); const t = await page.textContent('[data-sheet="shortcuts"]'); await page.keyboard.press("Escape"); return t.includes("Alt+J") && t.includes("Alt+Z") && t.includes("Alt+Shift+1") && t.includes("Left panel"); })());
+await section("servers");
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
+// 16. agents: found in the terminals, their state, the dot on the tab, who needs you next, notices, New agent
+await clearAll();
+await section("servers");
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(300);
+const [t1, t2, t3] = await page.evaluate(() => window.oso.ws.screen.groups.map((g) => g.active));
+const now = Date.now();
+await page.evaluate(({ t1, t2, t3, now }) => {
+  const m = globalThis.__osoMock;
+  m.agents.length = 0;
+  m.agents.push(
+    { sid: t1, kind: "claude", name: "Claude Code", pid: 11, cwd: "/home/seya/code/acme", folder: "acme", branch: "feature/login", state: "working", since: now - 60000, source: "hook" },
+    { sid: t2, kind: "opencode", name: "OpenCode", pid: 12, cwd: "/home/seya/code/api", folder: "api", branch: "main", state: "needs_you", since: now - 120000, source: "hook" },
+    { sid: t3, kind: "codex", name: "Codex", pid: 13, cwd: "/home/seya/code/web", folder: "web", branch: "", state: "needs_you", since: now - 30000, source: "hook" },
+  );
+  return window.oso.pollAgents();
+}, { t1, t2, t3, now });
+await settle(300);
+if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click("#rtoggle");
+await settle(200);
+await page.click('[data-rtab="agents"]');
+await settle(200);
+const rows16 = await page.$$eval("[data-agent-row]", (r) => r.map((x) => ({ sid: Number(x.getAttribute("data-agent-row")), state: x.getAttribute("data-state"), text: x.textContent })));
+check("the Agents tab lists each agent with its folder, branch and state", rows16.length === 3 && rows16.find((r) => r.sid === t1).text.includes("acme") && rows16.find((r) => r.sid === t1).text.includes("feature/login") && rows16.find((r) => r.sid === t1).text.includes("working"), JSON.stringify(rows16));
+check("who needs you comes first, the one waiting longest on top", rows16.map((r) => r.state).join() === "needs_you,needs_you,working" && rows16[0].sid === t2 && rows16[1].sid === t3);
+check("the tab says which tab it is, with a state mark of its own", (await page.textContent(`[data-agent-row="${t1}"]`)).includes("tab 1") && (await page.$$(".tab .adot")).length === 3 && (await page.getAttribute(`.tab[data-sid="${t2}"] .adot`, "data-state")) === "needs_you");
+check("the Agents tab carries the number of those who need you", (await page.textContent('[data-rtab="agents"] .pending-n')) === "2");
+check("they are in a group of their own: no Space", (await page.textContent('[data-section="agents"] .rp-space')) === "No Space");
+await shot("11a-agents");
+await page.click(`[data-agent-row="${t3}"]`);
+await settle(200);
+check("a click goes to that tab", (await activeSid()) === t3);
+
+// the attention queue
+await page.evaluate((t1) => window.oso.focusSession(t1), t1);
+await settle(150);
+const walk = [];
+for (let i = 0; i < 4; i++) {
+  await page.keyboard.press("Alt+n");
+  await settle(150);
+  walk.push(await activeSid());
+}
+check("Alt+N jumps to who needs you in order, oldest first, and starts again", JSON.stringify(walk) === JSON.stringify([t2, t3, t2, t3]), JSON.stringify([walk, t2, t3]));
+await page.evaluate(({ t2, t3 }) => { globalThis.__osoMock.agents.forEach((a) => (a.state = "working")); return window.oso.pollAgents(); }, { t2, t3 });
+await settle(200);
+await page.keyboard.press("Alt+n");
+await settle(300);
+check("with nobody waiting it says so and stays", (await page.textContent("#toast")).includes("No agent needs you") && (await activeSid()) === walk[3]);
+
+// a request waiting is the exact signal
+await page.evaluate((t1) => globalThis.__osoMock.approval({ id: 31, pane: t1, label: "Claude in web-1", agent: "claude-code", action: "run", host: "web-1", command: "ls", production: false, can_remember: true }), t1);
+await settle(250);
+await page.evaluate(() => window.oso.pollAgents());
+await settle(200);
+await page.click('[data-rtab="agents"]');
+await settle(150);
+check("an agent with a request waiting needs you, known from the request itself", (await page.getAttribute(`[data-agent-row="${t1}"]`, "data-state")) === "needs_you" && (await page.getAttribute(`.tab[data-sid="${t1}"] .adot`, "data-state")) === "needs_you");
+await page.click('[data-rtab="activity"]');
+await page.click('[data-approval="31"] [data-act="panel-deny"]');
+await settle(200);
+
+// a notice from outside the window, once, that brings you to the tab
+await page.evaluate(() => { globalThis.__osoMock.agents.forEach((a) => (a.state = "working")); return window.oso.pollAgents(); });
+await settle(200);
+await page.evaluate(() => { globalThis.__osoMock.notices.length = 0; });
+await page.evaluate(() => { document.hasFocus = () => false; });
+await page.evaluate(({ t1 }) => { globalThis.__osoMock.agents.find((a) => a.sid === t1).state = "needs_you"; return window.oso.pollAgents(); }, { t1 });
+await settle(200);
+await page.evaluate(() => window.oso.pollAgents());
+await settle(200);
+const notices16 = await page.evaluate(() => globalThis.__osoMock.notices.map((n) => n.join("|")));
+check("when oso is not in front, an agent that starts to need you is announced, once", notices16.filter((n) => n.includes("needs you") && n.endsWith(`|${t1}`) || n.includes(`|${t1}|`)).length === 1 && notices16.some((n) => n.startsWith("Claude Code needs you")), JSON.stringify(notices16));
+await page.evaluate((t3) => window.oso.focusSession(t3), t3);
+await page.evaluate((t1) => globalThis.__osoMock.clickNotice(t1), t1);
+await settle(200);
+check("clicking the notice goes to its tab", (await activeSid()) === t1);
+await page.evaluate(() => { delete document.hasFocus; });
+// finishing: told when it was working; looking at the tab calms it down
+await page.evaluate(({ t2 }) => { globalThis.__osoMock.agentAcks.length = 0; const a = globalThis.__osoMock.agents.find((x) => x.sid === t2); a.state = "finished"; return window.oso.pollAgents(); }, { t2 });
+await settle(200);
+await page.evaluate((t2) => window.oso.focusSession(t2), t2);
+await page.evaluate(() => window.oso.pollAgents());
+await settle(200);
+check("looking at the tab of an agent that finished tells the engine", (await page.evaluate(() => globalThis.__osoMock.agentAcks)).includes(t2));
+if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click("#rtoggle");
+await settle(150);
+
+// the title of a tab is renamed by double-clicking it
+await page.dblclick(`.tab[data-sid="${t2}"]`);
+await settle(250);
+await page.fill("#modal-bg input", "my renamed tab");
+await page.keyboard.press("Enter");
+await settle(250);
+check("double-clicking a tab renames it", (await page.textContent(`.tab[data-sid="${t2}"]`)).includes("my renamed tab"));
+
+// New agent, from a Space
+await clearAll();
+await page.evaluate(() => { globalThis.__osoMock.agents.length = 0; globalThis.__osoMock.worktrees.length = 0; });
+await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Acme", profile: null, folders: ["/tmp/acme"], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
+await section("spaces");
+await page.hover('.row.space:has-text("Acme")');
+await page.click('.row.space:has-text("Acme") [data-act="space-agent"]');
+await settle(250);
+check("New agent asks for a folder (the Space's first one), an agent and a worktree", (await page.inputValue('[data-name="launch-folder"]')) === "/tmp/acme" && (await page.$('[data-name="launch-agent"]')) !== null && (await page.$('[data-name="launch-worktree"]')) !== null);
+check("the agents are the ones in the list", (await page.$$eval('[data-name="launch-agent"] .sel-item', (e) => e.map((x) => x.textContent))).join() === "Claude Code,OpenCode,Codex");
+await page.click('[data-name="launch-agent"] .sel-btn');
+await page.click('[data-name="launch-agent"] .sel-item[data-value="opencode"]');
+await page.check('[data-name="launch-worktree"]');
+const proposed = await page.inputValue('[data-name="launch-branch"]');
+check("a worktree proposes a branch for the agent, editable", /^oso\/opencode-\d{6}-\d{4}$/.test(proposed), proposed);
+await page.fill('[data-name="launch-branch"]', "oso/try-1");
+await page.evaluate(() => { globalThis.__osoMock.knobs.noRepo = true; });
+await page.click('[data-act="launch-agent"]');
+await settle(300);
+check("a folder that is not a repository says so and opens nothing", (await page.textContent("#modal-bg .err")).includes("not inside a git repository") && (await state()).all === 0);
+await page.evaluate(() => { globalThis.__osoMock.knobs.noRepo = false; });
+await page.click('[data-act="launch-agent"]');
+await settle(900);
+const wt = await page.evaluate(() => globalThis.__osoMock.worktrees);
+const opened16 = await page.evaluate(() => { const t = [...window.oso.ws.tabs.values()].at(-1); return t ? { title: t.title, space: t.space, cwd: t.cwd } : null; });
+check("the worktree is made and the agent starts in it, in the Space", wt.length === 1 && wt[0][1] === "oso/try-1" && opened16 && opened16.title === "OpenCode · oso-try-1" && opened16.cwd === "/tmp/acme.worktrees/oso-try-1" && opened16.space > 0, JSON.stringify([wt, opened16]));
+check("its command is typed in the terminal", (await termText(await activeSid())).includes("opencode"));
+await section("spaces");
+await page.hover('.row.space:has-text("Acme")');
+await page.click('.row.space:has-text("Acme") [data-act="space-agent"]');
+await settle(200);
+await page.click('[data-act="launch-terminal"]');
+await settle(600);
+check("\"Terminal without an agent\" opens just the terminal", (await state()).all === 2 && !(await termText(await activeSid())).includes("claude"));
+// the list of agents is edited in Settings
+await page.keyboard.press("Control+,");
+await settle(250);
+await page.click('[data-act="agent-kinds"]');
+await settle(250);
+check("Settings has the list of agents", (await page.$$('[data-name="agent-kinds"] [data-name="kind-name"]')).length === 3);
+await page.click('[data-act="kind-add"]');
+await page.fill('[data-name="agent-kinds"] .keyrow:last-child [data-name="kind-name"]', "Aider");
+await page.fill('[data-name="agent-kinds"] .keyrow:last-child [data-name="kind-command"]', "aider --model sonnet");
+await page.click('[data-act="kinds-save"]');
+await settle(250);
+check("a new agent is kept in the list", (await page.evaluate(() => globalThis.__osoMock.agentKinds.map((k) => k.id + ":" + k.command))).includes("aider:aider --model sonnet"));
+await clearAll();
+await page.evaluate(async () => { for (const sp of await window.oso.be.spaceList()) await window.oso.be.spaceDelete(sp.id); await window.oso.refreshSpaces(); });
 await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
