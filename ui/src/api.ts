@@ -408,6 +408,8 @@ export interface Backend {
   worktreeAdd(repo: string, branch: string): Promise<string>;
   /** What the person is looking at (ids only), for an agent that is told "this server". */
   focusUpdate(selected: number | null, open: number[], active: number | null): Promise<void>;
+  /** A sound for the window to play: one of the desktop's theme (`system`: "complete" or "message") or a file (`file`: a path). */
+  soundLoad(kind: "system" | "file", value: string): Promise<{ mime: string; b64: string }>;
   /** A desktop notice about an agent; clicking it brings oso back and calls the `onNotifyClick` handler with `sid`. */
   notifyAgent(title: string, body: string, sid: number): Promise<void>;
   onNotifyClick(f: (sid: number) => void): void;

@@ -341,6 +341,10 @@ export function mockBackend(): Backend {
       return `${repo}.worktrees/${branch.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
     },
     focusUpdate: async (selected, open, active) => void focusSent.push({ selected, open, active }),
+    soundLoad: async (kind, value) => {
+      if (kind === "file" && value.includes("missing")) throw new Error("could not read that file");
+      return { mime: "audio/ogg", b64: "T2dnUw==" };
+    },
     notifyAgent: async (title, body, sid) => void notices.push([`${title}|${sid}`, body]),
     onNotifyClick: (f) => void (notifyClick = f),
     auditRecent: async () => [

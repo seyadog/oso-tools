@@ -65,6 +65,8 @@ export function nextAttention(agents: Waiting[], current: number | null): number
 }
 
 export interface Notice {
+  /** Which sound goes with it. */
+  event: "needs" | "finished";
   sid: number;
   title: string;
   body: string;
@@ -76,8 +78,8 @@ export function noticesFor(before: Map<number, AgentState>, now: { sid: number; 
   for (const a of now) {
     const was = before.get(a.sid);
     if (was === undefined || was === a.state) continue; // the first time it is seen is the baseline, not news
-    if (a.state === "needs_you") out.push({ sid: a.sid, title: `${a.name} needs you`, body: a.where });
-    else if (a.state === "finished" && was === "working") out.push({ sid: a.sid, title: `${a.name} finished`, body: a.where });
+    if (a.state === "needs_you") out.push({ event: "needs", sid: a.sid, title: `${a.name} needs you`, body: a.where });
+    else if (a.state === "finished" && was === "working") out.push({ event: "finished", sid: a.sid, title: `${a.name} finished`, body: a.where });
   }
   return out;
 }

@@ -15,7 +15,7 @@ const build = (() => {
 
 export default defineConfig({
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: { port: 1420, strictPort: true, fs: { allow: [".."] } },
   build: { target: "es2022", outDir: "dist" },
   define: { __APP_VERSION__: JSON.stringify(version), __APP_BUILD__: JSON.stringify(build) },
   test: { environment: "jsdom", include: ["tests/**/*.test.ts"] },

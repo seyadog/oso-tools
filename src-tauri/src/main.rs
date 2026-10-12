@@ -577,6 +577,18 @@ fn worktree_add(repo: String, branch: String) -> Res<String> {
     oso_core::agents::worktree_add(&repo, branch.trim()).map(|p| p.to_string_lossy().into_owned())
 }
 
+/// A sound for the window to play: one of the desktop's theme (`system`: "complete" or "message") or a file (`file`: a path).
+#[tauri::command]
+fn sound_load(kind: String, value: String) -> Res<oso_core::sounds::SoundData> {
+    let path = match kind.as_str() {
+        "system" => oso_core::sounds::find_system(&value, &oso_core::sounds::data_dirs()).ok_or("this desktop has no such sound")?,
+        "file" => oso_core::spaces::expand_home(&value),
+        _ => return Err("unknown kind of sound".into()),
+    };
+    let (mime, bytes) = oso_core::sounds::load(&path).map_err(err)?;
+    Ok(oso_core::sounds::SoundData { mime: mime.into(), b64: B64.encode(bytes) })
+}
+
 #[tauri::command]
 fn read_config(name: String) -> Res<Option<String>> {
     let path = config_path(&name)?;
@@ -756,6 +768,7 @@ fn main() {
             agent_kinds_save,
             worktree_add,
             focus_update,
+            sound_load,
             integration_status,
             integration_plan,
             integration_apply,

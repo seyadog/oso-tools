@@ -1500,6 +1500,88 @@ await settle(300);
 await page.keyboard.press("Control+n");
 await settle(400);
 
+// 18. sounds and colour for what calls for you
+await clearAll();
+await section("servers");
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(300);
+const [s1, s2] = await page.evaluate(() => window.oso.ws.screen.groups.map((g) => g.active));
+await page.evaluate(() => { localStorage.removeItem("oso.sound"); window.oso.sound.update({ enabled: true, volume: 0.7, finished: { kind: "builtin" }, needs: { kind: "builtin" } }); window.oso.sound.played.length = 0; document.hasFocus = () => true; globalThis.__osoMock.agents.length = 0; });
+await page.evaluate((sid) => window.oso.focusSession(sid), s2);
+const setAgent = (sid, state) => page.evaluate(({ sid, state }) => { const a = globalThis.__osoMock.agents; const row = a.find((x) => x.sid === sid); if (row) row.state = state; else a.push({ sid, kind: "claude", name: "Claude Code", pid: 1, cwd: "/x/acme", folder: "acme", branch: "", state, since: Date.now(), source: "hook" }); return window.oso.pollAgents(); }, { sid, state });
+const played = () => page.evaluate(() => window.oso.sound.played.map((p) => `${p.event}:${p.sid}`));
+await setAgent(s1, "working");
+await setAgent(s1, "finished");
+await settle(200);
+check("an agent in a tab you are not looking at finishes: it sounds", (await played()).join() === `finished:${s1}`, JSON.stringify(await played()));
+check("and its terminal and its tab get a green border until you look", (await page.$(`.pane.call-done`)) !== null && (await page.$(`.tab.call-done[data-sid="${s1}"]`)) !== null);
+await page.evaluate((sid) => window.oso.focusSession(sid), s1);
+await page.evaluate(() => window.oso.pollAgents());
+await settle(300);
+check("looking at that tab clears the border", (await page.$$(".pane.call-done")).length === 0 || (await page.evaluate(() => globalThis.__osoMock.agentAcks.length)) > 0);
+// the one you are looking at never sounds
+await page.evaluate(() => { window.oso.sound.played.length = 0; globalThis.__osoMock.agents.length = 0; return window.oso.pollAgents(); });
+await setAgent(s1, "working");
+await setAgent(s1, "needs_you");
+await settle(200);
+check("an agent in the tab you are looking at calls for you: no sound", (await played()).length === 0, JSON.stringify(await played()));
+check("but it is marked in amber", (await page.$(".pane.call-needs")) !== null && (await page.$(`.tab.call-needs[data-sid="${s1}"]`)) !== null);
+// another agent needs you, in the tab you are not looking at
+await page.evaluate(() => window.oso.sound.forget());
+await page.evaluate((sid) => window.oso.focusSession(sid), s2);
+await settle(150);
+await setAgent(s1, "working");
+await setAgent(s1, "needs_you");
+await settle(200);
+check("an agent that needs you, in another tab, sounds", (await played()).join() === `needs:${s1}`, JSON.stringify(await played()));
+await setAgent(s1, "working");
+await setAgent(s1, "needs_you");
+await settle(200);
+check("and it does not sound again at once", (await played()).length === 1, JSON.stringify(await played()));
+// the bell: a terminal you were watching is done
+await page.evaluate(() => { window.oso.sound.played.length = 0; window.oso.sound.forget(); });
+await page.evaluate((sid) => window.oso.tellDone(sid, "Done: the terminal is back at its prompt"), s1);
+await settle(200);
+check("a terminal you were watching (the bell) that is done sounds too", (await played()).join() === `finished:${s1}`, JSON.stringify(await played()));
+check("and shows the green border", (await page.$(`.pane.call-done`)) !== null);
+// Settings: off, volume, a sound for each, and the Test button
+await page.evaluate(() => { document.hasFocus = () => true; });
+await page.keyboard.press("Control+,");
+await settle(250);
+await page.click('[data-act="sounds"]');
+await settle(250);
+await page.click('[data-name="sound-enabled"]');
+await page.fill('[data-name="sound-volume"]', "40");
+await page.click('[data-name="sound-needs"] .sel-btn');
+await page.click('[data-name="sound-needs"] .sel-item[data-value="file"]');
+await page.fill('[data-name="sound-needs-file"]', "~/sounds/ding.ogg");
+await page.click('[data-name="sound-finished"] .sel-btn');
+await page.click('[data-name="sound-finished"] .sel-item[data-value="system"]');
+await page.evaluate(() => { window.oso.sound.played.length = 0; });
+await page.click('[data-act="sound-test-needs"]');
+await settle(150);
+check("Test plays what the form says, also with sounds off", JSON.stringify(await page.evaluate(() => window.oso.sound.played.map((p) => [p.event, p.source, p.volume]))) === JSON.stringify([["needs", "file", 0.4]]));
+await page.click('[data-act="sound-test-finished"]');
+await settle(150);
+check("each event has its own Test", (await page.evaluate(() => window.oso.sound.played.map((p) => p.source))).join() === "file,system");
+await page.click('[data-act="sounds-save"]');
+await settle(200);
+const savedSound = await page.evaluate(() => JSON.parse(localStorage.getItem("oso.sound")));
+check("what was chosen is kept", savedSound.enabled === false && savedSound.volume === 0.4 && savedSound.needs.path === "~/sounds/ding.ogg" && savedSound.finished.kind === "system", JSON.stringify(savedSound));
+await page.evaluate(() => { window.oso.sound.played.length = 0; });
+await page.evaluate((sid) => window.oso.tellDone(sid, "again"), s1);
+await page.evaluate(() => window.oso.tellDone(Number([...window.oso.ws.tabs.keys()][0]), "again"));
+await settle(200);
+check("with sounds off nothing sounds, but the border still shows", (await played()).length === 0 && (await page.$$(".pane.call-done")).length >= 1);
+await page.evaluate(() => { localStorage.removeItem("oso.sound"); window.oso.sound.update({ enabled: true, volume: 0.7, finished: { kind: "builtin" }, needs: { kind: "builtin" } }); delete document.hasFocus; globalThis.__osoMock.agents.length = 0; });
+await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
 // 14. the main key: one setting changes every shortcut at once
 await page.keyboard.press("Control+,");
 await settle(250);

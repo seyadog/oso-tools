@@ -21,6 +21,8 @@ import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel } from "./rpanel";
 import { AgentState, AgentStatus, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
+import { SoundPlayer } from "./sound";
+import { soundsDialog } from "./sounds_ui";
 import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
@@ -111,7 +113,9 @@ export class App {
   constructor(
     private be: Backend,
     private root: HTMLElement,
-  ) {}
+  ) {
+    this.sound = new SoundPlayer(be);
+  }
 
   // ------------------------------------------------------------ start
 
@@ -653,12 +657,13 @@ export class App {
   }
 
   /** It is done: a toast, a mark on its tab, and a desktop notification if you are not looking at it. */
-  private tellDone(sid: Id, what: string) {
+  tellDone(sid: Id, what: string) {
     this.watches.delete(sid);
     const tab = this.ws.tabs.get(sid);
     if (!tab) return;
     const looking = document.hasFocus() && this.ws.screen.group && leaves(this.ws.screen.group.tree).includes(sid) && this.ws.screen.active === sid;
     if (!looking) this.alerts.add(sid);
+    void this.sound.notify("finished", sid, !!looking);
     toast(`${tab.title}: ${what}`, 6000);
     if (!looking) void this.be.notify(tab.title, what).catch(() => {});
     this.render();
@@ -843,6 +848,36 @@ export class App {
 
   // ------------------------------------------------------------ agents
 
+  /** The sounds (what called for you, and when it may sound). */
+  readonly sound: SoundPlayer;
+
+  /** Is the window in front with the tab of this terminal on show? Then nothing needs to call for you. */
+  private looking(sid: Id): boolean {
+    const g = this.ws.screen.group;
+    return document.hasFocus() && !!g && leaves(g.tree).includes(sid);
+  }
+
+  /**
+   * Marks, with a colour, the terminals that call for you until you look at them: green for one that is done (an agent,
+   * or a terminal you were watching), amber for an agent that needs you. It is on the terminal and on its tab.
+   */
+  private applyAlerts() {
+    const state = new Map(this.agentRows().map((r) => [r.sid, r.state]));
+    for (const tab of this.ws.tabs.values()) {
+      const pane = this.panes.get(tab.sid);
+      if (!pane) continue;
+      const s = state.get(tab.sid);
+      pane.root.classList.toggle("call-done", this.alerts.has(tab.sid) || s === "finished");
+      pane.root.classList.toggle("call-needs", s === "needs_you");
+    }
+    for (const el of this.tabsEl.querySelectorAll<HTMLElement>(".tab[data-sid]")) {
+      const g = this.ws.screen.groups.find((x) => x.active === Number(el.dataset.sid));
+      const ids = g ? leaves(g.tree) : [Number(el.dataset.sid)];
+      el.classList.toggle("call-needs", ids.some((id) => state.get(id) === "needs_you"));
+      el.classList.toggle("call-done", !ids.some((id) => state.get(id) === "needs_you") && ids.some((id) => this.alerts.has(id) || state.get(id) === "finished"));
+    }
+  }
+
   /** What the engine says about the agents, as last asked. */
   private agents: AgentStatus[] = [];
   /** The state each agent was in the last time, so that only a change is news. */
@@ -858,10 +893,12 @@ export class App {
     const news = noticesFor(this.agentSeen, rows.map((r) => ({ sid: r.sid, name: r.name, state: r.state, where: r.where })));
     this.agentSeen = new Map(rows.map((r) => [r.sid, r.state]));
     if (!document.hasFocus()) for (const n of news) void this.be.notifyAgent(n.title, n.body, n.sid).catch(() => {});
+    for (const n of news) void this.sound.notify(n.event, n.sid, this.looking(n.sid));
     // looking at a tab whose agent finished calms it down
     const on = this.ws.screen.active;
     if (on != null && document.hasFocus() && this.agents.some((a) => a.sid === on && a.state === "finished")) void this.be.agentAck(on).catch(() => {});
     this.renderTopbar();
+    this.applyAlerts();
     this.rpanel.render();
   }
 
@@ -944,6 +981,7 @@ export class App {
       pane.root.classList.toggle("active", tab.sid === s.active);
       if (tab.sid === s.active) this.alerts.delete(tab.sid);
       pane.root.classList.toggle("dead", tab.dead);
+      this.applyAlerts();
       pane.root.classList.toggle("prod", this.isProd(tab.serverId));
       const bc = ws.broadcasting && !tab.dead;
       pane.root.classList.toggle("broadcast", bc);
@@ -2156,6 +2194,11 @@ export class App {
         close();
         void auditDialog(this.be);
       };
+      const soundsBtn = el("button", { class: "btn", type: "button", "data-act": "sounds" }, "Sounds…");
+      soundsBtn.onclick = () => {
+        close();
+        soundsDialog(this.sound);
+      };
       const agentsBtn = el("button", { class: "btn", type: "button", "data-act": "agent-kinds" }, "Agents…");
       agentsBtn.onclick = () => {
         close();
@@ -2186,7 +2229,7 @@ export class App {
         el("div", { class: "hint", style: "margin:10px 0 6px" }, "Click a shortcut and press the new keys; the cross puts it back. Saved in hotkeys.json, which you can also edit by hand."),
         list,
         warn,
-        el("div", { class: "actions" }, activity, agentsBtn, cancel, save),
+        el("div", { class: "actions" }, activity, agentsBtn, soundsBtn, cancel, save),
       );
     });
   }

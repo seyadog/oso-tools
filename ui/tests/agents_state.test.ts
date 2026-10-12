@@ -53,8 +53,8 @@ describe("the attention queue", () => {
 describe("what is said from outside the window", () => {
   const now = (state: AgentState, sid = 1) => [{ sid, name: "Claude Code", state, where: "tab 1 · Local · seya" }];
   it("is said when an agent starts to need you, and when one that was working finishes, once", () => {
-    expect(noticesFor(new Map([[1, "working"]]), now("needs_you"))).toEqual([{ sid: 1, title: "Claude Code needs you", body: "tab 1 · Local · seya" }]);
-    expect(noticesFor(new Map([[1, "working"]]), now("finished"))).toEqual([{ sid: 1, title: "Claude Code finished", body: "tab 1 · Local · seya" }]);
+    expect(noticesFor(new Map([[1, "working"]]), now("needs_you"))).toEqual([{ event: "needs", sid: 1, title: "Claude Code needs you", body: "tab 1 · Local · seya" }]);
+    expect(noticesFor(new Map([[1, "working"]]), now("finished"))).toEqual([{ event: "finished", sid: 1, title: "Claude Code finished", body: "tab 1 · Local · seya" }]);
     expect(noticesFor(new Map([[1, "needs_you"]]), now("needs_you"))).toEqual([]);
   });
   it("says nothing the first time an agent is seen, nor for a finish that was not after work, nor for work or rest", () => {

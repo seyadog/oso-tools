@@ -62,6 +62,7 @@ export function tauriBackend(): Backend {
     agentKindsSave: (kinds) => call("agent_kinds_save", { kinds }),
     worktreeAdd: (repo, branch) => call("worktree_add", { repo, branch }),
     focusUpdate: (selected, open, active) => call("focus_update", { selected, open, active }),
+    soundLoad: (kind, value) => call("sound_load", { kind, value }),
     notifyAgent: (title, body, sid) => call("notify_agent", { title, body, sid }),
     onNotifyClick: (f) => void listen<number>("notify-click", (e) => f(e.payload)),
     secretList: () => call("secret_list"),

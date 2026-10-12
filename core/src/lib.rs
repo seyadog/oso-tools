@@ -25,6 +25,7 @@ pub mod session;
 pub mod ssh_import;
 pub mod settings;
 pub mod spaces;
+pub mod sounds;
 pub mod store;
 pub mod totp;
 pub mod vault;
