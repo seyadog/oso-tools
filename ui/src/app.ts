@@ -258,6 +258,26 @@ export class App {
         await this.be.writeConfig("selftest.out", sp ? `opened ${sp.name}` : `no Space called ${want.slice(5)}`);
         return;
       }
+      if (want === "sound") {
+        await wait(1500);
+        await this.sound.test("finished");
+        await wait(1500);
+        report.push(`finished: ${this.sound.lastError || "played without error"}`);
+        await this.sound.testWith("needs", { ...this.sound.settings, needs: { kind: "system" } });
+        await wait(1500);
+        report.push(`system sound: ${this.sound.lastError || "played without error"}`);
+        const a = new Audio();
+        report.push(`canPlayType ogg vorbis: "${a.canPlayType('audio/ogg; codecs="vorbis"')}", wav: "${a.canPlayType("audio/wav")}", mp3: "${a.canPlayType("audio/mpeg")}"`);
+        try {
+          const url = (await import("../../assets/sounds/pepSound2.ogg")).default;
+          const r = await fetch(url);
+          report.push(`url ${url} -> ${r.status} ${r.headers.get("content-type")} ${(await r.arrayBuffer()).byteLength} bytes`);
+        } catch (e) {
+          report.push(`fetch failed: ${e}`);
+        }
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
       if (want === "settings") {
         this.settingsDialog();
         await wait(500);

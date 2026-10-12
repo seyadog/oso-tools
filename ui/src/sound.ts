@@ -77,6 +77,8 @@ export interface Played {
 export class SoundPlayer {
   settings: SoundSettings = loadSettings();
   played: Played[] = [];
+  /** Why the last sound did not play (empty when it did): the self-test and the Settings dialog show it. */
+  lastError = "";
   private last = new Map<number, number>();
   private cache = new Map<string, string>();
 
@@ -116,14 +118,25 @@ export class SoundPlayer {
       const url = await this.urlFor(event, source);
       const audio = new Audio(url);
       audio.volume = settings.volume;
+      audio.addEventListener("error", () => (this.lastError = `the audio element failed (code ${audio.error?.code ?? "?"}: ${audio.error?.message ?? ""})`));
+      this.lastError = "";
       await audio.play();
-    } catch {
-      /* no sound is not worth an error: the desktop may have none, or the file may be gone */
+    } catch (e) {
+      /* no sound is not worth a crash: the desktop may have none, or the file may be gone */
+      this.lastError = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     }
   }
 
   private async urlFor(event: SoundEvent, source: SoundSource): Promise<string> {
-    if (source.kind === "builtin") return bundled;
+    // The window's media player cannot open the app's own address (a custom scheme): it is given the bytes instead.
+    if (source.kind === "builtin") {
+      const hit = this.cache.get("builtin");
+      if (hit) return hit;
+      const bytes = await (await fetch(bundled)).arrayBuffer();
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/ogg" }));
+      this.cache.set("builtin", url);
+      return url;
+    }
     const key = source.kind === "system" ? `system:${event}` : `file:${source.path}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
