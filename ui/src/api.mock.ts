@@ -64,7 +64,7 @@ export function mockBackend(): Backend {
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
   /** What the activity panel reads; tests add to it the way the audit log grows. */
-  const activity: Activity[] = [];
+  const activity: (Activity & { output?: string })[] = [];
   const deletedEnv: string[] = [];
   const connected = { claude: false, opencode: false, codex: false };
   let cliHandler: (e: CliEvent) => void = () => {};
@@ -301,7 +301,12 @@ export function mockBackend(): Backend {
       approvalAnswers.push([id, decision]);
       return true;
     },
-    agentActivity: async () => activity.map((a) => ({ ...a })),
+    agentActivity: async () => activity.map(({ output: _o, ...a }: Activity & { output?: string }) => ({ ...a, has_output: !!(a.has_output || _o) })),
+    activityDetail: async (id) => {
+      const a = activity.find((x) => x.id === id) as (Activity & { output?: string }) | undefined;
+      return a ? { command: a.command, output: a.output ?? a.preview, cut: false } : null;
+    },
+    localUser: async () => "seya",
     auditRecent: async () => [
       { ts: 1_800_000_000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", exit_code: 0, note: "" },
       { ts: 1_800_000_060, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "rm -rf /tmp/x", decision: "denied", exit_code: null, note: "" },

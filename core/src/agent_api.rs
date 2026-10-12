@@ -248,11 +248,11 @@ impl Handler {
     }
 
     fn log(&self, ctx: &Ctx, action: &str, host: &str, command: &str, decision: &str, extra: impl FnOnce(&mut Entry)) {
-        let mut e = Entry { id: ctx.id, pane: ctx.pane, agent: ctx.agent.clone(), action: action.into(), host: host.into(), command: command.chars().take(2000).collect(), decision: decision.into(), ..Default::default() };
+        let mut e = Entry { id: ctx.id, pane: ctx.pane, agent: ctx.agent.clone(), action: action.into(), host: host.into(), command: command.chars().take(8000).collect(), decision: decision.into(), ..Default::default() };
         extra(&mut e);
         // the log is shown in the window: whatever the agent put in the command or got back is blanked of the vault's secrets
         let hide = self.engine().vault.values_to_hide();
-        for field in [&mut e.command, &mut e.note, &mut e.preview, &mut e.reason] {
+        for field in [&mut e.command, &mut e.note, &mut e.preview, &mut e.reason, &mut e.output] {
             *field = redact(field, &hide);
         }
         self.audit.log(e);
@@ -463,6 +463,7 @@ impl Handler {
                     x.exit_code = c.code;
                     x.bytes_out = Some(stdout.len() + stderr.len());
                     x.preview = crate::audit::preview_of(&stdout, &stderr);
+                    x.output = crate::audit::output_of(&stdout, &stderr);
                     x.note = format!("{} ms{}", started.elapsed().as_millis(), if c.timed_out { ", timed out" } else { "" });
                 });
                 let mut answer = json!({
@@ -595,6 +596,7 @@ impl Handler {
                     x.exit_code = c.code;
                     x.bytes_out = Some(stdout.len() + stderr.len());
                     x.preview = crate::audit::preview_of(&stdout, &stderr);
+                    x.output = crate::audit::output_of(&stdout, &stderr);
                 });
                 ok(json!({ "exit_code": c.code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": c.timed_out }))
             }

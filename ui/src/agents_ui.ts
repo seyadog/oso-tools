@@ -3,6 +3,7 @@
 
 import { ApprovalDecision, ApprovalRequest, AuditEntry, Backend } from "./api";
 import { clear, el, openModal } from "./dom";
+import { writeCommand } from "./sudo";
 
 export function actionTitle(r: ApprovalRequest): string {
   switch (r.action) {
@@ -15,6 +16,12 @@ export function actionTitle(r: ApprovalRequest): string {
     default:
       return `${r.label} wants to run a command`;
   }
+}
+
+function cmdPre(command: string): HTMLElement {
+  const pre = el("pre", { class: "cmd" });
+  writeCommand(pre, command);
+  return pre;
 }
 
 /** One line for the audit list. */
@@ -117,7 +124,7 @@ export class ApprovalQueue {
       { class: `modal approval${r.production ? " prod" : ""}`, role: "alertdialog", "aria-label": actionTitle(r) },
       el("h2", {}, actionTitle(r)),
       el("div", { class: "where" }, r.host, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
-      el("pre", { class: "cmd" }, r.command),
+      cmdPre(r.command),
       el("div", { class: "hint" }, "It is run only if you allow it. The agent never sees a password or a key."),
       more,
       actions,

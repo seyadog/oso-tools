@@ -5,7 +5,7 @@ import { DEFAULTS, buildBindings } from "../src/hotkeys";
 import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, agentsFromActivity, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
 import { LEFT_DEFAULT, LEFT_MAX, LEFT_MIN, RAIL_WIDTH, SECTIONS, clampLeft, clickSection, readSection } from "../src/chrome";
 
-const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "", ...over });
+const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", has_output: false, note: "", ...over });
 const req = (id: number, over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id, pane: 2, label: "Claude in acme, pane 2", agent: "claude", action: "run", host: "acme", command: "df -h", production: false, can_remember: true, ...over });
 
 describe("the words of the panel", () => {
@@ -108,7 +108,7 @@ describe("the Agents tab", () => {
     expect(sorted.map((r) => r.sid)).toEqual([4, 2, 3, 5, 1]);
   });
   it("is made from the log until the processes are watched: needs you while a request waits", () => {
-    const act = (pane: number, state: Activity["state"], agent = "claude-code"): Activity => ({ id: pane, ts: 100, updated: 100, pane, agent, action: "run", host: "h", command: "ls", decision: "allowed", policy: "", reason: "", state, exit_code: null, bytes_out: null, preview: "", note: "" });
+    const act = (pane: number, state: Activity["state"], agent = "claude-code"): Activity => ({ id: pane, ts: 100, updated: 100, pane, agent, action: "run", host: "h", command: "ls", decision: "allowed", policy: "", reason: "", state, exit_code: null, bytes_out: null, preview: "", has_output: false, note: "" });
     const rows = agentsFromActivity([act(2, "finished"), act(3, "running", "opencode"), { ...act(9, "done"), action: "context" }], [req(1, { pane: 2 }), req(2, { pane: 7, agent: "codex" })], (p) => `tab ${p}`);
     const by = Object.fromEntries(rows.map((r) => [r.sid, r]));
     expect(Object.keys(by).sort()).toEqual(["2", "3", "7"]);

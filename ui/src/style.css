@@ -466,3 +466,12 @@ body.resizing-lpanel { cursor: col-resize; user-select: none; }
 .rp-agent .txt .st { color: var(--muted); font-weight: 400; font-size: 12px; }
 .rp-agent.needs_you .st { color: var(--amber); }
 .rp-agent small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Block 2: sudo in amber, and Details with the whole command and output */
+mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-radius: 3px; padding: 0 2px; font-weight: 700; }
+.sudo-tag { color: var(--amber); border: 1px solid rgba(255, 215, 100, .45); border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 700; }
+.rp-card .cmd.has-sudo { border-color: rgba(255, 215, 100, .5); }
+.rp-card .cmd.full { max-height: 16em; overflow: auto; }
+.rp-detail .lbl { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-top: 2px; }
+.rp-detail .out { max-height: 20em; }
+.modal .cmd.has-sudo { border-color: var(--amber); }

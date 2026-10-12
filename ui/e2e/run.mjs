@@ -1162,20 +1162,53 @@ check("it says it was automatic, and by which policy", cards[2].includes("Automa
 check("it says you allowed it, and how it ended", cards[1].includes("You allowed it") && cards[1].includes("exit 1"));
 check("and that you refused", cards[0].includes("You said no") && cards[0].includes("not run"));
 check("a production server is red in the activity too", (await page.$$eval('[data-activity] .rp-where.prod', (e) => e.length)) === 1);
-check("details are closed until asked for", (await page.$$("[data-role=preview]")).length === 0);
+check("details are closed until asked for", (await page.$$("[data-role=output]")).length === 0);
 await page.click('[data-activity="1"] [data-act="activity-toggle"]');
 await settle(150);
 const detail = await page.textContent('[data-activity="1"] .rp-detail');
-check("Details shows why it was decided, the exit code and the first lines of the output", detail.includes("read-only auto") && detail.includes("exit code 0") && (await page.textContent('[data-activity="1"] [data-role="preview"]')).includes("/dev/sda1"));
+check("Details shows why it was decided, the exit code and the first lines of the output", detail.includes("read-only auto") && detail.includes("exit code 0") && (await page.textContent('[data-activity="1"] [data-role="output"]')).includes("/dev/sda1"));
 await shot("10c-panel-activity");
 await page.click('[data-activity="1"] [data-act="activity-toggle"]');
 await settle(100);
-check("and closes again", (await page.$$("[data-role=preview]")).length === 0);
+check("and closes again", (await page.$$("[data-role=output]")).length === 0);
+
+// the tab as the person sees it, sudo in amber, and Details with the whole command and output
+const webSid = await activeSid();
+const longCmd = `bash -c "sudo systemctl status nginx --no-pager; ${"echo padding-padding; ".repeat(8)}journalctl -u nginx -n 5"`;
+const bigOut = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\nthe very last line";
+await page.evaluate(({ webSid, longCmd, bigOut }) => {
+  const now = Math.floor(Date.now() / 1000);
+  globalThis.__osoMock.activity.push({ id: 6, ts: now - 10, updated: now - 9, pane: webSid, agent: "claude-code", action: "run", host: "web-1", command: longCmd, decision: "allowed", policy: "ask", reason: "The server's policy is “ask”: you allowed it once.", state: "finished", exit_code: 0, bytes_out: bigOut.length, preview: "line 1\nline 2", has_output: true, output: bigOut, note: "" });
+  return window.oso.rpanel.refresh();
+}, { webSid, longCmd, bigOut });
+await settle(300);
+const mine = '[data-activity="6"]';
+check("the tab is named as the person sees it: tab number, title and user", (await page.textContent(`${mine} .rp-who b`)) === "Claude · tab 1 · web-1 · root", await page.textContent(`${mine} .rp-who b`));
+await page.click('[data-rtab="agents"]');
+await page.click('[data-rtab="activity"]');
+const localSid = await page.evaluate(async () => { await window.oso.openServer(0); return window.oso.ws.screen.active; });
+await settle(300);
+check("a local terminal reads \"tab N · Local · user\"", (await page.evaluate((x) => window.oso.tabLabel(x), localSid)) === "tab 2 · Local · seya", await page.evaluate((x) => window.oso.tabLabel(x), localSid));
+await page.evaluate(async (x) => { await window.oso.closeSession(x); }, localSid);
+await settle(200);
+check("sudo, also inside another command, is highlighted in amber", (await page.$$eval(`${mine} mark.sudo`, (m) => m.length)) === 1 && (await page.$(`${mine} .sudo-tag`)) !== null);
+check("a command without sudo has no mark", (await page.$$('[data-activity="1"] mark.sudo')).length === 0 && (await page.$('[data-activity="1"] .sudo-tag')) === null);
+await page.click(`${mine} [data-act="activity-toggle"]`);
+await settle(250);
+check("Details shows the whole command", (await page.textContent(`${mine} .rp-detail pre.cmd.full`)) === longCmd);
+check("and the whole output, to the last line", (await page.textContent(`${mine} [data-role="output"]`)).endsWith("the very last line") && (await page.textContent(`${mine} [data-role="output"]`)).includes("line 40"));
+await page.click(`${mine} [data-act="activity-toggle"]`);
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 20, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "ssh db 'sudo systemctl restart postgres'", production: false, can_remember: false }));
+await settle(250);
+check("a request with sudo inside another command is marked too", (await page.$$eval('[data-approval="20"] mark.sudo', (m) => m.length)) === 1 && (await page.$('[data-approval="20"] .sudo-tag')) !== null);
+await shot("10e-panel-sudo");
+await page.click('[data-approval="20"] [data-act="panel-deny"]');
+await settle(200);
 
 // the Agents tab: who needs you
 await page.click('[data-rtab="agents"]');
 await settle(150);
-check("Agents lists the agents that asked something, one row each", (await page.$$("[data-agent-row]")).length === 2);
+check("Agents lists the agents that asked something, one row per terminal", (await page.$$("[data-agent-row]")).length === 3);
 
 // a request waiting: the panel opens by itself, on Activity, and it is answered there, with no window over everything
 await page.keyboard.press("Alt+j");

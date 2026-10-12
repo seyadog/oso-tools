@@ -226,6 +226,9 @@ fn a_server_nobody_configured_asks_even_for_df_h_and_the_log_says_which_rule_app
     let finished = log.iter().find(|l| l["decision"] == "finished").expect("a finished line");
     assert_eq!(finished["id"], asked["id"], "the two lines belong to one request");
     assert!(finished["preview"].as_str().unwrap().contains("Filesystem"), "the first lines of the output are kept");
+    let detail = oso_core::audit::find_detail(r.handler.audit_path(), finished["id"].as_u64().unwrap()).expect("the detail of the request");
+    assert_eq!(detail.command, "df -h");
+    assert!(detail.output.contains("Filesystem") && detail.output.lines().count() >= 2, "the whole output, not only the first lines");
     // the panel's view of it
     let acts = oso_core::audit::recent_activity(r.handler.audit_path(), 10);
     let mine = acts.iter().find(|a| a.command == "df -h" && a.decision == "allowed").unwrap();
@@ -259,6 +262,9 @@ fn what_an_agent_types_and_what_comes_back_are_blanked_of_secrets_in_the_record_
     assert!(!raw.contains("TRAP"), "the log holds no vault secret: {raw}");
     let acts = oso_core::audit::recent_activity(r.handler.audit_path(), 10);
     assert!(acts.iter().any(|a| a.command.contains("[hidden by oso]") && a.preview.contains("[hidden by oso]")), "{acts:?}");
+    let id = acts.iter().find(|a| a.command.contains("[hidden by oso]")).unwrap().id;
+    let detail = oso_core::audit::find_detail(r.handler.audit_path(), id).unwrap();
+    assert!(detail.output.contains("[hidden by oso]") && !detail.output.contains("TRAP") && !detail.command.contains("TRAP"), "{detail:?}");
 }
 
 #[test]

@@ -204,6 +204,24 @@ fn agent_activity(state: State<AppState>, limit: usize) -> Res<Vec<oso_core::aud
     Ok(oso_core::audit::recent_activity(&path, limit.clamp(1, 300)))
 }
 
+/// The whole command and output of one request, for the Details of a card in the panel.
+#[tauri::command]
+fn agent_activity_detail(state: State<AppState>, id: u64) -> Res<Option<oso_core::audit::Detail>> {
+    let path = engine!(state).store_path().with_file_name("audit.jsonl");
+    Ok(oso_core::audit::find_detail(&path, id))
+}
+
+/// Who is using this computer, for the label of a terminal ("tab 1 · Local · seya").
+#[tauri::command]
+fn local_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::process::Command::new("id").arg("-un").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()))
+        .unwrap_or_default()
+}
+
 fn agent_of(name: &str) -> Res<oso_core::integration::Agent> {
     oso_core::integration::Agent::parse(name).ok_or_else(|| "unknown agent".to_string())
 }
@@ -632,6 +650,8 @@ fn main() {
             approval_answer,
             audit_recent,
             agent_activity,
+            agent_activity_detail,
+            local_user,
             integration_status,
             integration_plan,
             integration_apply,

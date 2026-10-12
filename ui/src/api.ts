@@ -244,7 +244,16 @@ export interface Activity {
   bytes_out: number | null;
   /** The first lines of what it printed, already blanked of secrets. */
   preview: string;
+  /** There is more than the preview: `activityDetail` has all of it. */
+  has_output: boolean;
   note: string;
+}
+
+export interface ActivityDetail {
+  command: string;
+  output: string;
+  /** The output was longer than oso keeps. */
+  cut: boolean;
 }
 
 export interface TunnelStatus {
@@ -324,6 +333,10 @@ export interface Backend {
   onApproval(f: (r: ApprovalRequest) => void): void;
   approvalAnswer(id: number, decision: ApprovalDecision): Promise<boolean>;
   auditRecent(limit: number): Promise<AuditEntry[]>;
+  /** The whole command and output of one request (what Details shows); `null` for an old log line. */
+  activityDetail(id: number): Promise<ActivityDetail | null>;
+  /** The name of the person using this computer ("seya"). */
+  localUser(): Promise<string>;
   /** What agents asked, one entry per request, oldest first. */
   agentActivity(limit: number): Promise<Activity[]>;
   secretList(): Promise<SecretMeta[]>;

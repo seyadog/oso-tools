@@ -78,6 +78,8 @@ export class App {
   private rpanel!: RightPanel;
   /** When the window opened each session (ms), kept in the session's meta so it survives a restart of the window. */
   private opened = new Map<Id, number>();
+  /** Who is using this computer, for the label of a local terminal. */
+  private localUser = "";
 
   snippets: { name: string; command: string }[] = [];
 
@@ -146,6 +148,7 @@ export class App {
     // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
     this.rpanel.onOpenChange(() => this.syncInline());
     this.applyChrome();
+    void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
     window.setInterval(() => void this.rpanel.refresh(), 2000);
     // `oso ssh <host>`, `oso host add`, `oso unlock` on the command line: the window follows
@@ -803,7 +806,8 @@ export class App {
     const t = this.ws.tabs.get(sid);
     if (!t) return undefined;
     const at = this.ws.screen.groups.findIndex((g) => leaves(g.tree).includes(sid));
-    return `${at >= 0 ? `tab ${at + 1} · ` : ""}${t.title}`;
+    const user = t.serverId === LOCAL ? this.localUser : (this.tree.servers.find((s) => s.id === t.serverId)?.user ?? "");
+    return [at >= 0 ? `tab ${at + 1}` : "", t.title, user].filter(Boolean).join(" · ");
   }
 
   /** The rows of the Agents tab. */

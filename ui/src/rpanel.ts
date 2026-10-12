@@ -3,7 +3,8 @@
 // is waiting, the same answer the window gives. Nothing secret reaches it: the log is blanked of the vault's values
 // before it is written.
 
-import { Activity, ApprovalDecision, ApprovalRequest, Backend } from "./api";
+import { Activity, ActivityDetail, ApprovalDecision, ApprovalRequest, Backend } from "./api";
+import { hasSudo, writeCommand } from "./sudo";
 import { ApprovalQueue, actionTitle } from "./agents_ui";
 import { clear, el } from "./dom";
 import { icon } from "./icons";
@@ -225,6 +226,8 @@ export class RightPanel {
   /** The newest thing the person has seen in the panel. */
   private seen = Number(store.get("oso.rpanel.seen") ?? "0") || 0;
   private expanded = new Set<string>();
+  /** The whole command and output of the cards that were opened (`null`: the log has no more than the preview). */
+  private details = new Map<number, ActivityDetail | null | undefined>();
   private sig = "";
   private scroll = { s: 0, a: 0 };
   private agentRows: AgentRow[] = [];
@@ -349,6 +352,24 @@ export class RightPanel {
 
   // -------------------------------------------------------------- drawing
 
+  /** What the log has of one request; `undefined` while it is being read. */
+  private detail(id: number): ActivityDetail | null | undefined {
+    if (!this.details.has(id)) {
+      this.details.set(id, undefined);
+      void this.ctx.be.activityDetail(id).then(
+        (d) => {
+          this.details.set(id, d);
+          this.render(true);
+        },
+        () => {
+          this.details.set(id, null);
+          this.render(true);
+        },
+      );
+    }
+    return this.details.get(id);
+  }
+
   /** Shows one of the two tabs. */
   showTab(tab: "agents" | "activity") {
     this.tab = tab;
@@ -432,8 +453,8 @@ export class RightPanel {
       "div",
       { class: `rp-card pending${r.production ? " prod" : ""}`, "data-approval": String(r.id), role: "group", "aria-label": actionTitle(r) },
       el("div", { class: "rp-who" }, el("b", {}, actionTitle(r))),
-      el("div", { class: "rp-where" }, r.host, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
-      el("pre", { class: "cmd" }, r.command),
+      el("div", { class: "rp-where" }, r.host, hasSudo(r.command) ? sudoTag() : null, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
+      cmdPre(r.command),
       buttons,
       extra,
     );
@@ -445,16 +466,16 @@ export class RightPanel {
     const d = decisionLabel(a);
     const res = resultLabel(a);
     const prod = a.host && this.ctx.isProdHost(a.host);
-    const hasMore = !!(a.reason || a.preview || a.note);
+    const hasMore = !!(a.reason || a.preview || a.note || a.has_output || a.command.length > 120);
     const head = el(
       "div",
       { class: "rp-who" },
       el("b", { title: `pane ${a.pane}` }, whoLabel(a, this.ctx.tabLabel(a.pane))),
       el("span", { class: "when", title: new Date(a.ts * 1000).toLocaleString() }, ago(a.ts, nowS)),
     );
-    const where = el("div", { class: `rp-where${prod ? " prod" : ""}` }, a.host || "", actionWord(a) ? el("span", { class: "kind" }, actionWord(a)) : null, prod ? el("span", { class: "badge-prod" }, "PRODUCTION") : null);
+    const where = el("div", { class: `rp-where${prod ? " prod" : ""}` }, a.host || "", actionWord(a) ? el("span", { class: "kind" }, actionWord(a)) : null, hasSudo(a.command) ? sudoTag() : null, prod ? el("span", { class: "badge-prod" }, "PRODUCTION") : null);
     const chips = el("div", { class: "rp-chips" }, el("span", { class: `chip ${d.tone}`, "data-decision": a.decision }, d.text), res ? el("span", { class: `chip res ${a.state}${a.state === "finished" && a.exit_code !== 0 ? " bad" : ""}` }, res) : null);
-    const card = el("div", { class: `rp-card${open ? " open" : ""}`, "data-activity": String(a.id || a.ts), "data-state": a.state }, head, where, el("pre", { class: "cmd" }, a.command), chips);
+    const card = el("div", { class: `rp-card${open ? " open" : ""}`, "data-activity": String(a.id || a.ts), "data-state": a.state }, head, where, cmdPre(a.command), chips);
     if (hasMore) {
       const more = el("button", { class: "more", type: "button", "data-act": "activity-toggle", "aria-expanded": String(open) }, open ? "Hide details" : "Details");
       more.prepend(icon(open ? "chevron-down" : "chevron-right", 12));
@@ -469,12 +490,33 @@ export class RightPanel {
         if (a.reason) detail.append(el("div", { class: "why" }, a.reason));
         const facts = [a.policy ? `server policy: ${a.policy.replace(/_/g, " ")}` : "", a.exit_code != null ? `exit code ${a.exit_code}` : "", a.bytes_out != null ? `${a.bytes_out} bytes of output` : "", a.note].filter(Boolean).join(" · ");
         if (facts) detail.append(el("div", { class: "facts" }, facts));
-        if (a.preview) detail.append(el("pre", { class: "out", "data-role": "preview" }, a.preview));
+        // the whole command and output are read from the log when a card is opened, not on every refresh
+        const d = a.id && a.has_output ? this.detail(a.id) : null;
+        if (d === undefined) detail.append(el("div", { class: "facts" }, "Loading…"));
+        else {
+          detail.append(el("div", { class: "lbl" }, "Command"), cmdPre(d?.command ?? a.command, "full"));
+          const out = d ? d.output : a.preview;
+          if (out) {
+            detail.append(el("div", { class: "lbl" }, "Output"), el("pre", { class: "out", "data-role": "output" }, out));
+            if (!d && a.preview) detail.append(el("div", { class: "facts" }, "Only the first lines were kept for this one."));
+          } else if (a.state === "finished") detail.append(el("div", { class: "facts" }, "It printed nothing."));
+        }
         card.append(detail);
       }
     }
     return card;
   }
+}
+
+/** A command as text, with its `sudo` words in amber. */
+function cmdPre(command: string, extra = ""): HTMLElement {
+  const pre = el("pre", { class: `cmd${extra ? ` ${extra}` : ""}`, "data-role": "command" });
+  writeCommand(pre, command);
+  return pre;
+}
+
+function sudoTag(): HTMLElement {
+  return el("span", { class: "sudo-tag", title: "This command uses sudo" }, "sudo");
 }
 
 const keyOf = (a: Activity) => `${a.id || `${a.ts}:${a.pane}`}:${a.command}`;

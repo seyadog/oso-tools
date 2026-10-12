@@ -30,7 +30,13 @@ pub struct Entry {
     pub reason: String,
     /// The first lines of what the command printed (already blanked of secrets).
     pub preview: String,
+    /// Everything it printed, up to `MAX_OUTPUT` bytes (blanked of secrets). Not part of the list the panel polls:
+    /// it is read on demand by `find_detail`.
+    pub output: String,
 }
+
+/// How much of a command's output is kept in the log (the agent got at most this much of each stream too).
+pub const MAX_OUTPUT: usize = 64 * 1024;
 
 pub struct Audit {
     path: PathBuf,
@@ -71,13 +77,17 @@ impl Audit {
 }
 
 /// How much of the end of the log is read to build the panel (the log only grows).
-const TAIL_BYTES: u64 = 512 * 1024;
+const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 /// The last lines of the log, oldest first. A line that cannot be read is skipped.
 pub fn recent(path: &std::path::Path, max_lines: usize) -> Vec<Entry> {
+    recent_tail(path, max_lines, TAIL_BYTES)
+}
+
+fn recent_tail(path: &std::path::Path, max_lines: usize, tail: u64) -> Vec<Entry> {
     let Ok(mut f) = std::fs::File::open(path) else { return vec![] };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(TAIL_BYTES);
+    let start = len.saturating_sub(tail);
     if f.seek(SeekFrom::Start(start)).is_err() {
         return vec![];
     }
@@ -116,6 +126,8 @@ pub struct Activity {
     pub exit_code: Option<i32>,
     pub bytes_out: Option<usize>,
     pub preview: String,
+    /// There is more to see than `preview`: `find_detail` has the whole command and output.
+    pub has_output: bool,
     pub note: String,
 }
 
@@ -161,6 +173,7 @@ pub fn activities(entries: &[Entry], now: u64) -> Vec<Activity> {
                 a.exit_code = e.exit_code;
                 a.bytes_out = e.bytes_out;
                 a.preview = e.preview.clone();
+                a.has_output |= !e.output.is_empty();
                 a.note = e.note.clone();
             }
             Some(i) => {
@@ -191,6 +204,7 @@ pub fn activities(entries: &[Entry], now: u64) -> Vec<Activity> {
                     exit_code: e.exit_code,
                     bytes_out: e.bytes_out,
                     preview: e.preview.clone(),
+                    has_output: !e.output.is_empty(),
                     note: e.note.clone(),
                 });
             }
@@ -226,6 +240,67 @@ pub fn preview_of(stdout: &str, stderr: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// The whole command and the whole output of one request (what *Details* shows). The log is read from the top: this
+/// is asked for when a person opens one card, not on every refresh. `None` for a request of an old log (no `id`)
+/// or one that is not in the log.
+pub fn find_detail(path: &std::path::Path, id: u64) -> Option<Detail> {
+    if id == 0 {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let needle = format!("\"id\":{id},");
+    let mut detail: Option<Detail> = None;
+    for line in std::io::BufRead::lines(std::io::BufReader::new(file)).map_while(Result::ok) {
+        if !line.contains(&needle) {
+            continue;
+        }
+        let Ok(e) = serde_json::from_str::<Entry>(&line) else { continue };
+        if e.id != id {
+            continue;
+        }
+        let d = detail.get_or_insert_with(|| Detail { command: e.command.clone(), output: String::new(), cut: false });
+        if !e.output.is_empty() {
+            d.output = e.output.clone();
+            d.cut = e.output.ends_with(OUTPUT_CUT);
+        }
+    }
+    detail
+}
+
+/// What the end of a cut output says.
+pub const OUTPUT_CUT: &str = "\n[… cut here: oso keeps the first 64 KB]";
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct Detail {
+    pub command: String,
+    pub output: String,
+    pub cut: bool,
+}
+
+/// `stdout` then `stderr`, as one text of at most `MAX_OUTPUT` bytes, ending in `OUTPUT_CUT` when it was cut.
+pub fn output_of(stdout: &str, stderr: &str) -> String {
+    let mut all = String::from(stdout);
+    if !stderr.is_empty() {
+        if !all.is_empty() && !all.ends_with('\n') {
+            all.push('\n');
+        }
+        if !stdout.is_empty() {
+            all.push_str("[stderr]\n");
+        }
+        all.push_str(stderr);
+    }
+    if all.len() <= MAX_OUTPUT {
+        return all;
+    }
+    let mut cut = MAX_OUTPUT;
+    while !all.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    all.truncate(cut);
+    all.push_str(OUTPUT_CUT);
+    all
 }
 
 #[cfg(test)]
@@ -270,7 +345,7 @@ mod tests {
         // the window reads these names (`Activity` in ui/src/api.ts): they must not drift apart
         let mut keys: Vec<String> = serde_json::to_value(&list[0]).unwrap().as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys.join(","), "action,agent,bytes_out,command,decision,exit_code,host,id,note,pane,policy,preview,reason,state,ts,updated");
+        assert_eq!(keys.join(","), "action,agent,bytes_out,command,decision,exit_code,has_output,host,id,note,pane,policy,preview,reason,state,ts,updated");
     }
 
     #[test]
@@ -297,8 +372,8 @@ mod tests {
         let last = recent_activity(a.path(), 5);
         assert_eq!(last.len(), 5);
         assert_eq!(last[4].id, 3000);
-        assert!(std::fs::metadata(a.path()).unwrap().len() > TAIL_BYTES, "the test really cuts a line");
-        assert!(recent(a.path(), 100_000).iter().all(|e| e.id != 0), "no half line came through");
+        assert!(std::fs::metadata(a.path()).unwrap().len() > 64 * 1024, "the test really cuts a line");
+        assert!(recent_tail(a.path(), 100_000, 64 * 1024).iter().all(|e| e.id != 0), "no half line came through");
         assert!(recent_activity(&dir.join("none.jsonl"), 5).is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -312,5 +387,32 @@ mod tests {
         assert_eq!(p.lines().count(), 8);
         assert!(p.ends_with('…') && p.starts_with("1\n2"));
         assert!(preview_of(&"y".repeat(5000), "").chars().count() <= 801);
+    }
+
+    #[test]
+    fn the_whole_command_and_output_are_found_by_the_id_of_the_request() {
+        let dir = std::env::temp_dir().join(format!("oso-audit-detail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Audit::new(dir.join("audit.jsonl"));
+        let long = format!("echo {}", "x".repeat(3000));
+        a.log(Entry { id: 5, ts: 1_800_000_001, action: "run".into(), host: "h".into(), command: long.clone(), decision: "allowed".into(), ..Default::default() });
+        a.log(Entry { id: 15, ts: 1_800_000_002, action: "run".into(), host: "h".into(), command: "other".into(), decision: "allowed".into(), ..Default::default() });
+        a.log(Entry { id: 5, ts: 1_800_000_003, action: "run".into(), host: "h".into(), command: long.clone(), decision: "finished".into(), output: "line 1\nline 2\n".into(), exit_code: Some(0), ..Default::default() });
+        let d = find_detail(a.path(), 5).unwrap();
+        assert_eq!((d.command.as_str(), d.output.as_str(), d.cut), (long.as_str(), "line 1\nline 2\n", false));
+        assert_eq!(find_detail(a.path(), 15).unwrap().output, "", "a request still running has no output yet");
+        assert!(find_detail(a.path(), 1).is_none() && find_detail(a.path(), 0).is_none(), "5 and 15 are not 1");
+        assert!(activities(&recent(a.path(), 10), 1_800_000_010).iter().any(|x| x.id == 5 && x.has_output));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn output_is_stdout_then_stderr_and_a_long_one_says_it_was_cut() {
+        assert_eq!(output_of("a\n", ""), "a\n");
+        assert_eq!(output_of("a", "oops"), "a\n[stderr]\noops");
+        assert_eq!(output_of("", "oops"), "oops");
+        let big = output_of(&"é".repeat(MAX_OUTPUT), "");
+        assert!(big.ends_with(OUTPUT_CUT) && big.len() <= MAX_OUTPUT + OUTPUT_CUT.len());
+        assert!(big.is_char_boundary(big.len() - OUTPUT_CUT.len()));
     }
 }
