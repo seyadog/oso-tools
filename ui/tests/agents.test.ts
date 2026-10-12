@@ -17,3 +17,13 @@ describe("what an agent asks", () => {
     expect(auditLine({ ...e, command: "", host: "", exit_code: null, decision: "blocked", action: "context" })).toBe("context → blocked");
   });
 });
+
+import { QUIET_MS, doneByQuiet } from "../src/agents";
+describe("an agent without hooks", () => {
+  it("is done when it worked and then stayed quiet", () => {
+    expect(doneByQuiet(undefined, 1000, 100000)).toBe(false);
+    expect(doneByQuiet(5, 100000 - QUIET_MS + 1, 100000)).toBe(false);
+    expect(doneByQuiet(5, 100000 - QUIET_MS, 100000)).toBe(true);
+    expect(doneByQuiet(5, 0, 100000)).toBe(false);
+  });
+});

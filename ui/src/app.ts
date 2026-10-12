@@ -19,7 +19,7 @@ import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel } from "./rpanel";
-import { AgentState, AgentStatus, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { AgentState, AgentStatus, doneByQuiet, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
 import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
@@ -275,6 +275,19 @@ export class App {
         } catch (e) {
           report.push(`fetch failed: ${e}`);
         }
+        await this.be.writeConfig("selftest.out", report.join("\n"));
+        return;
+      }
+      if (want === "agentdone") {
+        // a program called claude (no hooks) prints for a few seconds and goes quiet: the sound must come, once
+        await this.openServer(LOCAL);
+        const sid = this.ws.screen.active!;
+        await wait(1500);
+        await this.openServer(LOCAL); // another tab, so that the first one is not the one on show
+        this.onTerminalData(sid, "exec -a claude bash -c 'for i in 1 2 3 4 5 6; do echo working $i; sleep 1; done; sleep 90'\r");
+        await wait(28000);
+        report.push(`sounds played: ${JSON.stringify(this.sound.played)}`);
+        report.push(`states: ${JSON.stringify(this.agentRows().map((r) => [r.sid, r.state, r.source]))}`);
         await this.be.writeConfig("selftest.out", report.join("\n"));
         return;
       }
@@ -920,6 +933,8 @@ export class App {
 
   /** What the engine says about the agents, as last asked. */
   private agents: AgentStatus[] = [];
+  /** When an agent without hooks was last seen producing output (so that its silence afterwards means it is done). */
+  private workedAt = new Map<number, number>();
   /** The state each agent was in the last time, so that only a change is news. */
   private agentSeen = new Map<number, AgentState>();
 
@@ -930,13 +945,17 @@ export class App {
     if (!list) return;
     this.agents = list;
     const rows = this.agentRows();
-    const news = noticesFor(this.agentSeen, rows.map((r) => ({ sid: r.sid, name: r.name, state: r.state, where: r.where })));
+    // an agent without hooks that worked and went quiet was working a moment ago, as far as news go
+    const before = new Map(this.agentSeen);
+    for (const sid of this.workedAt.keys()) if (before.get(sid) === "idle") before.set(sid, "working");
+    const news = noticesFor(before, rows.map((r) => ({ sid: r.sid, name: r.name, state: r.state, where: r.where })));
     this.agentSeen = new Map(rows.map((r) => [r.sid, r.state]));
     if (!document.hasFocus()) for (const n of news) void this.be.notifyAgent(n.title, n.body, n.sid).catch(() => {});
     for (const n of news) void this.sound.notify(n.event, n.sid, this.looking(n.sid));
     // looking at a tab whose agent finished calms it down
     const on = this.ws.screen.active;
     if (on != null && document.hasFocus() && this.agents.some((a) => a.sid === on && a.state === "finished")) void this.be.agentAck(on).catch(() => {});
+    if (on != null && document.hasFocus()) this.workedAt.delete(on);
     this.renderTopbar();
     this.applyAlerts();
     this.rpanel.render();
@@ -947,7 +966,13 @@ export class App {
     return this.agents.map((a) => {
       const pane = this.panes.get(a.sid);
       const guess = pane ? guessFromScreen(pane.tailLines(8), pane.lastOutputAt ? Date.now() - pane.lastOutputAt : -1) : null;
-      const e = effectiveState(a, guess);
+      let e = effectiveState(a, guess);
+      // no hooks to say "finished": it worked on screen, then went quiet
+      if (a.source === "process") {
+        if (e.guessed && e.state === "working") this.workedAt.set(a.sid, Date.now());
+        else if (e.state === "idle" && doneByQuiet(this.workedAt.get(a.sid), pane?.lastOutputAt ?? 0, Date.now())) e = { state: "finished", guessed: true };
+        else if (e.state === "needs_you") this.workedAt.delete(a.sid);
+      }
       const space = this.ws.tabs.get(a.sid)?.space;
       return { sid: a.sid, name: a.name, where: this.tabLabel(a.sid) ?? "terminal closed", folder: a.folder, branch: a.branch, state: e.state, since: a.since, space: space != null ? (this.spaces.find((x) => x.id === space)?.name ?? "") : "", source: e.guessed ? "screen" : a.source };
     });

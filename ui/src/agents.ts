@@ -44,6 +44,14 @@ export function effectiveState(s: AgentStatus, guess: "needs_you" | "working" | 
   return { state: s.state, guessed: false };
 }
 
+/** How long an agent that was producing output must be silent to count as done, when its own hooks are not there to say so. */
+export const QUIET_MS = 6000;
+
+/** Without hooks nothing says "finished": an agent that worked (output was arriving) and then stayed silent is done. */
+export function doneByQuiet(workedAt: number | undefined, lastOutputAt: number, now: number): boolean {
+  return workedAt !== undefined && lastOutputAt > 0 && now - lastOutputAt >= QUIET_MS;
+}
+
 /** An agent as the attention queue sees it. */
 export interface Waiting {
   sid: number;
