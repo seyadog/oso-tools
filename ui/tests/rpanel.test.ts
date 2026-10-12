@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Activity, ApprovalRequest } from "../src/api";
 import { ApprovalQueue } from "../src/agents_ui";
 import { DEFAULTS, buildBindings } from "../src/hotkeys";
-import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
+import { AgentRow, agentColor, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
 import { LEFT_DEFAULT, LEFT_MAX, LEFT_MIN, RAIL_WIDTH, SECTIONS, clampLeft, clickSection, readSection } from "../src/chrome";
 
 const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", has_output: false, note: "", ...over });
@@ -173,5 +173,13 @@ describe("requests waiting for an answer", () => {
     await q.answer(r, "terminal");
     expect(typed).toEqual([5]);
     expect(answers).toEqual([[5, "terminal"]]);
+  });
+});
+
+describe("agentColor", () => {
+  it("gives the first ten agents ten different colours, and the same one every time", () => {
+    const colours = Array.from({ length: 10 }, (_, i) => agentColor(i + 1));
+    expect(new Set(colours).size).toBe(10);
+    expect(agentColor(3)).toBe(agentColor(3));
   });
 });

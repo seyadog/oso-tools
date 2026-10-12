@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Backend } from "../src/api";
-import { DEFAULT_SOUNDS, MIN_GAP_MS, SoundPlayer, parseSettings, shouldPlay } from "../src/sound";
+import { DEFAULT_SOUNDS, FINISHED_GAP_MS, MIN_GAP_MS, SoundPlayer, parseSettings, shouldPlay } from "../src/sound";
 
 describe("when a sound may play", () => {
   const base = { enabled: true, lookingAtIt: false, last: undefined as number | undefined, now: 100_000 };
@@ -32,11 +32,13 @@ describe("the player", () => {
   it("plays when something calls for you, once per agent in a burst, and never while you look", async () => {
     const p = new SoundPlayer(be);
     await p.notify("finished", 7, false, 1000);
-    await p.notify("needs", 7, false, 2000); // the same agent, a second later: nothing
+    await p.notify("finished", 7, false, 2000); // the same agent, a second later: nothing
+    await p.notify("needs", 7, false, 2000); // it asks for you right after finishing: that is another thing, it sounds
     await p.notify("needs", 8, false, 2000); // another agent: sounds
     await p.notify("finished", 9, true, 3000); // you are looking at its tab: nothing
-    await p.notify("finished", 7, false, 1000 + MIN_GAP_MS); // later: sounds again
-    expect(p.played.map((x) => [x.event, x.sid])).toEqual([["finished", 7], ["needs", 8], ["finished", 7]]);
+    await p.notify("finished", 7, false, 1000 + MIN_GAP_MS); // "finished" is once a minute: nothing
+    await p.notify("finished", 7, false, 1000 + FINISHED_GAP_MS); // a minute later: sounds again
+    expect(p.played.map((x) => [x.event, x.sid])).toEqual([["finished", 7], ["needs", 7], ["needs", 8], ["finished", 7]]);
   });
   it("is silent when switched off, and the Test button always sounds", async () => {
     const p = new SoundPlayer(be);

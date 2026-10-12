@@ -81,7 +81,7 @@ export class SoundPlayer {
   played: Played[] = [];
   /** Why the last sound did not play (empty when it did): the self-test and the Settings dialog show it. */
   lastError = "";
-  private last = new Map<number, number>();
+  private last = new Map<string, number>();
   private cache = new Map<string, string>();
 
   constructor(private be: Backend) {}
@@ -103,8 +103,10 @@ export class SoundPlayer {
 
   /** An agent or a terminal calls for you. `lookingAtIt`: the window is in front and that tab is on show. */
   async notify(event: SoundEvent, sid: number, lookingAtIt: boolean, now = Date.now()) {
-    if (!shouldPlay({ enabled: this.settings.enabled, lookingAtIt, last: this.last.get(sid), now, gap: event === "finished" ? FINISHED_GAP_MS : MIN_GAP_MS })) return;
-    this.last.set(sid, now);
+    // each kind has its own clock: an agent that asked for you a minute ago must still be heard when it finishes
+    const key = `${event}:${sid}`;
+    if (!shouldPlay({ enabled: this.settings.enabled, lookingAtIt, last: this.last.get(key), now, gap: event === "finished" ? FINISHED_GAP_MS : MIN_GAP_MS })) return;
+    this.last.set(key, now);
     await this.play(event, sid);
   }
 

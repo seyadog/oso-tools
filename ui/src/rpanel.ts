@@ -145,6 +145,12 @@ export interface AgentRow {
   source: string;
 }
 
+/** Each agent has its own colour, so that two of them are told apart at a glance: neighbours in the list are far apart on the colour wheel. */
+export function agentColor(sid: number): string {
+  const hues = [210, 30, 150, 330, 55, 270, 180, 0, 100, 300];
+  return `hsl(${hues[Math.abs(sid) % hues.length]} 70% 62%)`;
+}
+
 export const STATE_WORD: Record<AgentState, string> = { needs_you: "needs you", working: "working", finished: "finished", idle: "idle" };
 const STATE_ORDER: AgentState[] = ["needs_you", "working", "finished", "idle"];
 
@@ -408,7 +414,7 @@ export class RightPanel {
     const meta = [r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
     const row = el(
       "div",
-      { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
+      { class: `rp-agent ${r.state}`, style: `--ag: ${agentColor(r.sid)}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
       el("span", { class: "sdot" }),
       el(
         "div",

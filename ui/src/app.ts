@@ -284,8 +284,8 @@ export class App {
         const sid = this.ws.screen.active!;
         await wait(1500);
         await this.openServer(LOCAL); // another tab, so that the first one is not the one on show
-        this.onTerminalData(sid, "exec -a claude bash -c 'for i in 1 2 3 4 5 6; do echo working $i; sleep 1; done; sleep 90'\r");
-        await wait(28000);
+        this.onTerminalData(sid, "exec -a claude bash -c 'for i in $(seq 1 20); do echo working $i; sleep 1; done; sleep 90'\r");
+        await wait(45000);
         report.push(`sounds played: ${JSON.stringify(this.sound.played)}`);
         report.push(`states: ${JSON.stringify(this.agentRows().map((r) => [r.sid, r.state, r.source]))}`);
         await this.be.writeConfig("selftest.out", report.join("\n"));

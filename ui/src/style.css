@@ -465,7 +465,8 @@ body.resizing-lpanel { cursor: col-resize; user-select: none; }
 .rp-agent .txt b { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
 .rp-agent .txt .st { color: var(--muted); font-weight: 400; font-size: 12px; }
 .rp-agent.needs_you .st { color: var(--amber); }
-.rp-agent .txt b.repo { font-size: 15px; color: var(--accent); }
+.rp-agent { border-left: 4px solid var(--ag, transparent); }
+.rp-agent .txt b.repo { font-size: 15px; color: var(--ag, var(--accent)); }
 .rp-agent small.who { color: var(--fg); opacity: .8; }
 .rp-space .n { margin-left: 8px; opacity: .6; font-weight: 400; }
 .rp-agent small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
