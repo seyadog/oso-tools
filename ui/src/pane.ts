@@ -15,6 +15,8 @@ export interface PaneHandlers {
   onFocus(sid: number): void;
   onTitlePointerDown(e: PointerEvent, sid: number): void;
   onWatch(sid: number): void;
+  /** A right click on the terminal: the menu of what can be done with it. */
+  onContextMenu(e: MouseEvent, sid: number): void;
 }
 
 // The terminal version's colours: the soft pastels over the dark of the window.
@@ -89,6 +91,10 @@ export class Pane {
     close.onclick = () => this.h.onClose(this.sid);
     this.watchBtn.onclick = () => this.h.onWatch(this.sid);
     this.root.addEventListener("pointerdown", () => this.h.onFocus(this.sid), true);
+    this.root.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.h.onContextMenu(e, this.sid);
+    });
 
     this.term = new Terminal({
       fontFamily: '"Adwaita Mono", "JetBrains Mono", "Liberation Mono", monospace',

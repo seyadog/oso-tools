@@ -39,6 +39,10 @@ const settle = (ms = 250) => page.waitForTimeout(ms);
 // the left panel shows one section: make sure it is the one a check needs
 const section = async (k) => { if ((await page.getAttribute(`[data-rail="${k}"]`, "aria-pressed")) !== "true") { await page.click(`[data-rail="${k}"]`); await settle(150); } };
 const menuItem = async (text) => { await page.click('[data-act="menu"]'); await page.click(`.ctx-menu .ctx-item:has-text("${text}")`); };
+// the menu of the terminal on show (right click), and of the tab on show
+const openPaneMenu = async () => { const r = await page.evaluate(() => { const b = window.oso.panes.get(window.oso.ws.screen.active).root.getBoundingClientRect(); return { x: b.x + 60, y: b.y + 70 }; }); await page.mouse.click(r.x, r.y, { button: "right" }); await page.waitForSelector(".ctx-menu"); };
+const paneMenuItem = async (text) => { await openPaneMenu(); await page.click(`.ctx-menu .ctx-item:has-text("${text}")`); };
+const tabMenuItem = async (text) => { await page.click(".tab.on", { button: "right" }); await page.click(`.ctx-menu .ctx-item:has-text("${text}")`); };
 
 // 0. a first start explains itself: getting started, named sections, empty states with a button, the version
 check("the first start shows Getting started with its four steps", (await page.$$("[data-step-row]")).length === 4 && (await page.textContent('[data-start="card"]')).includes("0 of 4 done"));
@@ -382,12 +386,12 @@ check("and the new one works", (await state()).sig !== modeBefore);
 await clearAll();
 await page.keyboard.press("Alt+k");
 await settle(200);
-check("Alt+K opens the host picker", (await page.$("#modal-bg.show .picker-list .row")) !== null);
+check("Alt+K opens the palette, already filtered to servers", (await page.$("#modal-bg.show .palette-list .pal-row")) !== null && (await page.$$eval(".pal-title", (e) => e.map((x) => x.textContent))).join() === "Servers");
 await page.keyboard.type("stag");
 await page.keyboard.press("Enter");
 await settle(400);
 check("typing a few letters and Enter opens that host", (await state()).tabs === 1 && (await termText(await activeSid())).includes("staging"));
-await menuItem("New terminal to the right");
+await paneMenuItem("New terminal to the right");
 await settle(500);
 s = await state();
 check("the split button on the toolbar opens a second terminal in a mosaic", s.mode === "mosaic" && (await panes()).length === 2);
@@ -806,7 +810,7 @@ await settle(500);
 s = await state();
 check("a tab with three terminals to save", s.tabs === 1 && s.terms === 3);
 const layoutBefore = await panes();
-await menuItem("Save this tab in a Space");
+await tabMenuItem("Save in a Space");
 await settle(200);
 check("with no Space yet it offers to make a new one", (await page.textContent('[data-name="space-choice"]')).includes("New Space"));
 await page.click('[data-act="space-choice-ok"]');
@@ -861,7 +865,7 @@ check("Alt+B again turns it off", !(await page.evaluate(() => window.oso.ws.broa
 // the menu of a tab, and editing / deleting a Space
 await page.click(".tab.on", { button: "right" });
 await settle(150);
-check("right-clicking a tab offers to save it in a Space", (await page.$$eval(".ctx-item", (e) => e.map((x) => x.textContent))).includes("Save in a Space…"));
+check("right-clicking a tab offers to save it in a Space", (await page.$$eval(".ctx-item", (e) => e.map((x) => x.textContent))).some((t) => t.includes("Save in a Space")));
 await page.keyboard.press("Escape");
 await section("spaces");
 await page.hover('.row.space:has-text("ops")');
@@ -993,7 +997,7 @@ await settle(400);
 sid1 = await activeSid();
 await page.keyboard.press("Alt+a");
 await settle(200);
-check("Alt+A switches the watch on: a mark on the tab and on the bell", (await page.$$(".tab .wm")).length === 1 && (await (async () => { await page.click('[data-act="menu"]'); const n = (await page.$$('.ctx-item.checked:has-text("Tell me")')).length; await page.keyboard.press("Escape"); return n; })()) === 1);
+check("Alt+A switches the watch on: a mark on the tab and on the bell", (await page.$$(".tab .wm")).length === 1 && (await (async () => { await openPaneMenu(); const n = (await page.$$('.ctx-item.checked:has-text("Tell me")')).length; await page.keyboard.press("Escape"); return n; })()) === 1);
 await page.keyboard.press("Control+n");
 await settle(400);
 await page.evaluate((sid) => window.__osoMock.say(sid, "\r\nBuilding...\r\nfinished ok\r\nweb-1:~$ "), sid1);
@@ -1313,7 +1317,7 @@ await settle(150);
 check("Alt+Shift+4 swaps it for Tunnels (only one at a time)", (await page.getAttribute('[data-rail="tunnels"]', "aria-pressed")) === "true" && (await page.$$(".sec[data-sec]")).length === 1);
 await page.click('[data-act="menu"]');
 const items = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent));
-check("the top bar has one menu, with what used to be a row of icons", items.length >= 9 && items.some((t) => t.includes("Snippets")) && items.some((t) => t.includes("Focus mode")) && items.some((t) => t.includes("Copy files")) && (await page.$$(".tools .ib")).length <= 2);
+check("the top bar has one short menu in groups, with the palette at the end", (await page.$$eval(".ctx-menu .ctx-title", (e) => e.map((x) => x.textContent))).join() === "View,Agents,Tools" && items.length === 5 && items.some((t) => t.includes("Snippets")) && items.some((t) => t.includes("Focus mode")) && items.some((t) => t.includes("Next agent")) && items.at(-1).startsWith("All commands…") && items.at(-1).includes("Alt+Shift+Space") && (await page.$$(".tools .ib")).length <= 2);
 await page.keyboard.press("Escape");
 check("the sheet of shortcuts lists the new keys", await (async () => { await page.keyboard.press("Shift+Slash"); await settle(250); const t = await page.textContent('[data-sheet="shortcuts"]'); await page.keyboard.press("Escape"); return t.includes("Alt+J") && t.includes("Alt+Z") && t.includes("Alt+Shift+1") && t.includes("Left panel"); })());
 await section("servers");
@@ -1577,6 +1581,126 @@ await settle(200);
 check("with sounds off nothing sounds, but the border still shows", (await played()).length === 0 && (await page.$$(".pane.call-done")).length >= 1);
 await page.evaluate(() => { localStorage.removeItem("oso.sound"); window.oso.sound.update({ enabled: true, volume: 0.7, finished: { kind: "builtin" }, needs: { kind: "builtin" } }); delete document.hasFocus; globalThis.__osoMock.agents.length = 0; });
 await clearAll();
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
+// 19. the command palette, and each action where it belongs
+await clearAll();
+await page.evaluate(() => localStorage.removeItem("oso.palette.recent"));
+await section("servers");
+await page.evaluate(async () => { await window.oso.openServer(0); });
+await settle(400);
+await page.keyboard.press("Alt+Shift+Space");
+await settle(250);
+check("Alt+Shift+Space opens the palette, with the search box focused", (await page.$("#modal-bg.show.palette-mode .palette")) !== null && (await page.$eval('[data-name="palette-input"]', (i) => document.activeElement === i)));
+const titles0 = await page.$$eval(".pal-title", (e) => e.map((x) => x.textContent));
+check("what is found comes in groups, each with its title", titles0.includes("Actions") && titles0.includes("Open tabs") && titles0.includes("Servers") && (await page.$$(".pal-title svg")).length === titles0.length, titles0.join());
+check("each result shows its icon, and its keys on the right when it has them", (await page.$$eval(".pal-row", (r) => r.every((x) => x.querySelector(".pal-icon svg")))) && (await page.textContent('.pal-row[data-id="palette.open"] kbd')) === "Alt+Shift+Space");
+check("an ssh action is not offered with a local terminal in front", (await page.$('.pal-row[data-id="files.open"]')) === null);
+await page.keyboard.type("copy fil");
+await settle(150);
+check("not even when you search for it", (await page.$$('.pal-row[data-id="files.open"]')).length === 0);
+await page.fill('[data-name="palette-input"]', "nwag");
+await settle(150);
+check("a fuzzy search finds \"New agent\" with \"nwag\"", (await page.$eval(".pal-row.sel", (r) => r.getAttribute("data-id"))) === "agent.new" && (await page.$$eval(".pal-row.sel .hit", (h) => h.map((x) => x.textContent).join("").toLowerCase())) === "nwag", await page.$eval(".pal-row.sel", (r) => r.getAttribute("data-id")));
+await page.keyboard.press("Enter");
+await settle(300);
+check("Enter runs it", (await page.$('[data-name="launch-folder"]')) !== null && (await page.$("#modal-bg.palette-mode")) === null);
+await page.keyboard.press("Escape");
+await settle(150);
+// the recents come first, and arrows and Escape work
+await page.keyboard.press("Alt+Shift+Space");
+await settle(200);
+check("what was used lately is on top, in a group of its own", (await page.$$eval(".pal-title", (e) => e[0].textContent)) === "Recent" && (await page.$eval(".pal-row", (r) => r.getAttribute("data-id"))) === "agent.new");
+await page.keyboard.press("ArrowDown");
+await page.keyboard.press("ArrowDown");
+const second = await page.$eval(".pal-row.sel", (r) => r.getAttribute("data-id"));
+await page.keyboard.press("ArrowUp");
+check("the arrows move the selection", second !== "agent.new" && (await page.$eval(".pal-row.sel", (r) => r.getAttribute("data-id"))) !== second);
+await page.keyboard.press("Escape");
+await settle(150);
+check("Escape closes it", (await page.$("#modal-bg.show")) === null);
+// it finds everything: servers, Spaces, secrets (by name only) and open tabs
+await page.evaluate(async () => { await window.oso.be.spaceSave({ id: 0, name: "Zebra Shop", profile: null, folders: [], servers: [], server_folders: [], secrets: [], tunnels: [], notes: "", tabs: [] }); await window.oso.refreshSpaces(); });
+await page.evaluate(async () => { if (!(await window.oso.be.vaultStatus()).unlocked) await window.oso.be.vaultUnlock("master"); await window.oso.be.secretSave({ id: 0, name: "STRIPE_KEY", kind: "api_key", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "sk_live_abcdef"); await window.oso.refreshVaultMark(); await window.oso.refreshSecrets(); });
+await page.keyboard.press("Alt+Shift+Space");
+await page.keyboard.type("zebra");
+await settle(150);
+check("it finds a Space", (await page.$$eval('.pal-row[data-kind="space"]', (r) => r.map((x) => x.textContent))).some((t) => t.includes("Zebra Shop")));
+await page.fill('[data-name="palette-input"]', "web");
+await settle(150);
+check("it finds a server, in its group", (await page.$$eval('.pal-row[data-kind="server"] .pal-label', (r) => r.map((x) => x.textContent))).includes("web-1"));
+await page.fill('[data-name="palette-input"]', "stripe");
+await settle(150);
+check("it finds a secret by its name, and shows nothing of its value", (await page.$$('.pal-row[data-kind="secret"]')).length === 1 && !(await page.textContent(".palette")).includes("sk_"));
+await page.fill('[data-name="palette-input"]', "Local");
+await settle(150);
+check("it finds an open tab", (await page.$$('.pal-row[data-kind="tab"]')).length >= 1);
+await page.keyboard.press("Escape");
+// Alt+K: the same palette, already filtered to servers
+await page.keyboard.press("Alt+k");
+await settle(200);
+check("Alt+K is the palette with only servers", (await page.$$eval(".pal-title", (e) => e.map((x) => x.textContent))).join() === "Servers" && (await page.$('[data-name="palette-input"]')).constructor !== null);
+await page.keyboard.press("Escape");
+// an ssh action appears once an ssh terminal is in front
+await page.evaluate(async () => { await window.oso.openServer(2); });
+await settle(400);
+await page.keyboard.press("Alt+Shift+Space");
+await page.keyboard.type("cpfiles");
+await settle(150);
+check("with an ssh terminal in front, copying files is offered", (await page.$('.pal-row[data-id="files.open"]')) !== null);
+await page.keyboard.press("Escape");
+// executing something that is not a dialog: the focus mode
+await page.keyboard.press("Alt+Shift+Space");
+await page.keyboard.type("focus mode");
+await page.keyboard.press("Enter");
+await settle(250);
+check("Enter on an action does it (focus mode)", await page.$eval("#app", (e) => e.classList.contains("focus")));
+await page.keyboard.press("Alt+z");
+await settle(200);
+
+// the menu of a terminal
+await openPaneMenu();
+const paneItems = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent));
+check("right-clicking an ssh terminal offers: new terminal right and below, type in every terminal (only with several), tell me when done, copy files, close", paneItems.some((t) => t.startsWith("New terminal to the right")) && paneItems.some((t) => t.startsWith("New terminal below")) && paneItems.some((t) => t.startsWith("Tell me when this terminal is done")) && paneItems.some((t) => t.startsWith("Copy files")) && paneItems.some((t) => t.startsWith("Close this terminal")) && !paneItems.some((t) => t.startsWith("Type in every terminal")), JSON.stringify(paneItems));
+check("with the keys on the right", paneItems.some((t) => t.includes("Alt+V")) && paneItems.some((t) => t.includes("Alt+W")));
+await page.keyboard.press("Escape");
+await page.evaluate(async () => { await window.oso.openServer(0); });
+await settle(300);
+await openPaneMenu();
+const localItems = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent));
+check("on a local terminal copying files is not there", !localItems.some((t) => t.startsWith("Copy files")) && localItems.some((t) => t.startsWith("Tell me when")), JSON.stringify(localItems));
+await page.click('.ctx-menu .ctx-item:has-text("New terminal to the right")');
+await settle(500);
+await openPaneMenu();
+check("with two terminals in the tab, typing in every one is offered", (await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent))).some((t) => t.startsWith("Type in every terminal")));
+await page.keyboard.press("Escape");
+// the menu of a tab
+await page.click(".tab.on", { button: "right" });
+const tabItems = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent.replace(/Alt\+\w+|F2|Ctrl\+\w+/g, "")));
+check("right-clicking a tab offers: rename, save in a Space, close", tabItems.length === 3 && tabItems[0].startsWith("Rename") && tabItems[1].startsWith("Save in a Space") && tabItems[2].startsWith("Close"), JSON.stringify(tabItems));
+await page.keyboard.press("Escape");
+// "+ New agent" is in the Agents panel
+if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click("#rtoggle");
+await settle(200);
+await page.click('[data-rtab="agents"]');
+await page.click('[data-act="agents-new"]');
+await settle(250);
+check("the Agents panel has a \"+ New agent\" button", (await page.$('[data-name="launch-folder"]')) !== null);
+await page.keyboard.press("Escape");
+if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click("#rtoggle");
+// the palette is in the sheet of shortcuts and in the tip of the home screen
+await page.keyboard.press("Shift+Slash");
+await settle(250);
+check("the sheet of shortcuts lists the palette", (await page.textContent('[data-sheet="shortcuts"]')).includes("Alt+Shift+Space") && (await page.textContent('[data-sheet="shortcuts"]')).includes("Every command"));
+await page.keyboard.press("Escape");
+await clearAll();
+await settle(200);
+check("the home screen tells about it", (await page.textContent(".home .tip")).includes("Alt+Shift+Space"));
+await page.evaluate(async () => { for (const sp of await window.oso.be.spaceList()) await window.oso.be.spaceDelete(sp.id); await window.oso.refreshSpaces(); localStorage.removeItem("oso.palette.recent"); });
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");

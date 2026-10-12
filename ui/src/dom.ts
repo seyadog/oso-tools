@@ -218,7 +218,9 @@ export function makeSelect(options: [string, string][], value: string, attrs: Re
 }
 
 /** A small menu at the pointer (right click): `items` run when picked; anything else closes it. */
-export function contextMenu(x: number, y: number, items: { label: string; run: () => void; danger?: boolean; hint?: string; checked?: boolean }[]) {
+export type MenuItem = { label: string; run: () => void; danger?: boolean; hint?: string; checked?: boolean; act?: string; foot?: boolean } | { title: string };
+
+export function contextMenu(x: number, y: number, items: MenuItem[]) {
   document.querySelector(".ctx-menu")?.remove();
   const menu = el("div", { class: "ctx-menu", role: "menu" });
   const close = () => {
@@ -233,8 +235,13 @@ export function contextMenu(x: number, y: number, items: { label: string; run: (
     if (e.key === "Escape") close();
   };
   for (const it of items) {
-    const b = el("button", { class: `ctx-item${it.danger ? " danger" : ""}${it.checked ? " checked" : ""}`, type: "button", role: it.checked === undefined ? "menuitem" : "menuitemcheckbox", ...(it.checked === undefined ? {} : { "aria-checked": String(it.checked) }) }, el("span", { class: "lbl" }, it.label));
+    if ("title" in it) {
+      menu.append(el("div", { class: "ctx-title" }, it.title));
+      continue;
+    }
+    const b = el("button", { class: `ctx-item${it.danger ? " danger" : ""}${it.checked ? " checked" : ""}${it.foot ? " foot" : ""}`, type: "button", role: it.checked === undefined ? "menuitem" : "menuitemcheckbox", ...(it.checked === undefined ? {} : { "aria-checked": String(it.checked) }) }, el("span", { class: "lbl" }, it.label));
     if (it.hint) b.append(el("kbd", {}, it.hint));
+    if (it.act) b.dataset.act = it.act;
     b.onclick = () => {
       close();
       it.run();

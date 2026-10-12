@@ -160,6 +160,8 @@ export interface PanelCtx {
   queue: ApprovalQueue;
   /** The agents to list (what the engine knows, with the screen's say where it knows nothing else). */
   agents(): AgentRow[];
+  /** "+ New agent". */
+  newAgent(): void;
   /** Goes to the tab of this terminal. */
   focus(sid: number): void;
   /** The tab as the person sees it ("tab 1 · Local · seya"), or `undefined` when that terminal is closed. */
@@ -383,6 +385,9 @@ export class RightPanel {
 
   private agentsSection(now: number): HTMLElement {
     const list = el("div", { class: "rp-scroll" });
+    const add = el("button", { class: "btn small", type: "button", "data-act": "agents-new", title: `New agent (${this.ctx.keyText("agent.new")})` }, "+ New agent");
+    add.onclick = () => this.ctx.newAgent();
+    list.append(el("div", { class: "rp-bar" }, add));
     if (!this.agentRows.length) list.append(el("div", { class: "rp-empty" }, "No agent is running. Start one from a Space (New agent), or run claude, opencode or codex in a terminal of oso: it shows up here with what it is doing."));
     let space: string | null = null;
     for (const r of this.agentRows) {

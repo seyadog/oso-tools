@@ -1,7 +1,7 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
 import { AccountsView, Backend, Space, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
-import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
+import { MenuItem, clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
 import { SpacesCtx, newSpace, renderSpaces } from "./spaces_ui";
 import { emptySpace, openSpaces, tabFor, withTab } from "./spaces";
@@ -21,6 +21,9 @@ import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel } from "./rpanel";
 import { AgentState, AgentStatus, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
+import { ActionCtx, actionDef, applicable } from "./actions";
+import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
+import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
 import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
@@ -147,6 +150,7 @@ export class App {
       be: this.be,
       queue: this.approvals,
       agents: () => this.agentRows(),
+      newAgent: () => this.newAgent(null),
       focus: (sid) => this.focusSession(sid),
       tabLabel: (pane) => this.tabLabel(pane),
       focusMode: () => this.focusMode,
@@ -502,6 +506,7 @@ export class App {
         onFocus: (s) => this.focusSession(s),
         onTitlePointerDown: (e, s) => this.startDrag(e, s, false),
         onWatch: (s) => this.toggleWatch(s),
+        onContextMenu: (e, s) => this.paneMenu(e, s),
       });
       p.attach(this.stage);
       this.panes.set(sid, p);
@@ -1025,7 +1030,7 @@ export class App {
     }));
     const help = el("button", { class: "btn small", type: "button", "data-act": "home-shortcuts" }, `All shortcuts  (${this.keyText("help.open")} or ?)`);
     help.onclick = () => this.shortcutsSheet();
-    home.append(el("div", { class: "tip" }, "Secrets live in the encrypted vault (Secrets, left). Everything has a tooltip with its shortcut. ", help));
+    home.append(el("div", { class: "tip" }, `Secrets live in the encrypted vault (Secrets, left). Everything has a tooltip with its shortcut. Press ${this.keyText("palette.open")} to find any command, server, Space or tab. `, help));
     return home;
   }
 
@@ -1148,9 +1153,9 @@ export class App {
         e.preventDefault();
         ws.focus(g.active);
         contextMenu(e.clientX, e.clientY, [
-          { label: "Save in a Space…", run: () => void this.saveTabToSpace() },
-          { label: "Rename", run: () => void this.renameTab(g.active) },
-          { label: ids.length > 1 ? `Close tab (${ids.length} terminals)` : "Close", run: () => void this.closeTab(ids), danger: true },
+          { label: "Rename", run: () => void this.renameTab(g.active), hint: this.keyText("tab.rename") },
+          { label: "Save in a Space…", run: () => void this.saveTabToSpace(), hint: this.keyText("group.save") },
+          { label: ids.length > 1 ? `Close tab (${ids.length} terminals)` : "Close", run: () => void this.closeTab(ids), danger: true, hint: this.keyText("tab.close") },
         ]);
       });
       x.onclick = (e) => {
@@ -1180,25 +1185,98 @@ export class App {
     this.toolsEl.append(el("span", { class: "version", title: "The version of oso you are running" }, versionLabel()), menu);
   }
 
-  /** The one menu of the top bar: everything that used to be a row of icons. */
+  /** The one menu of the top bar: short, in groups. Everything else is in the palette, or where it belongs (the menu of a terminal, of a tab). */
   private openMenu(anchor: HTMLElement) {
-    const ws = this.ws;
     const hint = (a: string) => this.keyText(a);
     const r = anchor.getBoundingClientRect();
     contextMenu(r.right, r.bottom + 4, [
-      { label: "New terminal to the right", hint: hint("split.right"), run: () => this.run("split.right") },
-      { label: "New terminal below", hint: hint("split.down"), run: () => this.run("split.down") },
-      { label: "Type in every terminal of this tab", hint: hint("broadcast.toggle"), checked: ws.broadcasting, run: () => this.toggleBroadcast() },
-      { label: "Tell me when this terminal is done", hint: hint("watch.toggle"), checked: ws.screen.active != null && this.watches.has(ws.screen.active), run: () => this.toggleWatch() },
-      { label: "Copy files to or from this server…", hint: hint("files.open"), run: () => this.openFiles() },
-      { label: "Save this tab in a Space…", hint: hint("group.save"), run: () => void this.saveTabToSpace() },
-      { label: "Snippets…", run: () => this.snippetsDialog() },
-      { label: "Open a server…", hint: hint("search"), run: () => void this.hostPicker() },
-      { label: "New agent…", hint: hint("agent.new"), run: () => this.newAgent(null) },
-      { label: "Next agent that needs you", hint: hint("attention.next"), run: () => this.jumpToAttention() },
+      { title: "View" },
       { label: this.focusMode ? "Leave focus mode" : "Focus mode: only the terminals", hint: hint("focus.toggle"), run: () => this.setFocusMode(!this.focusMode) },
-      { label: this.rpanel.open ? "Close the right panel" : "Open the right panel", hint: hint("rpanel.toggle"), run: () => this.run("rpanel.toggle") },
+      { title: "Agents" },
+      { label: "Next agent that needs you", hint: hint("attention.next"), run: () => this.run("attention.next") },
+      { title: "Tools" },
+      { label: "Snippets…", run: () => this.run("snippets.open") },
+      { label: "Command palette", hint: hint("palette.open"), run: () => this.run("palette.open") },
+      { label: "All commands…", hint: hint("palette.open"), run: () => this.run("palette.open"), foot: true, act: "menu-all" },
     ]);
+  }
+
+  /** What applies now, for the registry's `when`. */
+  private actionCtx(): ActionCtx {
+    const ws = this.ws;
+    const active = ws.screen.active;
+    const tab = active != null ? ws.tabs.get(active) : undefined;
+    const live = !!tab && !tab.dead;
+    return {
+      terminal: live,
+      ssh: live && tab!.serverId !== LOCAL,
+      several: !!ws.screen.group && leaves(ws.screen.group.tree).length > 1,
+      tabs: ws.screen.groups.length > 0,
+      manyTabs: ws.screen.groups.length > 1,
+      broadcasting: ws.broadcasting,
+      watching: active != null && this.watches.has(active),
+      attention: this.agentRows().some((r) => r.state === "needs_you" || r.state === "finished"),
+      vaultExists: this.vault.exists,
+      vaultUnlocked: this.vault.unlocked,
+      focusMode: this.focusMode,
+      rightOpen: !!this.rpanel?.open,
+    };
+  }
+
+  /** A menu made of registered actions (those that apply now), with their keys. */
+  private menuOf(ids: string[]): MenuItem[] {
+    const c = this.actionCtx();
+    const apply = new Set(applicable(c).map((a) => a.id));
+    return ids
+      .filter((id) => apply.has(id))
+      .map((id): MenuItem => {
+        const a = actionDef(id)!;
+        const checked = id === "broadcast.toggle" ? c.broadcasting : id === "watch.toggle" ? c.watching : undefined;
+        return { label: a.label, hint: this.keyText(id) || undefined, run: () => this.run(id), danger: id === "tab.close", checked, act: `act-${id}` };
+      });
+  }
+
+  /** The menu of a terminal: what can be done with it, here. */
+  private paneMenu(e: MouseEvent, sid: Id) {
+    this.focusSession(sid);
+    const items = this.menuOf(["split.right", "split.down", "broadcast.toggle", "watch.toggle", "files.open", "tab.close"]);
+    if (items.length) contextMenu(e.clientX, e.clientY, items);
+  }
+
+  // ------------------------------------------------------------ the command palette
+
+  /** Everything the palette can find: the actions that apply, servers, Spaces, secrets (names only) and the open tabs. */
+  private paletteItems(): Item[] {
+    const pending = this.ws.pending;
+    const items: Item[] = applicable(this.actionCtx()).map((a) => ({ id: a.id, kind: "action", label: a.label, icon: a.icon, hotkey: this.keyText(a.id) || undefined, keywords: a.keywords, run: () => this.run(a.id) }));
+    const open = (id: number) => () => {
+      this.ws.pending = pending;
+      void this.openServer(id);
+    };
+    items.push({ id: String(LOCAL), kind: "server", label: "Local terminal", sub: "this computer", icon: "terminal", run: open(LOCAL) });
+    for (const s of this.tree.servers) items.push({ id: String(s.id), kind: "server", label: s.name, sub: `${s.user ? s.user + "@" : ""}${s.host}`, icon: "server", run: open(s.id) });
+    for (const sp of this.spaces) items.push({ id: String(sp.id), kind: "space", label: sp.name, sub: "Space", icon: "layers", keywords: sp.notes.slice(0, 80), run: () => void this.openSpace(sp) });
+    for (const m of this.secretsMeta ?? []) items.push({ id: String(m.id), kind: "secret", label: m.name, sub: `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`, icon: "key", run: () => void this.vaultDialog() });
+    this.ws.screen.groups.forEach((g, i) => {
+      const label = this.tabLabel(g.active);
+      if (label) items.push({ id: String(g.active), kind: "tab", label, sub: leaves(g.tree).length > 1 ? `${leaves(g.tree).length} terminals` : undefined, icon: "tabs", hotkey: i < 9 ? this.keyText(`tab.${i + 1}`) || undefined : undefined, run: () => this.focusSession(g.active) });
+    });
+    return items;
+  }
+
+  /** `Alt+Shift+Space`: every command, server, Space, secret and tab. `Alt+K` is the same, already filtered to servers. */
+  openPalette(only?: ("server")[]) {
+    const recent = loadRecent();
+    openPalette({
+      items: this.paletteItems(),
+      recent,
+      only,
+      placeholder: only ? "Open a server…" : "Type a command, a server, a Space, a tab…",
+      onRun: (item) => {
+        if (item.kind === "action") saveRecent(pushRecent(recent, item.id));
+        item.run();
+      },
+    });
   }
 
   /** The cloud account the active profile points the local terminals at, in red when it is a production one. */
@@ -1502,54 +1580,7 @@ export class App {
 
   /** Alt+K and the + button: type a few letters of a host and open it. */
   async hostPicker() {
-    const pending = this.ws.pending;
-    return new Promise<void>((resolve) => {
-      openModal(
-        (close) => {
-          const input = el("input", { type: "search", placeholder: "Open a server…", autocomplete: "off", spellcheck: "false" });
-          const list = el("div", { class: "picker-list" });
-          let at = 0;
-          let shown: { id: number; name: string; sub: string }[] = [];
-          const draw = () => {
-            const q = input.value.trim().toLowerCase();
-            const all = [{ id: LOCAL, name: "Local terminal", sub: "this computer" }, ...this.tree.servers.map((s) => ({ id: s.id, name: s.name, sub: `${s.user ? s.user + "@" : ""}${s.host}` }))];
-            shown = all.filter((x) => !q || `${x.name} ${x.sub}`.toLowerCase().includes(q));
-            at = Math.min(at, Math.max(0, shown.length - 1));
-            clear(list);
-            shown.forEach((x, i) => {
-              const row = el("div", { class: `row${i === at ? " sel" : ""}` }, el("span", { class: "dot", style: `background:${serverColor(x.id)}` }), el("span", { class: "txt" }, el("b", {}, x.name), el("small", {}, x.sub)));
-              row.onclick = () => choose(x.id);
-              list.append(row);
-            });
-            if (!shown.length) list.append(el("div", { class: "empty" }, "No server matches."));
-            list.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
-          };
-          const choose = (id: number) => {
-            close();
-            this.ws.pending = pending;
-            void this.openServer(id);
-          };
-          input.oninput = () => {
-            at = 0;
-            draw();
-          };
-          input.onkeydown = (e) => {
-            if (e.key === "ArrowDown") at = Math.min(shown.length - 1, at + 1);
-            else if (e.key === "ArrowUp") at = Math.max(0, at - 1);
-            else if (e.key === "Enter") {
-              e.preventDefault();
-              if (shown[at]) choose(shown[at].id);
-              return;
-            } else return;
-            e.preventDefault();
-            draw();
-          };
-          draw();
-          return el("div", {}, el("h2", {}, "Open a server"), input, list);
-        },
-        resolve,
-      );
-    });
+    this.openPalette(["server"]);
   }
 
   // ------------------------------------------------------------ spaces
@@ -2316,8 +2347,30 @@ export class App {
         return this.openTunnels();
       case "group.save":
         return void this.saveTabToSpace();
+      case "palette.open":
+        return this.openPalette();
       case "search":
-        return void this.hostPicker();
+        return this.openPalette(["server"]);
+      case "snippets.open":
+        return this.snippetsDialog();
+      case "space.new":
+        return void newSpace(this.spacesCtx());
+      case "server.add":
+        return void this.serverForm(null);
+      case "ssh.import":
+        return void this.importSsh();
+      case "secret.new":
+        return void this.newSecret();
+      case "vault.lock":
+        return void this.lockVault();
+      case "sounds.open":
+        return soundsDialog(this.sound);
+      case "agents.settings":
+        return void agentKindsDialog(this.be);
+      case "ai.connect":
+        return void connectAiDialog(this.be, () => void this.refreshAi());
+      case "audit.open":
+        return void auditDialog(this.be);
       case "sudo.fill":
         return void this.fillSudo();
       case "rpanel.toggle":

@@ -1,3 +1,5 @@
+import { ACTIONS, describe } from "./actions";
+
 // Hotkeys: every action has a default and you can change any of them in hotkeys.json.
 // A combo is written like "Alt+Shift+2" or "Alt+Left". Keys are matched by their physical place (the digit
 // row, the letter keys), so the same combo works on every keyboard layout.
@@ -17,6 +19,7 @@ export function modifierOf(user: Record<string, unknown> | null): string {
 }
 
 export const DEFAULTS: Record<string, string | string[]> = {
+  "palette.open": "Mod+Shift+Space",
   "tab.1": "Mod+1",
   "tab.2": "Mod+2",
   "tab.3": "Mod+3",
@@ -65,47 +68,8 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "panel.accounts": "Mod+Shift+5",
 };
 
-/** What each action does, for the settings screen. */
-export const LABELS: Record<string, string> = {
-  "tab.prev": "Previous tab",
-  "tab.next": "Next tab",
-  "mode.toggle": "Join every tab in one mosaic, and set them apart again",
-  "split.right": "New terminal to the right",
-  "split.down": "New terminal below",
-  "focus.left": "Focus the terminal on the left",
-  "focus.right": "Focus the terminal on the right",
-  "focus.up": "Focus the terminal above",
-  "focus.down": "Focus the terminal below",
-  "move.left": "Move this terminal left",
-  "move.right": "Move this terminal right",
-  "move.up": "Move this terminal up",
-  "move.down": "Move this terminal down",
-  "tab.new": "New terminal (same server)",
-  "tab.close": "Close this terminal",
-  "tab.rename": "Rename this terminal",
-  "broadcast.toggle": "Type in every terminal of the tab (broadcast), on or off",
-  "group.save": "Save this tab in a Space",
-  "watch.toggle": "Tell me when this terminal is done, on or off",
-  "files.open": "Copy files to or from this terminal's server",
-  "tunnels.open": "Tunnels (port forwards)",
-  "search": "Open a server (quick search)",
-  "sudo.fill": "Type the saved sudo password",
-  "sidebar.toggle": "Servers list ⇄ terminal (opens the Servers panel if it is closed)",
-  "settings": "Settings",
-  "help.open": "Shortcuts and help (also ? when you are not typing)",
-  "secrets.open": "Secrets",
-  "local.new": "New local terminal (in the active profile)",
-  "rpanel.toggle": "Right panel (agents and AI activity), open or closed",
-  "focus.toggle": "Focus mode: hide every panel, only the terminals",
-  "attention.next": "Jump to the next agent that needs you",
-  "agent.new": "New agent (folder, agent, optional worktree)",
-  "panel.spaces": "Left panel: Spaces (again to close it)",
-  "panel.servers": "Left panel: Servers",
-  "panel.secrets": "Left panel: Secrets",
-  "panel.tunnels": "Left panel: Tunnels",
-  "panel.accounts": "Left panel: Accounts",
-  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tab.${i + 1}`, `Go to tab ${i + 1}  (9 goes to the last one)`])),
-};
+/** What each action does, for the settings screen and the sheet of shortcuts: it comes from the one list of actions. */
+export const LABELS: Record<string, string> = Object.fromEntries(ACTIONS.map((a) => [a.id, describe(a.id)]));
 
 interface Combo {
   alt: boolean;

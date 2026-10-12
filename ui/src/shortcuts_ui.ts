@@ -15,7 +15,7 @@ export interface Group {
 
 /** Which actions belong together. Anything not listed lands in "More", so a new action is never lost. */
 const GROUPS: { title: string; actions: string[] }[] = [
-  { title: "Open", actions: ["search", "local.new", "tab.new", "sidebar.toggle", "panel.spaces", "rpanel.toggle", "focus.toggle", "settings", "help.open"] },
+  { title: "Open", actions: ["palette.open", "search", "local.new", "tab.new", "sidebar.toggle", "panel.spaces", "rpanel.toggle", "focus.toggle", "settings", "help.open"] },
   { title: "Tabs", actions: ["tab.1", "tab.prev", "tab.next", "tab.close", "tab.rename", "group.save", "watch.toggle"] },
   { title: "Mosaic", actions: ["mode.toggle", "split.right", "split.down", "focus.left", "move.left", "broadcast.toggle"] },
   { title: "Files and tunnels", actions: ["files.open", "tunnels.open"] },
