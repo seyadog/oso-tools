@@ -8,10 +8,11 @@ use common::*;
 use oso_core::agent_api::Handler;
 use oso_core::approvals::{ApprovalRequest, Approvals, Decision};
 use oso_core::daemon::{self, AgentCall, Daemon};
-use oso_core::engine::{Emit, Engine};
+use oso_core::engine::{Emit, Engine, Focus};
 use oso_core::mcp;
 use oso_core::policy::AiPolicy;
 use oso_core::session::SpawnOpts;
+use oso_core::spaces::Space;
 use oso_core::store::{Auth, EnvKind, Server, Store};
 use oso_core::vault::{SecretKind, SecretMeta, Vault};
 use serde_json::{Value, json};
@@ -427,9 +428,14 @@ fn chain(name: &str) -> Chain {
 
 /// A terminal with a token: it writes its own variables to a file and waits.
 fn terminal(c: &Chain, name: &str) -> (u64, String, u64, RemoteHold) {
+    terminal_in(c, name, None)
+}
+
+/// The same, opened in a Space (the window says so when it creates the terminal; the background server keeps it).
+fn terminal_in(c: &Chain, name: &str, space: Option<u64>) -> (u64, String, u64, RemoteHold) {
     let file = c.rig.dir.join(format!("{name}.env"));
     let script = format!("echo \"$OSO_PANE $OSO_TOKEN $OSO_SOCKET\" > {}; sleep 60", file.display());
-    let opts = SpawnOpts { argv: vec!["sh".into(), "-c".into(), script], rows: 24, cols: 80, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: None, agent: true, space: None };
+    let opts = SpawnOpts { argv: vec!["sh".into(), "-c".into(), script], rows: 24, cols: 80, fills: vec![], login_expected: false, cwd: None, env: None, tap: None, sudo_fill: None, agent: true, space };
     let session = c.daemon.spawn(opts).unwrap();
     let end = Instant::now() + Duration::from_secs(5);
     while !file.exists() && Instant::now() < end {
@@ -451,6 +457,231 @@ fn install(c: &Chain) {
     let h = Arc::new(Handler::new(Arc::clone(&c.rig.engine), Arc::clone(&c.rig.approvals)));
     c.daemon.set_agent_handler(Arc::new(move |call| h.handle(call)));
     std::thread::sleep(Duration::from_millis(150));
+}
+
+/// Two Spaces, a server and a secret in each, and one of each that is in neither: the world the isolation tests use.
+struct World {
+    c: Chain,
+    sshd: Sshd,
+    a: (u64, u64), // space A: its server and its secret
+    b: (u64, u64),
+    free_server: u64,
+    space_a: u64,
+    space_b: u64,
+}
+
+const SECRET_A: &str = "SECRET-OF-SPACE-A-111111";
+const SECRET_B: &str = "SECRET-OF-SPACE-B-222222";
+
+fn world(name: &str) -> Option<World> {
+    let sshd = start_sshd(name)?;
+    let c = chain(name);
+    let (a, b, free_server, space_a, space_b);
+    {
+        let r = &c.rig;
+        let sa = add_server(r, &sshd, "alpha-api", None, AiPolicy::ReadOnlyAuto, "alpha notes: the api of Alpha");
+        let sb = add_server(r, &sshd, "beta-db", None, AiPolicy::ReadOnlyAuto, "beta notes: the db of Beta");
+        free_server = add_server(r, &sshd, "free-box", None, AiPolicy::ReadOnlyAuto, "in no Space");
+        let meta = |n: &str, var: &str| SecretMeta { id: 0, name: n.into(), kind: SecretKind::ApiKey, profile: None, env_var: Some(var.into()), agent_visible: false, notes: String::new(), updated: 0 };
+        let (ka, kb) = {
+            let mut e = r.engine.lock().unwrap();
+            (e.secret_save(meta("alpha key", "ALPHA_KEY"), Some(SECRET_A)).unwrap(), e.secret_save(meta("beta key", "BETA_KEY"), Some(SECRET_B)).unwrap())
+        };
+        let mut e = r.engine.lock().unwrap();
+        // a tunnel on each Space's server
+        for (id, name, port) in [(sa, "alpha tunnel", 15431u16), (sb, "beta tunnel", 15432u16)] {
+            let mut s = e.store.server(id).unwrap().clone();
+            s.forwards.push(oso_core::store::Forward { id: 1, name: name.into(), auto: false, kind: oso_core::store::ForwardKind::Local, bind_port: port, host: "127.0.0.1".into(), port: 5432 });
+            e.store.update_server(s);
+        }
+        space_a = e.space_save(&Space { name: "Alpha".into(), notes: "Alpha is the shop".into(), folders: vec!["/srv/alpha".into()], servers: vec![sa], secrets: vec![ka], ..Default::default() }).unwrap();
+        space_b = e.space_save(&Space { name: "Beta".into(), notes: "Beta is the blog".into(), servers: vec![sb], secrets: vec![kb], ..Default::default() }).unwrap();
+        a = (sa, ka);
+        b = (sb, kb);
+    }
+    install(&c);
+    Some(World { c, sshd, a, b, free_server, space_a, space_b })
+}
+
+/// What an agent in a terminal of `space` gets from `tool`, through the real background server and the real handler.
+fn ask(w: &World, term: &(u64, String, u64, RemoteHold), tool: &str, args: Value) -> Value {
+    // the agent also tries to name its own Space in the request: it is not listened to
+    let body = json!({ "tool": tool, "args": args, "agent": "claude-code", "space": w.space_b });
+    daemon::agent_call(&w.c.socket, &term.1, term.0, body, Duration::from_secs(30)).unwrap()
+}
+
+fn names_of(v: &Value, key: &str) -> Vec<String> {
+    let mut out: Vec<String> = v["result"][key].as_array().map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    out.sort();
+    out
+}
+
+#[test]
+fn an_agent_of_a_space_sees_and_uses_only_what_that_space_holds() {
+    let Some(w) = world("isolation") else { return eprintln!("skipped: no sshd here") };
+    person(&w.c.rig.approvals, |_| Decision::Once);
+    let ta = terminal_in(&w.c, "ta", Some(w.space_a));
+    let tb = terminal_in(&w.c, "tb", Some(w.space_b));
+    let free = terminal_in(&w.c, "tf", None);
+
+    // what it is told: its Space's servers, notes and variables, and nothing about the other
+    let ctx = ask(&w, &ta, "oso_context", Value::Null);
+    assert_eq!(ctx["ok"], true, "{ctx}");
+    assert_eq!(names_of(&ctx, "servers"), ["alpha-api"], "{ctx}");
+    assert_eq!(ctx["result"]["space"]["name"], "Alpha");
+    assert!(ctx["result"]["space"]["notes"].as_str().unwrap().contains("the shop"));
+    let text = ctx.to_string();
+    for outsider in ["beta", "Beta", "free-box", "BETA_KEY", "blog", "15432"] {
+        assert!(!text.contains(outsider), "{outsider:?} leaked into the context of Space A: {text}");
+    }
+    assert_eq!(ctx["result"]["secrets_you_can_use_with_oso_run_with"], json!(["alpha key"]));
+    let ctx_b = ask(&w, &tb, "oso_context", Value::Null);
+    assert_eq!(names_of(&ctx_b, "servers"), ["beta-db"]);
+    assert!(!ctx_b.to_string().contains("alpha") && !ctx_b.to_string().contains("ALPHA_KEY"));
+    // a terminal outside any Space sees what the profile shows (as it always did)
+    assert_eq!(names_of(&ask(&w, &free, "oso_context", Value::Null), "servers"), ["alpha-api", "beta-db", "free-box"]);
+
+    // searching: a name of another Space finds nothing
+    assert_eq!(names_of(&ask(&w, &ta, "oso_hosts", json!({ "query": "beta" })), "hosts"), Vec::<String>::new());
+    assert_eq!(names_of(&ask(&w, &ta, "oso_hosts", json!({})), "hosts"), ["alpha-api"]);
+
+    // running: its own server works; another Space's is answered exactly like one that does not exist
+    let own = ask(&w, &ta, "oso_run", json!({ "host": "alpha-api", "command": "echo hello-from-alpha" }));
+    assert_eq!((own["ok"].as_bool(), stdout_of(&own).trim()), (Some(true), "hello-from-alpha"), "{own}");
+    let other = ask(&w, &ta, "oso_run", json!({ "host": "beta-db", "command": "echo hello" }));
+    let ghost = ask(&w, &ta, "oso_run", json!({ "host": "nothing-like-it", "command": "echo hello" }));
+    let free_try = ask(&w, &ta, "oso_run", json!({ "host": "free-box", "command": "echo hello" }));
+    assert_eq!(other["ok"], false);
+    assert_eq!(other["error"].as_str().unwrap().replace("beta-db", "X"), ghost["error"].as_str().unwrap().replace("nothing-like-it", "X"), "the agent cannot tell a server of another Space from one that is not there");
+    assert!(free_try["error"].as_str().unwrap().contains("no server called"), "{free_try}");
+    // by address too, not only by name
+    assert_eq!(ask(&w, &ta, "oso_run", json!({ "host": "127.0.0.1", "command": "echo hello" }))["ok"], true, "a host name that is the address of its own server still works");
+    let before = audit(&w.c.rig).len();
+    assert!(!audit(&w.c.rig).iter().any(|l| l["host"] == "beta-db" && l["decision"] == "finished"), "nothing ran on the other Space's server");
+    let _ = before;
+
+    // secrets: its own is handed to a command; another Space's is answered like a missing one, and its value never appears
+    let marker = w.c.rig.dir.join("env-a");
+    let ok = ask(&w, &ta, "oso_run_with", json!({ "command": format!("echo \"$ALPHA_KEY\" > {}; echo done", marker.display()), "secrets": ["alpha key"] }));
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), SECRET_A, "its own secret reaches the command");
+    let steal = ask(&w, &ta, "oso_run_with", json!({ "command": "echo $BETA_KEY", "secrets": ["beta key"] }));
+    let none = ask(&w, &ta, "oso_run_with", json!({ "command": "echo x", "secrets": ["no such key"] }));
+    assert_eq!(steal["ok"], false);
+    assert_eq!(steal["error"].as_str().unwrap().replace("beta key", "X"), none["error"].as_str().unwrap().replace("no such key", "X"));
+    assert!(!steal.to_string().contains(SECRET_B) && !ok.to_string().contains(SECRET_A), "values are never in an answer");
+
+    // tunnels: only its own Space's
+    let t = ask(&w, &ta, "oso_tunnel", json!({ "name": "beta tunnel", "action": "start" }));
+    assert_eq!(t["ok"], false);
+    assert!(t["error"].as_str().unwrap().contains("no tunnel called"), "{t}");
+    assert!(ask(&w, &ta, "oso_tunnel", json!({ "name": "alpha tunnel", "action": "stop" }))["ok"].as_bool().unwrap(), "its own can be reached");
+
+    // and the other way round
+    let from_b = ask(&w, &tb, "oso_run", json!({ "host": "alpha-api", "command": "echo hello" }));
+    assert_eq!(from_b["ok"], false);
+    assert_eq!(ask(&w, &tb, "oso_run", json!({ "host": "beta-db", "command": "echo from-beta" }))["ok"], true);
+
+    // the request said it was in Space B (the agent tried); it was still treated as A: the Space is the terminal's, not the agent's
+    assert_eq!(names_of(&ask(&w, &ta, "oso_context", Value::Null), "servers"), ["alpha-api"]);
+    let _ = (&w.sshd, w.free_server, w.a, w.b);
+}
+
+#[test]
+fn a_space_that_is_gone_or_whose_secret_is_not_listed_closes_everything_for_its_agents() {
+    let Some(w) = world("isolation-gone") else { return eprintln!("skipped: no sshd here") };
+    person(&w.c.rig.approvals, |_| Decision::Once);
+    let ta = terminal_in(&w.c, "ta", Some(w.space_a));
+    assert_eq!(ask(&w, &ta, "oso_run", json!({ "host": "alpha-api", "command": "echo hi" }))["ok"], true);
+    // taking a server out of the Space takes it away from the agent at once
+    {
+        let mut e = w.c.rig.engine.lock().unwrap();
+        let mut sp = e.spaces.get(w.space_a).unwrap().clone();
+        sp.servers.clear();
+        e.space_save(&sp).unwrap();
+    }
+    let r = ask(&w, &ta, "oso_run", json!({ "host": "alpha-api", "command": "echo hi" }));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(names_of(&ask(&w, &ta, "oso_context", Value::Null), "servers").is_empty());
+    // deleting the Space: nothing at all works, and the answer says why
+    w.c.rig.engine.lock().unwrap().space_delete(w.space_a).unwrap();
+    for tool in ["oso_context", "oso_hosts", "oso_run", "oso_run_with", "oso_tunnel", "oso_focus", "oso_sudo"] {
+        let r = ask(&w, &ta, tool, json!({ "host": "alpha-api", "command": "echo hi", "secrets": ["alpha key"], "name": "x", "action": "stop" }));
+        assert_eq!(r["ok"], false, "{tool}: {r}");
+        assert!(r["error"].as_str().unwrap().contains("Space no longer exists"), "{tool}: {r}");
+    }
+}
+
+#[test]
+fn the_sudo_password_of_this_computer_is_only_for_a_space_that_lists_it() {
+    let Some(w) = world("isolation-sudo") else { return eprintln!("skipped: no sshd here") };
+    person(&w.c.rig.approvals, |_| Decision::Deny);
+    let ta = terminal_in(&w.c, "ta", Some(w.space_a));
+    let r = ask(&w, &ta, "oso_sudo", json!({ "command": "true" }));
+    assert_eq!(r["ok"], false);
+    assert!(r["error"].as_str().unwrap().contains("does not include the sudo password"), "{r}");
+    // once the Space lists it, the agent gets as far as the question (and the person here says no)
+    {
+        let mut e = w.c.rig.engine.lock().unwrap();
+        let sudo = e.vault.links(0).sudo.expect("the rig saved this computer's sudo password");
+        let mut sp = e.spaces.get(w.space_a).unwrap().clone();
+        sp.secrets.push(sudo);
+        e.space_save(&sp).unwrap();
+    }
+    let r = ask(&w, &ta, "oso_sudo", json!({ "command": "true" }));
+    assert!(r["error"].as_str().unwrap().contains("did not allow"), "{r}");
+}
+
+#[test]
+fn oso_focus_says_what_the_person_looks_at_inside_the_scope_and_nothing_outside_it() {
+    let Some(w) = world("focus") else { return eprintln!("skipped: no sshd here") };
+    let (alpha, beta, free) = (w.a.0, w.b.0, w.free_server);
+    let say = |f: Focus| w.c.rig.engine.lock().unwrap().set_focus(f);
+    let ta = terminal_in(&w.c, "ta", Some(w.space_a));
+    let plain = terminal_in(&w.c, "tp", None);
+    // nothing selected: empty, not an error
+    let r = ask(&w, &plain, "oso_focus", Value::Null);
+    assert_eq!((r["ok"].as_bool(), r["result"]["selected_server"].is_null(), r["result"]["open_ssh_sessions"].as_array().map(Vec::len)), (Some(true), true, Some(0)), "{r}");
+    // the person selected beta-db, has ssh open on alpha-api and free-box, and is on alpha-api's terminal
+    say(Focus { selected: Some(beta), open: vec![alpha, free], active: Some(alpha) });
+    let r = ask(&w, &plain, "oso_focus", Value::Null);
+    assert_eq!(r["result"]["selected_server"], "beta-db");
+    assert_eq!(r["result"]["server_of_the_terminal_in_front"], "alpha-api");
+    assert_eq!(r["result"]["open_ssh_sessions"], json!(["alpha-api", "free-box"]));
+    assert_eq!(r["result"]["profile"], "default");
+    assert!(r["result"]["space"].is_null());
+    // oso_context carries the same, so that "this server" works from the first call
+    assert_eq!(ask(&w, &plain, "oso_context", Value::Null)["result"]["focus"]["selected_server"], "beta-db");
+    // an agent of Space A is told only about what is in Space A
+    let r = ask(&w, &ta, "oso_focus", Value::Null);
+    assert!(r["result"]["selected_server"].is_null(), "beta-db is not in Space A: {r}");
+    assert_eq!(r["result"]["open_ssh_sessions"], json!(["alpha-api"]), "{r}");
+    assert_eq!(r["result"]["server_of_the_terminal_in_front"], "alpha-api");
+    assert_eq!(r["result"]["space"], "Alpha");
+    assert!(!r.to_string().contains("beta") && !r.to_string().contains("free-box"), "{r}");
+    // never what is on a screen: the answer holds names and nothing else
+    assert!(r["result"].as_object().unwrap().keys().all(|k| ["selected_server", "server_of_the_terminal_in_front", "open_ssh_sessions", "profile", "space"].contains(&k.as_str())));
+    // another profile is active: what was selected in the old one is not told
+    {
+        let mut e = w.c.rig.engine.lock().unwrap();
+        let work = e.profile_save("", "Work").unwrap();
+        let mut s = e.store.server(beta).unwrap().clone();
+        s.profile = Some("default".into());
+        e.store.update_server(s);
+        let mut s = e.store.server(alpha).unwrap().clone();
+        s.profile = Some("default".into());
+        e.store.update_server(s);
+        let mut s = e.store.server(free).unwrap().clone();
+        s.profile = Some("default".into());
+        e.store.update_server(s);
+        e.set_active_profile(&work).unwrap();
+    }
+    let r = ask(&w, &plain, "oso_focus", Value::Null);
+    assert!(r["result"]["selected_server"].is_null() && r["result"]["server_of_the_terminal_in_front"].is_null(), "{r}");
+    assert_eq!(r["result"]["open_ssh_sessions"], json!([]), "nothing of the profile that is not active: {r}");
+    assert_eq!(r["result"]["profile"], "Work");
+    assert!(!r.to_string().contains("beta-db") && !r.to_string().contains("alpha-api"), "{r}");
+    assert!(names_of(&ask(&w, &plain, "oso_context", Value::Null), "servers").is_empty(), "and the context of that profile has none of their servers");
 }
 
 #[test]

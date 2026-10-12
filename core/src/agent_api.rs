@@ -14,6 +14,7 @@ use crate::engine::Engine;
 use crate::jobs::Job;
 use crate::policy::{self, AiPolicy, Verdict};
 use crate::session::SpawnOpts;
+use crate::spaces::Space;
 use crate::store::{EnvKind, Server};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -47,6 +48,8 @@ pub struct Handler {
 struct Ctx {
     id: u64,
     pane: u64,
+    /// The Space of the terminal the agent runs in, as the background server stored it.
+    space: Option<u64>,
     title: String,
     agent: String,
 }
@@ -207,6 +210,56 @@ fn run_capture(mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration) -> s
     Ok(Captured { stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default(), code, timed_out })
 }
 
+/// What an agent may see and use: everything the active profile shows, or, when its terminal was opened in a Space, only
+/// what that Space holds. The terminal's Space comes from the background server (it is not something the agent says).
+enum Scope {
+    Profile(String),
+    Space(Box<Space>),
+}
+
+impl Scope {
+    fn of(e: &Engine, ctx: &Ctx) -> Result<Scope, String> {
+        match ctx.space {
+            Some(id) => e.spaces.get(id).cloned().map(|s| Scope::Space(Box::new(s))).ok_or_else(|| "This terminal's Space no longer exists, so oso cannot tell what you may use: ask the user to open a new terminal in a Space.".to_string()),
+            None => Ok(Scope::Profile(e.active_profile().to_string())),
+        }
+    }
+
+    /// The servers in scope.
+    fn servers(&self, e: &Engine) -> Vec<Server> {
+        match self {
+            Scope::Profile(p) => e.store.servers.iter().filter(|s| e.store.server_in(s, p)).cloned().collect(),
+            Scope::Space(sp) => {
+                let ids = sp.server_ids(&e.store);
+                e.store.servers.iter().filter(|s| ids.contains(&s.id)).cloned().collect()
+            }
+        }
+    }
+
+    fn has_server(&self, e: &Engine, id: u64) -> bool {
+        match self {
+            Scope::Profile(p) => e.store.server(id).is_some_and(|s| e.store.server_in(s, p)),
+            Scope::Space(sp) => sp.covers_server(&e.store, id),
+        }
+    }
+
+    /// Is this secret one the agent may know about? A profile's secrets are the ones of that profile (or of none); a Space's are the ones it lists.
+    fn has_secret(&self, id: u64, profile_of_secret: Option<&str>) -> bool {
+        match self {
+            Scope::Profile(p) => profile_of_secret.is_none_or(|sp| sp == p),
+            Scope::Space(sp) => sp.has_secret(id),
+        }
+    }
+
+    /// How to say "outside": where a name that is not found is looked for.
+    fn place(&self) -> &'static str {
+        match self {
+            Scope::Profile(_) => "profile",
+            Scope::Space(_) => "Space",
+        }
+    }
+}
+
 /// What an `oso_run` needs, worked out while the engine was locked.
 struct Target {
     id: u64,
@@ -229,7 +282,7 @@ impl Handler {
     /// Answers one request. Never panics on a bad one: the answer says what was wrong.
     pub fn handle(&self, call: AgentCall) -> Value {
         let agent = call.body.get("agent").and_then(Value::as_str).unwrap_or("").chars().take(60).collect();
-        let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, title: call.title, agent };
+        let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, space: call.space, title: call.title, agent };
         let tool = call.body.get("tool").and_then(Value::as_str).unwrap_or("");
         let args = call.body.get("args").cloned().unwrap_or(Value::Null);
         match tool {
@@ -239,6 +292,7 @@ impl Handler {
             "oso_sudo" => self.sudo(&ctx, &args),
             "oso_run_with" => self.run_with(&ctx, &args),
             "oso_tunnel" => self.tunnel(&ctx, &args),
+            "oso_focus" => self.focus(&ctx),
             // not an MCP tool: what an agent's own hooks report (`oso hook`), for the Agents panel
             "oso_event" => {
                 let (agent, event) = (args.get("agent").and_then(Value::as_str).unwrap_or(""), args.get("event").and_then(Value::as_str).unwrap_or(""));
@@ -277,9 +331,16 @@ impl Handler {
 
     fn context(&self, ctx: &Ctx) -> Value {
         let mut e = self.engine();
-        let profile = e.active_profile().to_string();
+        let scope = match Scope::of(&e, ctx) {
+            Ok(s) => s,
+            Err(m) => return no(m),
+        };
+        let profile = match &scope {
+            Scope::Profile(p) => p.clone(),
+            Scope::Space(sp) => sp.profile.clone().filter(|p| e.profiles().iter().any(|x| &x.id == p)).unwrap_or_else(|| e.active_profile().to_string()),
+        };
         let pname = e.profiles().iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or_else(|| profile.clone());
-        let servers: Vec<Server> = e.store.servers.iter().filter(|s| e.store.server_in(s, &profile)).cloned().collect();
+        let servers: Vec<Server> = scope.servers(&e);
         let status = e.tunnels();
         let list: Vec<Value> = if servers.len() > MANY_SERVERS {
             servers.iter().map(|s| json!({ "name": s.name, "environment": env_word(s.env_kind) })).collect()
@@ -291,38 +352,80 @@ impl Handler {
                     json!({
                         "name": s.name, "host": s.host, "user": s.user, "port": s.port,
                         "environment": env_word(s.env_kind), "notes": s.notes,
-                        "reached_through": s.jump.and_then(|j| e.store.server(j)).map(|j| j.name.clone()),
+                        // a hop outside the Space is not named: the agent has no business knowing it exists
+                        "reached_through": s.jump.filter(|j| scope.has_server(&e, *j)).and_then(|j| e.store.server(j)).map(|j| j.name.clone()),
                         "tunnels": tunnels,
                     })
                 })
                 .collect()
         };
-        let vars: Vec<Value> = e.vault.list().into_iter().filter(|m| m.agent_visible && m.env_var.is_some() && m.profile.as_deref().is_none_or(|p| p == profile)).filter_map(|m| m.env_var).map(Value::from).collect();
-        let more: Vec<Value> = e.vault.list().into_iter().filter(|m| !m.agent_visible && m.env_var.is_some() && m.profile.as_deref().is_none_or(|p| p == profile)).map(|m| Value::from(m.name)).collect();
+        let secrets = e.vault.list();
+        let in_scope = |m: &crate::vault::SecretMeta| scope.has_secret(m.id, m.profile.as_deref());
+        let vars: Vec<Value> = secrets.iter().filter(|m| m.agent_visible && m.env_var.is_some() && in_scope(m)).filter_map(|m| m.env_var.clone()).map(Value::from).collect();
+        let more: Vec<Value> = secrets.iter().filter(|m| !m.agent_visible && m.env_var.is_some() && in_scope(m)).map(|m| Value::from(m.name.clone())).collect();
         let many = servers.len() > MANY_SERVERS;
+        let space = match &scope {
+            Scope::Space(sp) => json!({ "name": sp.name, "notes": sp.notes, "folders": sp.folders }),
+            Scope::Profile(_) => Value::Null,
+        };
+        let focus = self.focus_view(&e, &scope);
         let out = ok(json!({
             "profile": { "id": profile, "name": pname },
+            "space": space,
             "terminal": ctx.title,
             "servers": list,
             "servers_note": if many { "There are many servers: this is only their names. Use oso_hosts with a search to see one." } else { "" },
             "environment_variables_already_set_in_your_terminal": vars,
             "secrets_you_can_use_with_oso_run_with": more,
-            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret). The user is asked to approve what is not a plain read. Production servers always ask.",
+            "focus": focus,
+            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret). The user is asked to approve what is not a plain read. Production servers always ask. When the user says \"this server\", call oso_focus.",
         }));
         drop(e);
         self.log(ctx, "context", "", "", "allowed_without_asking", |_| {});
         out
     }
 
+    /// Which server the person has selected and which ssh sessions they have open: names only, and only servers in scope.
+    fn focus_view(&self, e: &Engine, scope: &Scope) -> Value {
+        let f = e.focus();
+        let name = |id: Option<u64>| id.filter(|i| scope.has_server(e, *i)).and_then(|i| e.store.server(i)).map(|s| s.name.clone());
+        let mut open: Vec<String> = f.open.iter().filter(|i| scope.has_server(e, **i)).filter_map(|i| e.store.server(*i)).map(|s| s.name.clone()).collect();
+        open.sort();
+        open.dedup();
+        json!({ "selected_server": name(f.selected), "server_of_the_terminal_in_front": name(f.active), "open_ssh_sessions": open })
+    }
+
+    fn focus(&self, ctx: &Ctx) -> Value {
+        let e = self.engine();
+        let scope = match Scope::of(&e, ctx) {
+            Ok(s) => s,
+            Err(m) => return no(m),
+        };
+        let mut v = self.focus_view(&e, &scope);
+        let profile = match &scope {
+            Scope::Profile(p) => p.clone(),
+            Scope::Space(sp) => sp.profile.clone().unwrap_or_else(|| e.active_profile().to_string()),
+        };
+        v["profile"] = json!(e.profiles().iter().find(|p| p.id == profile).map(|p| p.name.clone()).unwrap_or(profile));
+        v["space"] = match &scope {
+            Scope::Space(sp) => json!(sp.name),
+            Scope::Profile(_) => Value::Null,
+        };
+        drop(e);
+        self.log(ctx, "focus", "", "", "allowed_without_asking", |_| {});
+        ok(v)
+    }
+
     fn hosts(&self, ctx: &Ctx, args: &Value) -> Value {
         let q = args.get("query").and_then(Value::as_str).unwrap_or("").to_lowercase();
         let e = self.engine();
-        let profile = e.active_profile().to_string();
-        let found: Vec<Value> = e
-            .store
-            .servers
+        let scope = match Scope::of(&e, ctx) {
+            Ok(s) => s,
+            Err(m) => return no(m),
+        };
+        let found: Vec<Value> = scope
+            .servers(&e)
             .iter()
-            .filter(|s| e.store.server_in(s, &profile))
             .filter(|s| q.is_empty() || format!("{} {} {} {}", s.name, s.host, s.user, s.notes).to_lowercase().contains(&q))
             .take(30)
             .map(|s| json!({ "name": s.name, "host": s.host, "user": s.user, "port": s.port, "environment": env_word(s.env_kind), "notes": s.notes }))
@@ -343,11 +446,12 @@ impl Handler {
 
     // ------------------------------------------------------------ a command on a server
 
-    fn target(&self, query: &str) -> Result<Target, String> {
+    fn target(&self, ctx: &Ctx, query: &str) -> Result<Target, String> {
         let mut e = self.engine();
-        let profile = e.active_profile().to_string();
+        let scope = Scope::of(&e, ctx)?;
         let q = query.trim().to_lowercase();
-        let visible: Vec<&Server> = e.store.servers.iter().filter(|s| e.store.server_in(s, &profile)).collect();
+        let in_scope = scope.servers(&e);
+        let visible: Vec<&Server> = in_scope.iter().collect();
         let mut hits: Vec<&Server> = visible.iter().copied().filter(|s| s.name.to_lowercase() == q).collect();
         if hits.is_empty() {
             hits = visible.iter().copied().filter(|s| s.host.to_lowercase() == q).collect();
@@ -357,7 +461,7 @@ impl Handler {
         }
         let s = match hits.as_slice() {
             [one] => (*one).clone(),
-            [] => return Err(format!("There is no server called {query:?} in this profile. Use oso_hosts to search.")),
+            [] => return Err(format!("There is no server called {query:?} in this {}. Use oso_hosts to search.", scope.place())),
             many => return Err(format!("{query:?} matches {}: say which one.", many.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "))),
         };
         if let Some(why) = connect::proxy_problem(&e.store, s.id).or_else(|| connect::key_problem(&e.store, s.id)) {
@@ -393,7 +497,7 @@ impl Handler {
             return no("The command is empty, too long, or has a NUL in it.");
         }
         let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
-        let t = match self.target(host) {
+        let t = match self.target(ctx, host) {
             Ok(t) => t,
             Err(m) => return no(m),
         };
@@ -493,11 +597,21 @@ impl Handler {
         let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
         {
             let mut e = self.engine();
+            let scope = match Scope::of(&e, ctx) {
+                Ok(s) => s,
+                Err(m) => return no(m),
+            };
             if !e.vault.is_unlocked() {
                 return no("oso's vault is locked: ask the person to unlock it, then try again.");
             }
-            if e.vault.get(LOCAL, crate::vault::Kind::Sudo).is_none() {
+            let Some(secret) = e.vault.links(LOCAL).sudo.filter(|_| e.vault.get(LOCAL, crate::vault::Kind::Sudo).is_some()) else {
                 return no("No sudo password is saved for this computer: the person can add it in oso (Secrets → This computer's sudo password).");
+            };
+            // in a Space, the password of this computer is one more secret that has to be in it
+            if let Scope::Space(sp) = &scope {
+                if !sp.has_secret(secret) {
+                    return no("This Space does not include the sudo password of this computer: the person can add it to the Space in oso.");
+                }
             }
         }
         match self.ask(ctx, "sudo", "this computer", &format!("sudo {command}"), false, false) {
@@ -543,12 +657,17 @@ impl Handler {
             if !e.vault.is_unlocked() {
                 return no("oso's vault is locked: ask the person to unlock it, then try again.");
             }
+            let scope = match Scope::of(&e, ctx) {
+                Ok(s) => s,
+                Err(m) => return no(m),
+            };
             profile = e.active_profile().to_string();
             let list = e.vault.list();
             let mut out = vec![];
             for n in &names {
-                let Some(m) = list.iter().find(|m| m.name.eq_ignore_ascii_case(n) && m.profile.as_deref().is_none_or(|p| p == profile)) else {
-                    return no(format!("There is no secret called {n:?} in this profile."));
+                // a secret outside the scope is answered like one that does not exist
+                let Some(m) = list.iter().find(|m| m.name.eq_ignore_ascii_case(n) && scope.has_secret(m.id, m.profile.as_deref())) else {
+                    return no(format!("There is no secret called {n:?} in this {}.", scope.place()));
                 };
                 let Some(var) = m.env_var.clone() else {
                     return no(format!("The secret {n:?} has no environment variable, so it cannot be handed to a command: the person can set one in Secrets."));
@@ -619,8 +738,12 @@ impl Handler {
         }
         let (server_id, forward_id, server_name, production, desc) = {
             let e = self.engine();
-            let profile = e.active_profile().to_string();
-            let hits: Vec<(&Server, &crate::store::Forward)> = e.store.servers.iter().filter(|s| e.store.server_in(s, &profile)).flat_map(|s| s.forwards.iter().map(move |f| (s, f))).filter(|(_, f)| f.name.eq_ignore_ascii_case(name) || (f.name.is_empty() && f.bind_port.to_string() == name)).collect();
+            let scope = match Scope::of(&e, ctx) {
+                Ok(s) => s,
+                Err(m) => return no(m),
+            };
+            let in_scope = scope.servers(&e);
+            let hits: Vec<(&Server, &crate::store::Forward)> = in_scope.iter().flat_map(|s| s.forwards.iter().map(move |f| (s, f))).filter(|(_, f)| f.name.eq_ignore_ascii_case(name) || (f.name.is_empty() && f.bind_port.to_string() == name)).collect();
             match hits.as_slice() {
                 [(s, f)] => (s.id, f.id, s.name.clone(), s.env_kind == Some(EnvKind::Production), format!("{} {} (port {})", action, if f.name.is_empty() { "a tunnel".to_string() } else { f.name.clone() }, f.bind_port)),
                 [] => return no(format!("There is no tunnel called {name:?}; oso_context lists them.")),
@@ -716,11 +839,11 @@ mod tests {
 
     #[test]
     fn the_label_says_who_and_where() {
-        let c = Ctx { id: 1, pane: 2, title: "acme-api".into(), agent: "claude-code".into() };
+        let c = Ctx { id: 1, pane: 2, space: None, title: "acme-api".into(), agent: "claude-code".into() };
         assert_eq!(c.label(), "Claude in acme-api, pane 2");
-        let c = Ctx { id: 1, pane: 3, title: "Local".into(), agent: "opencode".into() };
+        let c = Ctx { id: 1, pane: 3, space: None, title: "Local".into(), agent: "opencode".into() };
         assert_eq!(c.label(), "Opencode in Local, pane 3");
-        let c = Ctx { id: 1, pane: 1, title: "x".into(), agent: String::new() };
+        let c = Ctx { id: 1, pane: 1, space: None, title: "x".into(), agent: String::new() };
         assert_eq!(c.label(), "An AI agent in x, pane 1");
     }
 

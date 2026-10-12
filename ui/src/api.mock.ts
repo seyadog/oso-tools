@@ -68,6 +68,7 @@ export function mockBackend(): Backend {
   const agentAcks: number[] = [];
   const agentKinds = [{ id: "claude", name: "Claude Code", command: "claude" }, { id: "opencode", name: "OpenCode", command: "opencode" }, { id: "codex", name: "Codex", command: "codex" }];
   const worktrees: [string, string][] = [];
+  const focusSent: { selected: number | null; open: number[]; active: number | null }[] = [];
   let notifyClick: (sid: number) => void = () => {};
   const spaces: Space[] = [];
   let nextSpace = 1;
@@ -96,6 +97,7 @@ export function mockBackend(): Backend {
     agentAcks,
     agentKinds,
     worktrees,
+    focusSent,
     clickNotice: (sid: number) => notifyClick(sid),
     activity,
     deletedEnv,
@@ -338,6 +340,7 @@ export function mockBackend(): Backend {
       worktrees.push([repo, branch]);
       return `${repo}.worktrees/${branch.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
     },
+    focusUpdate: async (selected, open, active) => void focusSent.push({ selected, open, active }),
     notifyAgent: async (title, body, sid) => void notices.push([`${title}|${sid}`, body]),
     onNotifyClick: (f) => void (notifyClick = f),
     auditRecent: async () => [

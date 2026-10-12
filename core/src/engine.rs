@@ -152,6 +152,18 @@ pub struct Engine {
     pub spaces: Spaces,
     /// What each agent running in a terminal is doing.
     tracker: crate::agents::Tracker,
+    focus: Focus,
+}
+
+/// What the person is looking at, as the window tells the engine: names are looked up here, never screen contents.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct Focus {
+    /// The server selected in the Servers panel.
+    pub selected: Option<u64>,
+    /// The servers that have an ssh session open.
+    pub open: Vec<u64>,
+    /// The server of the terminal in front (not for a local terminal).
+    pub active: Option<u64>,
 }
 
 /// Where and how a session is opened, beyond which server it is.
@@ -168,7 +180,7 @@ impl Engine {
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_profile = settings.active_profile.filter(|p| store.profiles.iter().any(|x| &x.id == p)).unwrap_or_else(|| DEFAULT_PROFILE.to_string());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default() }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_profile, view_all: settings.view_all_profiles, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default(), focus: Focus::default() }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -789,6 +801,17 @@ impl Engine {
         let ids = self.spaces.get(space).map(|s| s.secrets.clone()).unwrap_or_default();
         let (_, key, _) = self.parsed_keys().into_iter().filter(|(id, _, _)| ids.contains(id)).find(|(_, k, _)| k.public_key().to_bytes().ok().as_deref() == Some(blob))?;
         agent::sign_with(&key, data, flags)
+    }
+
+    // ---------------------------------------------------------------- focus
+
+    /// The window says what the person has selected and open (so that an agent can be told "this server").
+    pub fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+    }
+
+    pub fn focus(&self) -> &Focus {
+        &self.focus
     }
 
     // ---------------------------------------------------------------- agents

@@ -45,6 +45,11 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "command": { "type": "string" }, "secrets": { "type": "array", "items": { "type": "string" }, "description": "Names of the secrets, as oso_context lists them." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["command", "secrets"], "additionalProperties": false },
         },
         {
+            "name": "oso_focus",
+            "description": "What the user is looking at in oso right now: the server they have selected, the server of the terminal in front, and the servers they have an SSH session open on (names only, never what is on a screen), limited to what you may use. Call it when the user says \"this server\", \"the one I am on\" or \"the one I selected\". Empty answers mean nothing is selected.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        },
+        {
             "name": "oso_tunnel",
             "description": "Start or stop one of the saved tunnels (a port forward through a server, listed by oso_context). Starting it asks the user; stopping does not.",
             "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "description": "The tunnel's name." }, "action": { "type": "string", "enum": ["start", "stop"] } }, "required": ["name", "action"], "additionalProperties": false },
@@ -268,7 +273,7 @@ mod tests {
         let (a, _) = talk(&[json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })]);
         let tools = a[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_tunnel"]);
+        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_focus", "oso_tunnel"]);
         assert!(tools[0]["description"].as_str().unwrap().starts_with("Call this first"));
         assert!(tools[2]["description"].as_str().unwrap().contains("asked to approve"));
         for t in tools {

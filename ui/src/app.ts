@@ -885,7 +885,22 @@ export class App {
     void newAgentDialog(this.launchCtx(), space);
   }
 
+  /** Tells the engine what the person is looking at, when it changes (ids only; an agent is answered with names). */
+  private lastFocus = "";
+  private syncFocus() {
+    const tabs = [...this.ws.tabs.values()].filter((t) => !t.dead && t.serverId !== LOCAL);
+    const selected = this.selected?.kind === "server" ? this.selected.id : null;
+    const activeTab = this.ws.screen.active != null ? this.ws.tabs.get(this.ws.screen.active) : undefined;
+    const active = activeTab && activeTab.serverId !== LOCAL && !activeTab.dead ? activeTab.serverId : null;
+    const open = [...new Set(tabs.map((t) => t.serverId))].sort((a, b) => a - b);
+    const sig = JSON.stringify([selected, open, active]);
+    if (sig === this.lastFocus) return;
+    this.lastFocus = sig;
+    void this.be.focusUpdate(selected, open, active).catch(() => {});
+  }
+
   render() {
+    this.syncFocus();
     this.rpanel?.render();
     this.layout();
     this.renderTopbar();
@@ -1338,6 +1353,7 @@ export class App {
   }
 
   renderSidebar() {
+    this.syncFocus();
     if (this.side.hidden) return;
     clear(this.profileEl);
     this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree(), () => void this.newProfile()));

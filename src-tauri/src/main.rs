@@ -562,6 +562,14 @@ fn agent_kinds_save(state: State<AppState>, kinds: Vec<oso_core::agents::AgentKi
     engine!(state).agent_kinds_save(&kinds)
 }
 
+/// What the person is looking at, for an agent that is told "this server": the selected server, the servers with an ssh
+/// session open, and the server of the terminal in front. Ids only; the engine answers with names, and only in scope.
+#[tauri::command]
+fn focus_update(state: State<AppState>, selected: Option<u64>, open: Vec<u64>, active: Option<u64>) -> Res<()> {
+    engine!(state).set_focus(oso_core::engine::Focus { selected, open, active });
+    Ok(())
+}
+
 /// `git worktree add -b <branch>` next to the repository; returns the new folder.
 #[tauri::command]
 fn worktree_add(repo: String, branch: String) -> Res<String> {
@@ -747,6 +755,7 @@ fn main() {
             agent_kinds,
             agent_kinds_save,
             worktree_add,
+            focus_update,
             integration_status,
             integration_plan,
             integration_apply,

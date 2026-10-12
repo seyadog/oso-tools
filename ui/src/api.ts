@@ -406,6 +406,8 @@ export interface Backend {
   agentKindsSave(kinds: AgentKindRow[]): Promise<void>;
   /** `git worktree add -b <branch>` next to the repository; the folder it made. */
   worktreeAdd(repo: string, branch: string): Promise<string>;
+  /** What the person is looking at (ids only), for an agent that is told "this server". */
+  focusUpdate(selected: number | null, open: number[], active: number | null): Promise<void>;
   /** A desktop notice about an agent; clicking it brings oso back and calls the `onNotifyClick` handler with `sid`. */
   notifyAgent(title: string, body: string, sid: number): Promise<void>;
   onNotifyClick(f: (sid: number) => void): void;

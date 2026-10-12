@@ -1475,6 +1475,31 @@ await settle(300);
 await page.keyboard.press("Control+n");
 await settle(400);
 
+// 17. what the person looks at is told to the engine (ids only), so that an agent can be told "this server"
+await clearAll();
+await section("servers");
+await page.click('.row[data-kind="server"] >> text=db-1');
+await settle(300);
+const lastFocus = () => page.evaluate(() => globalThis.__osoMock.focusSent.at(-1));
+check("selecting a server in the list is told", (await lastFocus()).selected === 3 && (await lastFocus()).open.length === 0 && (await lastFocus()).active === null, JSON.stringify(await lastFocus()));
+await page.dblclick('.row[data-kind="server"] >> text=staging');
+await settle(400);
+check("opening a session tells which server has one open and which is in front", JSON.stringify(await lastFocus()) === JSON.stringify({ selected: 4, open: [4], active: 4 }) || ((await lastFocus()).open.join() === "4" && (await lastFocus()).active === 4), JSON.stringify(await lastFocus()));
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(400);
+check("with two open, both are told and the one in front", (await lastFocus()).open.join() === "2,4" && (await lastFocus()).active === 2, JSON.stringify(await lastFocus()));
+await page.keyboard.press("Control+n");
+await settle(300);
+await page.evaluate(async () => { await window.oso.openServer(0); });
+await settle(400);
+check("a local terminal is not an ssh session: nobody is in front", (await lastFocus()).active === null && (await lastFocus()).open.join() === "2,4", JSON.stringify(await lastFocus()));
+await clearAll();
+check("with nothing open, nothing is told as open", (await lastFocus()).open.length === 0 && (await lastFocus()).active === null);
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
 // 14. the main key: one setting changes every shortcut at once
 await page.keyboard.press("Control+,");
 await settle(250);
