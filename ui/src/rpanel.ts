@@ -3,10 +3,10 @@
 // is waiting, the same answer the window gives. Nothing secret reaches it: the log is blanked of the vault's values
 // before it is written.
 
-import { Activity, ApprovalDecision, ApprovalRequest, Backend, TreeData } from "./api";
+import { Activity, ApprovalDecision, ApprovalRequest, Backend } from "./api";
 import { ApprovalQueue, actionTitle } from "./agents_ui";
 import { clear, el } from "./dom";
-import { icon, serverColor } from "./icons";
+import { icon } from "./icons";
 
 export const PANEL_MIN = 240;
 export const PANEL_MAX = 560;
@@ -50,12 +50,6 @@ export function openFor(openedMs: number | undefined, nowMs: number): string {
   return `${Math.floor(m / 1440)} d`;
 }
 
-/** "open 12 min", or "just opened". */
-export function sessionAge(openedMs: number | undefined, nowMs: number): string {
-  const t = openFor(openedMs, nowMs);
-  return !t || t === "just opened" ? t : `open ${t}`;
-}
-
 export type Tone = "you" | "auto" | "no" | "blocked";
 
 /** Who decided: you, the server's policy, or the policy refusing. */
@@ -97,8 +91,8 @@ export function resultLabel(a: Activity): string {
 }
 
 /** Where a request came from: "Claude · pane 2 (web-1)". */
-export function whoLabel(a: Activity, paneTitle?: string): string {
-  return `${agentName(a.agent)} · pane ${a.pane}${paneTitle ? ` (${paneTitle})` : ""}`;
+export function whoLabel(a: Activity, tab?: string): string {
+  return `${agentName(a.agent)} · ${tab ?? "terminal closed"}`;
 }
 
 /** What the action is, for the line under the name. Commands show as themselves. */
@@ -128,32 +122,57 @@ export function markFor(pending: number, latest: number, seen: number): Mark {
   return latest > seen ? "new" : "none";
 }
 
-// ------------------------------------------------------------------ sessions
+// ------------------------------------------------------------------ agents
 
-export interface SessionRow {
+export type AgentState = "needs_you" | "working" | "finished" | "idle";
+
+/** One line of the Agents tab. */
+export interface AgentRow {
+  /** The terminal it runs in (its session id). */
   sid: number;
+  /** "Claude", "Opencode"… */
   name: string;
-  serverId: number;
-  local: boolean;
-  prod: boolean;
-  dead: boolean;
-  profile: string;
-  /** When the window opened it (ms). */
-  opened?: number;
+  /** The tab as the person sees it: "tab 1 · Local · seya". */
+  where: string;
+  folder: string;
+  branch: string;
+  state: AgentState;
+  /** When it got into this state (ms). */
+  since: number;
+  /** The Space it belongs to ("" when none). */
+  space: string;
+  /** How the state was learned: it is "guessed" when only the screen said so. */
+  source: string;
 }
 
-/** The profile a server answers to: its own, else the one of the nearest folder up the tree, else "every profile". */
-export function profileOf(tree: Pick<TreeData, "servers" | "folders" | "profiles">, serverId: number): string {
-  const name = (id: string | null) => (id ? (tree.profiles.find((p) => p.id === id)?.name ?? id) : null);
-  const s = tree.servers.find((x) => x.id === serverId);
-  if (!s) return "";
-  if (s.profile) return name(s.profile) ?? "";
-  let f = s.parent != null ? tree.folders.find((x) => x.id === s.parent) : undefined;
-  for (let hops = 0; f && hops < 50; hops++) {
-    if (f.profile) return name(f.profile) ?? "";
-    f = f.parent != null ? tree.folders.find((x) => x.id === f!.parent) : undefined;
-  }
-  return "every profile";
+export const STATE_WORD: Record<AgentState, string> = { needs_you: "needs you", working: "working", finished: "finished", idle: "idle" };
+const STATE_ORDER: AgentState[] = ["needs_you", "working", "finished", "idle"];
+
+/** Needs you first, then working, finished, idle; inside a state the one that has waited longest first. */
+export function sortAgents(rows: AgentRow[]): AgentRow[] {
+  return [...rows].sort((a, b) => STATE_ORDER.indexOf(a.state) - STATE_ORDER.indexOf(b.state) || a.since - b.since || a.sid - b.sid);
+}
+
+/**
+ * What the Agents tab shows when nothing watches the processes: the panes that asked something of oso, one row each,
+ * "needs you" while a request of theirs is waiting. (The real detection replaces this; see agents.ts.)
+ */
+export function agentsFromActivity(list: Activity[], pending: ApprovalRequest[], where: (pane: number) => string): AgentRow[] {
+  const byPane = new Map<number, Activity>();
+  for (const a of list) if (a.action !== "context" && a.action !== "hosts") byPane.set(a.pane, a);
+  for (const r of pending) if (!byPane.has(r.pane)) byPane.set(r.pane, { agent: r.agent, pane: r.pane, ts: 0, updated: 0 } as Activity);
+  const waiting = new Set(pending.map((r) => r.pane));
+  return [...byPane.values()].map((a) => ({
+    sid: a.pane,
+    name: agentName(a.agent),
+    where: where(a.pane),
+    folder: "",
+    branch: "",
+    state: waiting.has(a.pane) ? "needs_you" : a.state === "running" ? "working" : "idle",
+    since: (a.updated || a.ts) * 1000,
+    space: "",
+    source: "approval",
+  }));
 }
 
 // ------------------------------------------------------------------ the panel
@@ -161,11 +180,14 @@ export function profileOf(tree: Pick<TreeData, "servers" | "folders" | "profiles
 export interface PanelCtx {
   be: Backend;
   queue: ApprovalQueue;
-  rows(): SessionRow[];
+  /** The agents to list, given what the log says (the app adds what it knows from the processes). */
+  agents(activity: Activity[], pending: ApprovalRequest[]): AgentRow[];
+  /** Goes to the tab of this terminal. */
   focus(sid: number): void;
-  close(sid: number): void;
-  /** The title of the terminal an agent runs in, if it is still open. */
-  paneTitle(pane: number): string | undefined;
+  /** The tab as the person sees it ("tab 1 · Local · seya"), or `undefined` when that terminal is closed. */
+  tabLabel(pane: number): string | undefined;
+  /** In focus mode no panel is shown and nothing opens one by itself. */
+  focusMode(): boolean;
   isProdHost(name: string): boolean;
   /** The key written for an action, for the arrow's tooltip. */
   keyText(action: string): string;
@@ -190,11 +212,13 @@ const store = {
 
 export class RightPanel {
   /** The panel itself, and the arrow on its edge (both go inside `#app`). */
-  readonly el = el("aside", { id: "rpanel", "aria-label": "Sessions and AI activity", hidden: true });
+  readonly el = el("aside", { id: "rpanel", "aria-label": "Agents and AI activity", hidden: true });
   readonly arrow = el("button", { id: "rtoggle", type: "button", "data-act": "rpanel-toggle" });
   private grip = el("div", { id: "rgrip", title: "Drag to change the width" });
   private body = el("div", { class: "rp-inner" });
   open = store.get("oso.rpanel") === "open";
+  /** Which of its two tabs is on show. */
+  tab: "agents" | "activity" = store.get("oso.rpanel.tab") === "activity" ? "activity" : "agents";
   width = clampWidth(Number(store.get("oso.rpanel.w") ?? PANEL_DEFAULT), window.innerWidth);
   private activity: Activity[] = [];
   private loaded = false;
@@ -203,6 +227,7 @@ export class RightPanel {
   private expanded = new Set<string>();
   private sig = "";
   private scroll = { s: 0, a: 0 };
+  private agentRows: AgentRow[] = [];
   private openListeners: ((open: boolean) => void)[] = [];
 
   constructor(private ctx: PanelCtx) {
@@ -212,6 +237,14 @@ export class RightPanel {
     ctx.queue.onChange(() => {
       this.render();
       void this.refresh();
+    });
+    // a request that comes in opens the panel on Activity, where it can be answered (not in focus mode: that hides it)
+    ctx.queue.onPush(() => {
+      if (ctx.focusMode()) return;
+      this.tab = "activity";
+      store.set("oso.rpanel.tab", "activity");
+      this.setOpen(true);
+      this.render(true);
     });
     window.addEventListener("resize", () => this.apply());
   }
@@ -316,47 +349,55 @@ export class RightPanel {
 
   // -------------------------------------------------------------- drawing
 
+  /** Shows one of the two tabs. */
+  showTab(tab: "agents" | "activity") {
+    this.tab = tab;
+    store.set("oso.rpanel.tab", tab);
+    this.render(true);
+  }
+
   /** Draws it again when something it shows changed (so a selection or a scroll is not lost every second). */
   render(force = false) {
     this.updateMark();
     if (!this.open) return;
     const now = Date.now();
-    const rows = this.ctx.rows();
-    const pending = this.ctx.queue.list();
     const nowS = Math.floor(now / 1000);
-    const sig = JSON.stringify([rows.map((r) => [r.sid, r.name, r.prod, r.dead, r.profile, openFor(r.opened, now)]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS), this.expanded.has(keyOf(a))]), [...this.expanded]]);
+    const pending = this.ctx.queue.list();
+    this.agentRows = sortAgents(this.ctx.agents(this.activity, pending));
+    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
     if (!force && sig === this.sig) return;
     this.sig = sig;
-    const s = this.body.querySelector(".rp-sessions .rp-scroll") as HTMLElement | null;
-    const a = this.body.querySelector(".rp-activity .rp-scroll") as HTMLElement | null;
-    if (s) this.scroll.s = s.scrollTop;
-    if (a) this.scroll.a = a.scrollTop;
+    const cur = this.body.querySelector(".rp-scroll") as HTMLElement | null;
+    if (cur) this.scroll[this.tab === "agents" ? "s" : "a"] = cur.scrollTop;
     clear(this.body);
-    this.body.append(this.sessionsSection(rows, now), this.activitySection(pending, nowS));
-    const s2 = this.body.querySelector(".rp-sessions .rp-scroll") as HTMLElement | null;
-    const a2 = this.body.querySelector(".rp-activity .rp-scroll") as HTMLElement | null;
-    if (s2) s2.scrollTop = this.scroll.s;
-    if (a2) a2.scrollTop = this.scroll.a;
+    const needs = this.agentRows.filter((r) => r.state === "needs_you").length;
+    const tabBtn = (id: "agents" | "activity", label: string, badge: number) => {
+      const b = el("button", { class: `rp-tab${this.tab === id ? " on" : ""}`, type: "button", role: "tab", "data-rtab": id, "aria-selected": String(this.tab === id) }, label);
+      if (badge) b.append(el("span", { class: "pending-n" }, String(badge)));
+      b.onclick = () => this.showTab(id);
+      return b;
+    };
+    this.body.append(el("div", { class: "rp-tabs", role: "tablist" }, tabBtn("agents", "Agents", needs), tabBtn("activity", "Activity", pending.length)));
+    this.body.append(this.tab === "agents" ? this.agentsSection(now) : this.activitySection(pending, nowS));
+    const next = this.body.querySelector(".rp-scroll") as HTMLElement | null;
+    if (next) next.scrollTop = this.scroll[this.tab === "agents" ? "s" : "a"];
   }
 
-  private sessionsSection(rows: SessionRow[], now: number): HTMLElement {
+  private agentsSection(now: number): HTMLElement {
     const list = el("div", { class: "rp-scroll" });
-    if (!rows.length) list.append(el("div", { class: "rp-empty" }, "No open sessions. Double-click a server on the left to open one."));
-    for (const r of rows) {
-      const x = el("button", { class: "x", type: "button", title: "Close this session", "data-act": "session-close", "aria-label": `Close ${r.name}` });
-      x.append(icon("close", 13));
-      x.onclick = (e) => {
-        e.stopPropagation();
-        this.ctx.close(r.sid);
-      };
-      const where = r.local ? "this computer" : r.profile;
-      const sub = [where, r.dead ? "ended" : sessionAge(r.opened, now)].filter(Boolean).join(" · ");
+    if (!this.agentRows.length) list.append(el("div", { class: "rp-empty" }, "No agent is running. Start one from a Space (New agent), or run claude, opencode or codex in a terminal of oso: it shows up here with what it is doing."));
+    let space: string | null = null;
+    for (const r of this.agentRows) {
+      if (r.space !== space) {
+        space = r.space;
+        list.append(el("h4", { class: "rp-space" }, r.space || "No Space"));
+      }
+      const meta = [r.folder, r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
       const row = el(
         "div",
-        { class: `rp-session${r.prod ? " prod" : ""}${r.dead ? " dead" : ""}`, "data-session": String(r.sid), role: "button", tabindex: "0", title: "Go to this terminal" },
-        el("span", { class: "dot", style: `background:${serverColor(r.serverId)}` }),
-        el("div", { class: "txt" }, el("b", {}, r.name, r.prod ? el("span", { class: "badge-prod" }, "PRODUCTION") : null), el("small", {}, sub)),
-        x,
+        { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : ""}` },
+        el("span", { class: "sdot" }),
+        el("div", { class: "txt" }, el("b", {}, r.name, el("span", { class: "st" }, STATE_WORD[r.state])), el("small", {}, r.where), meta ? el("small", {}, meta) : null),
       );
       row.onclick = () => this.ctx.focus(r.sid);
       row.onkeydown = (e) => {
@@ -367,7 +408,7 @@ export class RightPanel {
       };
       list.append(row);
     }
-    return el("section", { class: "rp-sec rp-sessions", "data-section": "sessions" }, el("h3", {}, "Sessions", el("span", { class: "n" }, rows.length ? String(rows.length) : "")), list);
+    return el("section", { class: "rp-sec rp-agents", "data-section": "agents" }, list);
   }
 
   private activitySection(pending: ApprovalRequest[], nowS: number): HTMLElement {
@@ -376,8 +417,7 @@ export class RightPanel {
     const shown = this.activity.filter((a) => a.action !== "context" && a.action !== "hosts");
     for (const a of [...shown].reverse()) list.append(this.activityCard(a, nowS));
     if (!pending.length && !shown.length) list.append(el("div", { class: "rp-empty" }, "Nothing yet. When an AI agent in one of your terminals asks oso to do something, it shows up here: what, where, and how it was decided."));
-    const badge = pending.length ? el("span", { class: "pending-n", title: "Waiting for your answer" }, String(pending.length)) : el("span", { class: "n" }, shown.length ? String(shown.length) : "");
-    return el("section", { class: "rp-sec rp-activity", "data-section": "activity" }, el("h3", {}, "Agent activity", badge), list);
+    return el("section", { class: "rp-sec rp-activity", "data-section": "activity" }, list);
   }
 
   private pendingCard(r: ApprovalRequest): HTMLElement {
@@ -409,7 +449,7 @@ export class RightPanel {
     const head = el(
       "div",
       { class: "rp-who" },
-      el("b", {}, whoLabel(a, this.ctx.paneTitle(a.pane))),
+      el("b", { title: `pane ${a.pane}` }, whoLabel(a, this.ctx.tabLabel(a.pane))),
       el("span", { class: "when", title: new Date(a.ts * 1000).toLocaleString() }, ago(a.ts, nowS)),
     );
     const where = el("div", { class: `rp-where${prod ? " prod" : ""}` }, a.host || "", actionWord(a) ? el("span", { class: "kind" }, actionWord(a)) : null, prod ? el("span", { class: "badge-prod" }, "PRODUCTION") : null);

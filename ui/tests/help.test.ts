@@ -13,7 +13,7 @@ describe("the sheet of shortcuts", () => {
     for (const action of Object.keys(DEFAULTS)) {
       // the families (tab 1…9, the arrows) are one row: their first and last key stand for all
       const key = text(null)(action);
-      const family = ["tab.2", "tab.3", "tab.4", "tab.5", "tab.6", "tab.7", "tab.8", "focus.right", "focus.up", "focus.down", "move.right", "move.up", "move.down"].includes(action);
+      const family = ["tab.2", "tab.3", "tab.4", "tab.5", "tab.6", "tab.7", "tab.8", "focus.right", "focus.up", "focus.down", "move.right", "move.up", "move.down", "panel.servers", "panel.secrets", "panel.tunnels", "panel.accounts"].includes(action);
       if (!family) expect(shown, action).toContain(key);
     }
     expect(Object.keys(LABELS).length).toBeGreaterThan(30);

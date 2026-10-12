@@ -218,7 +218,7 @@ export function makeSelect(options: [string, string][], value: string, attrs: Re
 }
 
 /** A small menu at the pointer (right click): `items` run when picked; anything else closes it. */
-export function contextMenu(x: number, y: number, items: { label: string; run: () => void; danger?: boolean }[]) {
+export function contextMenu(x: number, y: number, items: { label: string; run: () => void; danger?: boolean; hint?: string; checked?: boolean }[]) {
   document.querySelector(".ctx-menu")?.remove();
   const menu = el("div", { class: "ctx-menu", role: "menu" });
   const close = () => {
@@ -233,7 +233,8 @@ export function contextMenu(x: number, y: number, items: { label: string; run: (
     if (e.key === "Escape") close();
   };
   for (const it of items) {
-    const b = el("button", { class: `ctx-item${it.danger ? " danger" : ""}`, type: "button", role: "menuitem" }, it.label);
+    const b = el("button", { class: `ctx-item${it.danger ? " danger" : ""}${it.checked ? " checked" : ""}`, type: "button", role: it.checked === undefined ? "menuitem" : "menuitemcheckbox", ...(it.checked === undefined ? {} : { "aria-checked": String(it.checked) }) }, el("span", { class: "lbl" }, it.label));
+    if (it.hint) b.append(el("kbd", {}, it.hint));
     b.onclick = () => {
       close();
       it.run();

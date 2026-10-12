@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Backend, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, Activity, ApprovalRequest, Backend, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { SavedGroup, looksReady, nextGroupId, parseGroups, summary, withoutPanes } from "./groups";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
@@ -16,7 +16,8 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
-import { RightPanel, SessionRow, profileOf } from "./rpanel";
+import { AgentRow, RightPanel, agentsFromActivity } from "./rpanel";
+import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
@@ -81,7 +82,14 @@ export class App {
   snippets: { name: string; command: string }[] = [];
 
   // elements
+  private rail = el("nav", { id: "rail", "aria-label": "Sections" });
   private side = el("div", { id: "side" });
+  private searchWrap = el("div", { class: "search" });
+  /** Which section the left panel shows (`""`: the panel is closed). */
+  private leftSection: Section = readSection();
+  private leftWidth = clampLeft(Number(store("oso.ui.left.w") ?? LEFT_DEFAULT));
+  /** Focus mode: no rail and no panels, only the tabs and the terminals. */
+  private focusMode = false;
   private main = el("div", { id: "main" });
   private topbar = el("div", { id: "topbar" });
   private stage = el("div", { id: "stage" });
@@ -89,7 +97,6 @@ export class App {
   private tabsEl = el("div", { class: "tabs" });
   private toolsEl = el("div", { class: "tools" });
   private treeEl = el("div", { class: "tree", tabindex: "0" });
-  private footEl = el("div", { class: "side-foot" });
   private profileEl = el("div", { class: "profile-slot" });
   private search = el("input", { type: "search", placeholder: "Search servers", autocomplete: "off", spellcheck: "false" });
   private dividers: HTMLElement[] = [];
@@ -102,7 +109,7 @@ export class App {
   // ------------------------------------------------------------ start
 
   async start() {
-    this.root.append(this.side, this.main);
+    this.root.append(this.rail, this.side, this.main);
     this.topbar.append(this.tabsEl, this.toolsEl);
     this.main.append(this.topbar, this.stage);
     this.stage.append(this.hint);
@@ -128,16 +135,17 @@ export class App {
     this.rpanel = new RightPanel({
       be: this.be,
       queue: this.approvals,
-      rows: () => this.sessionRows(),
+      agents: (activity, pending) => this.agentRows(activity, pending),
       focus: (sid) => this.focusSession(sid),
-      close: (sid) => void this.closeSession(sid),
-      paneTitle: (pane) => this.ws.tabs.get(pane)?.title,
+      tabLabel: (pane) => this.tabLabel(pane),
+      focusMode: () => this.focusMode,
       isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
       keyText: (a) => this.keyText(a),
     });
     this.rpanel.attach(this.root);
-    // with the panel open the requests are answered there; closed, they come in a window over everything
-    this.rpanel.onOpenChange((open) => this.approvals.setInline(open));
+    // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
+    this.rpanel.onOpenChange(() => this.syncInline());
+    this.applyChrome();
     this.rpanel.refresh().catch(() => {});
     window.setInterval(() => void this.rpanel.refresh(), 2000);
     // `oso ssh <host>`, `oso host add`, `oso unlock` on the command line: the window follows
@@ -334,7 +342,7 @@ export class App {
       const v = await this.be.vaultStatus();
       if (v.exists !== this.vault.exists || v.unlocked !== this.vault.unlocked) {
         this.vault = v;
-        this.renderFoot();
+        this.renderRail();
         void this.refreshSecrets();
       }
     } catch {
@@ -541,7 +549,7 @@ export class App {
       const up = all.filter((t) => t.state !== "failed").length;
       if (up !== this.tunnelsUp) {
         this.tunnelsUp = up;
-        this.renderFoot();
+        this.renderRail();
       }
       const next = new Map(all.map((t) => [`${t.server_id}:${t.forward_id}`, t]));
       const changed = JSON.stringify([...next]) !== JSON.stringify([...this.tunnelStatus]);
@@ -790,17 +798,17 @@ export class App {
 
   // ------------------------------------------------------------ rendering
 
-  /** What the right panel lists: every open terminal, in the order of the tabs. */
-  private sessionRows(): SessionRow[] {
-    const order: Id[] = [];
-    for (const g of this.ws.screen.groups) order.push(...leaves(g.tree));
-    for (const id of this.ws.tabs.keys()) if (!order.includes(id)) order.push(id);
-    return order.flatMap((sid) => {
-      const t = this.ws.tabs.get(sid);
-      if (!t) return [];
-      const local = t.serverId === LOCAL;
-      return [{ sid, name: t.title, serverId: t.serverId, local, prod: this.isProd(t.serverId), dead: t.dead, profile: local ? "" : profileOf(this.tree, t.serverId), opened: this.opened.get(sid) }];
-    });
+  /** The tab of a terminal as the person sees it: "tab 1 · Local · seya". `undefined` when it is closed. */
+  private tabLabel(sid: number): string | undefined {
+    const t = this.ws.tabs.get(sid);
+    if (!t) return undefined;
+    const at = this.ws.screen.groups.findIndex((g) => leaves(g.tree).includes(sid));
+    return `${at >= 0 ? `tab ${at + 1} · ` : ""}${t.title}`;
+  }
+
+  /** The rows of the Agents tab. */
+  private agentRows(activity: Activity[], pending: ApprovalRequest[]): AgentRow[] {
+    return agentsFromActivity(activity, pending, (pane) => this.tabLabel(pane) ?? "terminal closed");
   }
 
   render() {
@@ -808,7 +816,7 @@ export class App {
     this.layout();
     this.renderTopbar();
     this.renderSidebar();
-    this.renderFoot();
+    this.renderRail();
     requestAnimationFrame(() => this.focusActive());
   }
 
@@ -1017,23 +1025,35 @@ export class App {
       this.tabsEl.append(tab);
     });
 
-    // tools
+    // tools: one menu, and what must never be hidden (a broadcast that is on)
     clear(this.toolsEl);
     const bc = ws.broadcasting;
     const chip = this.cloudChip();
     if (chip) this.toolsEl.append(chip, el("span", { class: "sep" }));
-    this.toolsEl.append(
-      this.ibtn("split-right", `New terminal to the right  (${this.keyText("split.right")})`, () => this.run("split.right")),
-      this.ibtn("split-down", `New terminal below  (${this.keyText("split.down")})`, () => this.run("split.down")),
-      this.ibtn("broadcast", `${bc ? "Stop typing in every terminal" : "Type in every terminal of this tab"}  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), bc, "red"),
-      this.ibtn("bell", `Tell me when this terminal is done  (${this.keyText("watch.toggle")})`, () => this.toggleWatch(), ws.screen.active != null && this.watches.has(ws.screen.active)),
-      this.ibtn("files", `Copy files to or from this server  (${this.keyText("files.open")})`, () => this.openFiles()),
-      this.ibtn("save", `Save this tab as a group  (${this.keyText("group.save")})`, () => void this.saveAsGroup()),
-      this.ibtn("snippet", "Snippets: saved commands you run often", () => this.snippetsDialog()),
-      el("span", { class: "sep" }),
-      this.ibtn("plus", `Open a server  (${this.keyText("search")})`, () => void this.hostPicker()),
-      el("span", { class: "version", title: "The version of oso you are running" }, versionLabel()),
-    );
+    if (bc) this.toolsEl.append(this.ibtn("broadcast", `Typing goes to every terminal of this tab: click to stop  (${this.keyText("broadcast.toggle")})`, () => this.toggleBroadcast(), true, "red"));
+    const menu = this.ibtn("more", `Menu: new terminals, broadcast, files, snippets…`, () => {}, false);
+    menu.dataset.act = "menu";
+    menu.onclick = () => this.openMenu(menu);
+    this.toolsEl.append(el("span", { class: "version", title: "The version of oso you are running" }, versionLabel()), menu);
+  }
+
+  /** The one menu of the top bar: everything that used to be a row of icons. */
+  private openMenu(anchor: HTMLElement) {
+    const ws = this.ws;
+    const hint = (a: string) => this.keyText(a);
+    const r = anchor.getBoundingClientRect();
+    contextMenu(r.right, r.bottom + 4, [
+      { label: "New terminal to the right", hint: hint("split.right"), run: () => this.run("split.right") },
+      { label: "New terminal below", hint: hint("split.down"), run: () => this.run("split.down") },
+      { label: "Type in every terminal of this tab", hint: hint("broadcast.toggle"), checked: ws.broadcasting, run: () => this.toggleBroadcast() },
+      { label: "Tell me when this terminal is done", hint: hint("watch.toggle"), checked: ws.screen.active != null && this.watches.has(ws.screen.active), run: () => this.toggleWatch() },
+      { label: "Copy files to or from this server…", hint: hint("files.open"), run: () => this.openFiles() },
+      { label: "Save this tab as a group…", hint: hint("group.save"), run: () => void this.saveAsGroup() },
+      { label: "Snippets…", run: () => this.snippetsDialog() },
+      { label: "Open a server…", hint: hint("search"), run: () => void this.hostPicker() },
+      { label: this.focusMode ? "Leave focus mode" : "Focus mode: only the terminals", hint: hint("focus.toggle"), run: () => this.setFocusMode(!this.focusMode) },
+      { label: this.rpanel.open ? "Close the right panel" : "Open the right panel", hint: hint("rpanel.toggle"), run: () => this.run("rpanel.toggle") },
+    ]);
   }
 
   /** The cloud account the active profile points the local terminals at, in red when it is a production one. */
@@ -1047,7 +1067,7 @@ export class App {
   // ------------------------------------------------------------ sidebar
 
   private buildSidebar() {
-    const searchWrap = el("div", { class: "search" });
+    const searchWrap = this.searchWrap;
     searchWrap.append(icon("search", 15), this.search);
     this.search.onfocus = () => (this.focusArea = "sidebar");
     this.search.oninput = () => {
@@ -1071,27 +1091,95 @@ export class App {
     };
     this.treeEl.addEventListener("pointerdown", () => (this.focusArea = "sidebar"));
     this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
-    this.side.append(this.profileEl, searchWrap, this.treeEl, this.footEl);
+    const grip = el("div", { id: "lgrip", title: "Drag to change the width" });
+    grip.addEventListener("pointerdown", (e) => this.startLeftResize(e, grip));
+    this.side.append(this.profileEl, searchWrap, this.treeEl, grip);
+    this.renderRail();
   }
 
-  private renderFoot() {
-    clear(this.footEl);
-    const v = el("button", { class: `vault${this.vault.unlocked ? " open" : ""}`, type: "button", title: `Secrets vault  (${this.keyText("secrets.open")})`, "data-act": "vault" });
-    v.append(icon(this.vault.unlocked ? "unlock" : "lock", 16), this.vault.unlocked ? "Vault · unlocked" : this.vault.exists ? "Vault · locked" : "Create the vault");
-    v.onclick = () => void this.vaultDialog();
-    const row = (iconName: string, label: string, action: string | null, run: () => void, act: string) => {
-      const b = el("button", { class: "foot-btn", type: "button", title: action ? `${label}  (${this.keyText(action)})` : label, "data-act": act });
-      b.append(icon(iconName, 15), el("span", { class: "lbl" }, label));
-      if (action) b.append(el("kbd", {}, this.keyText(action) || ""));
+  // ------------------------------------------------------------ the frame: rail, panels, focus mode
+
+  /** Puts the rail and the left panel where they belong (or takes them away in focus mode). */
+  private applyChrome() {
+    const open = this.leftSection !== "" && !this.focusMode;
+    this.root.classList.toggle("focus", this.focusMode);
+    this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
+    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth, this.rpanel?.open && !this.focusMode ? this.rpanel.width : 0);
+    this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
+    this.side.hidden = !open;
+    this.rail.hidden = this.focusMode;
+  }
+
+  /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
+  toggleSection(key: Exclude<Section, "">) {
+    if (this.focusMode) this.setFocusMode(false);
+    this.leftSection = clickSection(this.leftSection, key);
+    storeSet("oso.ui.left", this.leftSection);
+    this.applyChrome();
+    this.renderRail();
+    this.renderSidebar();
+  }
+
+  setFocusMode(on: boolean) {
+    if (this.focusMode === on) return;
+    this.focusMode = on;
+    this.applyChrome();
+    this.renderRail();
+    this.syncInline();
+    this.render();
+  }
+
+  /** The approval window is only needed when the right panel is not there to answer in. */
+  private syncInline() {
+    this.approvals?.setInline(!!this.rpanel?.open && !this.focusMode);
+  }
+
+  private startLeftResize(e: PointerEvent, grip: HTMLElement) {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing-lpanel");
+    const move = (m: PointerEvent) => {
+      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.rpanel.open ? this.rpanel.width : 0);
+      this.applyChrome();
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      document.body.classList.remove("resizing-lpanel");
+      storeSet("oso.ui.left.w", String(this.leftWidth));
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  }
+
+  /** The thin bar of icons: the five sections on top, the small tools below. */
+  private renderRail() {
+    clear(this.rail);
+    const top = el("div", { class: "rail-top" });
+    for (const sec of SECTIONS) {
+      const on = this.leftSection === sec.key;
+      const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
+      b.append(icon(sec.icon, 21));
+      b.onclick = () => this.toggleSection(sec.key);
+      top.append(b);
+    }
+    const bottom = el("div", { class: "rail-bottom" });
+    const tool = (iconName: string, title: string, act: string, run: () => void, cls = "") => {
+      const b = el("button", { class: `rail-btn small ${cls}`.trim(), type: "button", title, "aria-label": title, "data-act": act });
+      b.append(icon(iconName, 19));
       b.onclick = run;
       return b;
     };
-    this.footEl.append(
-      v,
-      row("terminal", "Local terminal", "local.new", () => void this.openServer(LOCAL), "foot-local"),
-      row("settings", "Settings", "settings", () => this.settingsDialog(), "foot-settings"),
-      row("bell", "Help", "help.open", () => this.helpDialog(), "foot-help"),
+    const vaultTip = this.vault.unlocked ? "Vault unlocked" : this.vault.exists ? "Vault locked" : "Create the vault";
+    bottom.append(
+      tool(this.vault.unlocked ? "unlock" : "lock", `${vaultTip}  (${this.keyText("secrets.open")})`, "vault", () => void this.vaultDialog(), this.vault.unlocked ? "open" : ""),
+      tool("terminal", `Local terminal  (${this.keyText("local.new")})`, "foot-local", () => void this.openServer(LOCAL)),
+      tool("settings", `Settings  (${this.keyText("settings")})`, "foot-settings", () => this.settingsDialog()),
+      tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog()),
     );
+    this.rail.append(top, bottom);
   }
 
   private visibleServers(): Server[] {
@@ -1172,27 +1260,32 @@ export class App {
   }
 
   renderSidebar() {
+    if (this.side.hidden) return;
     clear(this.profileEl);
     this.profileEl.append(profileBar(this.be, () => ({ profiles: this.tree.profiles, proxies: this.tree.proxies, active: this.tree.active_profile, all: this.tree.view_all }), () => this.refreshTree(), () => void this.newProfile()));
     clear(this.treeEl);
-    // Servers, always first and always named
-    const n = this.tree.servers.length;
-    const servers = this.secHead("servers", "Servers", n ? String(n) : "", [["+ Add", `Add a server`, () => void this.serverForm(null)], ["+ Folder", "New folder", () => void this.newFolder()]]);
-    this.treeEl.append(servers.head);
-    if (servers.open) this.renderServerRows();
-    if (this.filter) {
-      const q = this.filter;
-      for (const g of this.groups.filter((g) => g.name.toLowerCase().includes(q))) {
-        const row = el("div", { class: "row group" }, el("span", { class: "txt" }, el("b", {}, g.name), el("small", {}, `group · ${g.panes.length} terminals`)));
-        row.ondblclick = () => void this.openGroup(g);
-        this.treeEl.append(row);
+    this.searchWrap.hidden = this.leftSection !== "servers";
+    switch (this.leftSection) {
+      case "servers": {
+        const n = this.tree.servers.length;
+        const servers = this.secHead("servers", "Servers", n ? String(n) : "", [["+ Add", `Add a server`, () => void this.serverForm(null)], ["+ Folder", "New folder", () => void this.newFolder()]]);
+        this.treeEl.append(servers.head);
+        this.renderServerRows();
+        break;
       }
-      return;
+      case "spaces":
+        this.renderGroups();
+        break;
+      case "secrets":
+        this.renderSecrets();
+        break;
+      case "tunnels":
+        this.renderTunnels();
+        break;
+      case "accounts":
+        this.renderAccounts();
+        break;
     }
-    this.renderGroups();
-    this.renderSecrets();
-    this.renderTunnels();
-    this.renderAccounts();
   }
 
   /** The folders and servers, or what to do when there are none. */
@@ -1473,11 +1566,8 @@ export class App {
 
   /** The title line of a section of the left panel: its name, how many, and its own buttons (with words, not just icons). */
   private secHead(key: string, title: string, count: string, actions: [string, string, () => void][]): { head: HTMLElement; open: boolean } {
-    const open = localStorage.getItem(`oso.sec.${key}`) !== "closed";
-    const head = el("div", { class: "sec", "data-sec": key, title: `${title}: click to ${open ? "fold" : "unfold"}` });
-    const chev = el("span", { class: "chev" });
-    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
-    head.append(chev, title, el("span", { class: "n" }, count));
+    const head = el("div", { class: "sec", "data-sec": key });
+    head.append(title, el("span", { class: "n" }, count));
     for (const [label, tip, run] of actions) {
       const b = el("button", { class: "sec-btn", type: "button", title: tip, "aria-label": tip, "data-act": `sec-${key}-${label.replace(/[^a-z]/gi, "").toLowerCase()}` }, label);
       b.onclick = (e) => {
@@ -1486,11 +1576,7 @@ export class App {
       };
       head.append(b);
     }
-    head.onclick = () => {
-      localStorage.setItem(`oso.sec.${key}`, open ? "closed" : "open");
-      this.renderSidebar();
-    };
-    return { head, open };
+    return { head, open: true };
   }
 
   /** What a section says when it has nothing: one line about what it is for, and a button that does the first thing. */
@@ -1555,18 +1641,9 @@ export class App {
   }
 
   private renderGroups() {
-    const open = localStorage.getItem("oso.groups") !== "closed";
-    const head = el("div", { class: "sec", title: "Tabs you saved: open all their terminals again with a double click" });
-    const chev = el("span", { class: "chev" });
-    chev.append(icon(open ? "chevron-down" : "chevron-right", 13));
-    head.append(chev, "Groups", el("span", { class: "n" }, this.groups.length ? String(this.groups.length) : ""));
-    head.onclick = () => {
-      localStorage.setItem("oso.groups", open ? "closed" : "open");
-      this.renderSidebar();
-    };
+    const { head } = this.secHead("spaces", "Spaces", this.groups.length ? String(this.groups.length) : "", [["+ Save tab", "Keep the tab on show as a saved arrangement", () => void this.saveAsGroup()]]);
     this.treeEl.append(head);
-    if (!open) return;
-    if (!this.groups.length) this.treeEl.append(el("div", { class: "hint-row" }, `Arrange some terminals in a tab, then click the save icon on the top bar (or right-click the tab) to keep them as a group.`));
+    if (!this.groups.length) this.treeEl.append(el("div", { class: "hint-row" }, `Arrange some terminals in a tab, then save it here (the menu at the top right, or right-click the tab) to open all of them again with a double click.`));
     for (const g of this.groups) {
       const row = el("div", { class: "row group", "data-group": String(g.id), title: g.panes.map((p) => p.name || "Local").join(", ") });
       const gi = el("span", { class: "gi" });
@@ -1724,7 +1801,7 @@ export class App {
           return form;
         },
         () => {
-          this.renderFoot();
+          this.renderRail();
           resolve(result);
         },
       );
@@ -1740,7 +1817,7 @@ export class App {
   async lockVault() {
     await this.be.vaultLock();
     this.vault = await this.be.vaultStatus();
-    this.renderFoot();
+    this.renderRail();
     toast("Vault locked");
   }
 
@@ -2055,9 +2132,26 @@ export class App {
       case "sudo.fill":
         return void this.fillSudo();
       case "rpanel.toggle":
+        if (this.focusMode) this.setFocusMode(false);
         return this.rpanel.toggle();
+      case "focus.toggle":
+        return this.setFocusMode(!this.focusMode);
+      case "panel.spaces":
+      case "panel.servers":
+      case "panel.secrets":
+      case "panel.tunnels":
+      case "panel.accounts":
+        return this.toggleSection(arg as Exclude<Section, "">);
       case "sidebar.toggle":
         if (this.focusArea === "terminal") {
+          if (this.leftSection !== "servers" || this.side.hidden) {
+            if (this.focusMode) this.setFocusMode(false);
+            this.leftSection = "servers";
+            storeSet("oso.ui.left", "servers");
+            this.applyChrome();
+            this.renderRail();
+            this.renderSidebar();
+          }
           this.focusArea = "sidebar";
           (document.activeElement as HTMLElement | null)?.blur();
         } else {

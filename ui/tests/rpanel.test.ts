@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Activity, ApprovalRequest } from "../src/api";
 import { ApprovalQueue } from "../src/agents_ui";
 import { DEFAULTS, buildBindings } from "../src/hotkeys";
-import { sessionAge, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, profileOf, resultLabel, whoLabel } from "../src/rpanel";
+import { AgentRow, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, agentName, agentsFromActivity, ago, clampWidth, decisionLabel, latestUpdate, markFor, openFor, resultLabel, sortAgents, whoLabel } from "../src/rpanel";
+import { LEFT_DEFAULT, LEFT_MAX, LEFT_MIN, RAIL_WIDTH, SECTIONS, clampLeft, clickSection, readSection } from "../src/chrome";
 
 const act = (over: Partial<Activity> = {}): Activity => ({ id: 1, ts: 1000, updated: 1000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed", policy: "ask", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "", ...over });
 const req = (id: number, over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id, pane: 2, label: "Claude in acme, pane 2", agent: "claude", action: "run", host: "acme", command: "df -h", production: false, can_remember: true, ...over });
@@ -21,9 +22,7 @@ describe("the words of the panel", () => {
     expect(openFor(0, 12 * 60_000)).toBe("12 min");
     expect(openFor(0, 130 * 60_000)).toBe("2 h 10 min");
     expect(openFor(0, 3 * 86400_000)).toBe("3 d");
-    expect(sessionAge(0, 12 * 60_000)).toBe("open 12 min");
-    expect(sessionAge(0, 5000)).toBe("just opened");
-    expect(sessionAge(undefined, 5000)).toBe("");
+
   });
 
   it("says who decided: you, the policy, or the policy refusing", () => {
@@ -42,8 +41,8 @@ describe("the words of the panel", () => {
     expect(resultLabel(act({ state: "running" }))).toBe("running…");
     expect(resultLabel(act({ state: "denied" }))).toBe("not run");
     expect(resultLabel(act({ state: "done" }))).toBe("");
-    expect(whoLabel(act(), "web-1")).toBe("Claude · pane 2 (web-1)");
-    expect(whoLabel(act({ agent: "" }))).toBe("An AI agent · pane 2");
+    expect(whoLabel(act(), "tab 1 · Local · seya")).toBe("Claude · tab 1 · Local · seya");
+    expect(whoLabel(act({ agent: "" }))).toBe("An AI agent · terminal closed");
   });
 });
 
@@ -70,17 +69,51 @@ describe("the width", () => {
   });
 });
 
-describe("the profile of a session", () => {
-  const tree = {
-    profiles: [{ id: "work", name: "Work" }, { id: "home", name: "Home" }] as never,
-    folders: [{ id: 1, name: "a", parent: null, expanded: true, profile: "work" }, { id: 2, name: "b", parent: 1, expanded: true, profile: null }] as never,
-    servers: [{ id: 10, profile: "home", parent: 2 }, { id: 11, profile: null, parent: 2 }, { id: 12, profile: null, parent: null }] as never,
-  };
-  it("is its own, then its folder's up the tree, then every profile", () => {
-    expect(profileOf(tree, 10)).toBe("Home");
-    expect(profileOf(tree, 11)).toBe("Work");
-    expect(profileOf(tree, 12)).toBe("every profile");
-    expect(profileOf(tree, 99)).toBe("");
+describe("the rail and the left panel", () => {
+  it("has the five sections in the order asked for, each with its own shortcut", () => {
+    expect(SECTIONS.map((x) => x.key)).toEqual(["spaces", "servers", "secrets", "tunnels", "accounts"]);
+    for (const sec of SECTIONS) expect(DEFAULTS[sec.action], sec.key).toMatch(/^Mod\+Shift\+[1-5]$/);
+  });
+  it("a click opens only that section, a second click closes it, another one swaps it", () => {
+    expect(clickSection("", "secrets")).toBe("secrets");
+    expect(clickSection("secrets", "secrets")).toBe("");
+    expect(clickSection("secrets", "tunnels")).toBe("tunnels");
+  });
+  it("keeps the panel between its limits and leaves the terminals room", () => {
+    expect(clampLeft(10)).toBe(LEFT_MIN);
+    expect(clampLeft(9999)).toBe(LEFT_MAX);
+    expect(clampLeft(NaN)).toBe(LEFT_DEFAULT);
+    expect(clampLeft(400, 1000, 320)).toBe(272);
+    expect(clampLeft(400, 800, 320)).toBe(LEFT_MIN);
+    expect(clampLeft(400, 1500, 0)).toBe(400);
+    expect(RAIL_WIDTH).toBe(48);
+  });
+  it("starts on Servers the first time, then on what was left", () => {
+    localStorage.removeItem("oso.ui.left");
+    expect(readSection()).toBe("servers");
+    localStorage.setItem("oso.ui.left", "");
+    expect(readSection()).toBe("");
+    localStorage.setItem("oso.ui.left", "tunnels");
+    expect(readSection()).toBe("tunnels");
+    localStorage.setItem("oso.ui.left", "nonsense");
+    expect(readSection()).toBe("");
+    localStorage.removeItem("oso.ui.left");
+  });
+});
+
+describe("the Agents tab", () => {
+  const row = (over: Partial<AgentRow>): AgentRow => ({ sid: 1, name: "Claude", where: "tab 1", folder: "", branch: "", state: "idle", since: 1000, space: "", source: "process", ...over });
+  it("puts who needs you first, then who is working, then finished, then idle; the longest wait first", () => {
+    const sorted = sortAgents([row({ sid: 1, state: "idle" }), row({ sid: 2, state: "needs_you", since: 5000 }), row({ sid: 3, state: "working" }), row({ sid: 4, state: "needs_you", since: 2000 }), row({ sid: 5, state: "finished" })]);
+    expect(sorted.map((r) => r.sid)).toEqual([4, 2, 3, 5, 1]);
+  });
+  it("is made from the log until the processes are watched: needs you while a request waits", () => {
+    const act = (pane: number, state: Activity["state"], agent = "claude-code"): Activity => ({ id: pane, ts: 100, updated: 100, pane, agent, action: "run", host: "h", command: "ls", decision: "allowed", policy: "", reason: "", state, exit_code: null, bytes_out: null, preview: "", note: "" });
+    const rows = agentsFromActivity([act(2, "finished"), act(3, "running", "opencode"), { ...act(9, "done"), action: "context" }], [req(1, { pane: 2 }), req(2, { pane: 7, agent: "codex" })], (p) => `tab ${p}`);
+    const by = Object.fromEntries(rows.map((r) => [r.sid, r]));
+    expect(Object.keys(by).sort()).toEqual(["2", "3", "7"]);
+    expect([by[2].state, by[3].state, by[7].state]).toEqual(["needs_you", "working", "needs_you"]);
+    expect([by[3].name, by[7].name, by[2].where]).toEqual(["Opencode", "Codex", "tab 2"]);
   });
 });
 
@@ -129,6 +162,16 @@ describe("requests waiting for an answer", () => {
     expect(document.getElementById("approval-bg")!.textContent).toContain("wants to run a command");
     q.setInline(true);
     expect(document.getElementById("approval-bg")).toBeNull();
+  });
+
+  it("tells the panel about a new request, but not about an answer", async () => {
+    const { q } = make();
+    const seen: number[] = [];
+    q.onPush((r) => seen.push(r.id));
+    const r = req(8);
+    q.push(r);
+    await q.answer(r, "deny");
+    expect(seen).toEqual([8]);
   });
 
   it("\"in a terminal\" opens the terminal and answers terminal", async () => {

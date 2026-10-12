@@ -40,12 +40,19 @@ export class ApprovalQueue {
   private root: HTMLElement | null = null;
   private inline = false;
   private listeners: (() => void)[] = [];
+  private pushListeners: ((r: ApprovalRequest) => void)[] = [];
 
   constructor(private ctx: QueueCtx) {}
 
   push(r: ApprovalRequest) {
     this.queue.push(r);
     this.changed();
+    this.pushListeners.forEach((f) => f(r));
+  }
+
+  /** Called when a new request arrives (not when one is answered). */
+  onPush(f: (r: ApprovalRequest) => void) {
+    this.pushListeners.push(f);
   }
 
   get pending(): number {

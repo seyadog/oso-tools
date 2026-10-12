@@ -55,6 +55,12 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "secrets.open": "Mod+S",
   "local.new": "Mod+Shift+L",
   "rpanel.toggle": "Mod+J",
+  "focus.toggle": "Mod+Z",
+  "panel.spaces": "Mod+Shift+1",
+  "panel.servers": "Mod+Shift+2",
+  "panel.secrets": "Mod+Shift+3",
+  "panel.tunnels": "Mod+Shift+4",
+  "panel.accounts": "Mod+Shift+5",
 };
 
 /** What each action does, for the settings screen. */
@@ -82,12 +88,18 @@ export const LABELS: Record<string, string> = {
   "tunnels.open": "Tunnels (port forwards)",
   "search": "Open a server (quick search)",
   "sudo.fill": "Type the saved sudo password",
-  "sidebar.toggle": "Servers panel ⇄ terminal",
+  "sidebar.toggle": "Servers list ⇄ terminal (opens the Servers panel if it is closed)",
   "settings": "Settings",
   "help.open": "Shortcuts and help (also ? when you are not typing)",
   "secrets.open": "Secrets",
   "local.new": "New local terminal (in the active profile)",
-  "rpanel.toggle": "Right panel (sessions and AI activity), open or closed",
+  "rpanel.toggle": "Right panel (agents and AI activity), open or closed",
+  "focus.toggle": "Focus mode: hide every panel, only the terminals",
+  "panel.spaces": "Left panel: Spaces (again to close it)",
+  "panel.servers": "Left panel: Servers",
+  "panel.secrets": "Left panel: Secrets",
+  "panel.tunnels": "Left panel: Tunnels",
+  "panel.accounts": "Left panel: Accounts",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tab.${i + 1}`, `Go to tab ${i + 1}  (9 goes to the last one)`])),
 };
 

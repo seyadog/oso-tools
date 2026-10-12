@@ -19,6 +19,7 @@ const check = (name, ok, extra = "") => {
 
 const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1500, height: 900 } });
+page.setDefaultTimeout(6000);
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
@@ -35,16 +36,24 @@ const clearAll = async () => {
   await page.waitForTimeout(300);
 };
 const settle = (ms = 250) => page.waitForTimeout(ms);
+// the left panel shows one section: make sure it is the one a check needs
+const section = async (k) => { if ((await page.getAttribute(`[data-rail="${k}"]`, "aria-pressed")) !== "true") { await page.click(`[data-rail="${k}"]`); await settle(150); } };
+const menuItem = async (text) => { await page.click('[data-act="menu"]'); await page.click(`.ctx-menu .ctx-item:has-text("${text}")`); };
 
 // 0. a first start explains itself: getting started, named sections, empty states with a button, the version
 check("the first start shows Getting started with its four steps", (await page.$$("[data-step-row]")).length === 4 && (await page.textContent('[data-start="card"]')).includes("0 of 4 done"));
 check("each step has its own button", (await page.$$("[data-step]")).length === 4);
-check("the left panel has its sections, always with a name", (await page.$$eval(".sec", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers,groups,secrets,tunnels,accounts".replace("groups,", "") || (await page.$$eval(".sec[data-sec]", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers,secrets,tunnels,accounts");
+check("the rail has the five sections, in order, and the panel shows only the open one", (await page.$$eval("#rail [data-rail]", (e) => e.map((x) => x.getAttribute("data-rail")))).join() === "spaces,servers,secrets,tunnels,accounts" && (await page.$$eval(".sec[data-sec]", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers");
+check("the rail is a thin bar of icons", (await page.$eval("#rail", (r) => Math.round(r.getBoundingClientRect().width))) === 48);
+check("the first time, Servers is open and the right panel is closed", (await page.getAttribute('[data-rail="servers"]', "aria-pressed")) === "true" && (await page.$eval("#rpanel", (e) => e.hidden)));
 check("the version is at the top right", /^v\d+\.\d+\.\d+/.test(await page.textContent(".tools .version")));
 check("the profile is big, labelled, and always shown", (await page.textContent(".pb-label")) === "Profile" && (await page.$eval(".profile-bar .sel-btn", (b) => b.getBoundingClientRect().height)) >= 36);
+await section("secrets");
 check("the Secrets section tells a locked vault what to do", (await page.$('[data-act="empty-unlock"]')) !== null);
+await section("tunnels");
 check("Tunnels says what it is for, with its button", (await page.$('[data-act="empty-add-tunnel"]')) !== null && (await page.textContent("body")).includes("keeps a port open"));
-check("every button of the left foot says its name and its shortcut", (await page.$$eval(".foot-btn", (b) => b.map((x) => x.textContent + "|" + x.title))).join(";").includes("Local terminal") && (await page.$eval('[data-act="foot-local"]', (b) => b.title)).includes("Alt+Shift+L"));
+check("every tool at the bottom of the rail says its name and its shortcut", (await page.$$eval("#rail .rail-btn.small", (b) => b.map((x) => x.title))).join(";").includes("Local terminal") && (await page.$eval('[data-act="foot-local"]', (b) => b.title)).includes("Alt+Shift+L") && (await page.$eval('[data-rail="secrets"]', (b) => b.title)).includes("Alt+Shift+3"));
+await section("servers");
 await page.click('.profile-bar .select[data-name="active-profile"] .sel-btn');
 check("\"+ New profile\" is in the profile list", (await page.textContent(".profile-bar .sel-pop")).includes("+ New profile"));
 await page.click('.profile-bar .sel-item[data-value="__new"]');
@@ -97,9 +106,11 @@ await settle(150);
 // empty states have their button
 await page.evaluate(async () => { globalThis.__osoMock.knobs.empty = true; await window.oso.refreshTree(); globalThis.__osoMock.knobs.noTools = true; await window.oso.refreshAccounts(); });
 await settle(250);
+await section("servers");
 check("with no servers: add one, or import from ~/.ssh", (await page.$('[data-act="empty-add-server"]')) !== null && (await page.$('[data-act="empty-import-ssh"]')) !== null);
+await section("accounts");
 check("with no tools for accounts: say what they need", (await page.$('[data-act="empty-check-accounts"]')) !== null);
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(250);
 await page.fill("#modal-bg input", "master");
 await page.keyboard.press("Enter");
@@ -108,6 +119,7 @@ await page.keyboard.press("Escape");
 await settle(200);
 await page.evaluate(async () => { await window.oso.refreshSecrets(); });
 await settle(250);
+await section("secrets");
 check("with no secrets: add your first API key", (await page.$('[data-act="empty-add-key"]')) !== null && (await page.textContent("body")).includes("You have no secrets yet"));
 await page.click('[data-act="empty-add-key"]');
 await settle(250);
@@ -116,6 +128,7 @@ check("every field of the form says what it is for", (await page.$$("#modal-bg .
 await shot("0-secret-form-after");
 await page.keyboard.press("Escape");
 await settle(150);
+await section("secrets");
 await page.click('[data-act="sec-secrets-open"]');
 await settle(250);
 check("the empty Secrets window has the same button", (await page.$('[data-act="empty-new-key"]')) !== null);
@@ -128,6 +141,7 @@ await shot("0-first-start-after");
 // "?" typed in a terminal is a "?", not the sheet
 await page.evaluate(async () => { globalThis.__osoMock.knobs.empty = false; await window.oso.refreshTree(); });
 await settle(200);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(500);
 await page.keyboard.type("echo a?b");
@@ -139,6 +153,7 @@ await clearAll();
 await page.evaluate(async () => { await window.oso.lockVault(); localStorage.clear(); });
 
 // 1. open a server by double click
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 let s = await state();
@@ -299,6 +314,7 @@ check("the × on a terminal closes it", (await panes()).length === n0 - 1);
 
 // 10. vault: a server with a saved password asks for the master password
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=db-1');
 await settle(300);
 check("a server with a saved password asks for the vault", (await page.$("#modal-bg.show input[type=password]")) !== null);
@@ -309,10 +325,11 @@ check("a wrong master password is refused", (await page.textContent("#modal-bg .
 await page.fill("#modal-bg input[type=password]", "master");
 await page.keyboard.press("Enter");
 await settle(500);
-check("the right one unlocks it and the server opens", (await state()).tabs === 1 && (await page.$(".side-foot .vault.open")) !== null);
+check("the right one unlocks it and the server opens", (await state()).tabs === 1 && (await page.$('#rail [data-act="vault"].open')) !== null);
 await shot("5-vault-opened");
 
 // 11. a new server, edited and deleted
+await section("servers");
 await page.click('[data-act="sec-servers-add"]');
 await settle(200);
 await page.fill('input[name="name"]', "my-box");
@@ -327,6 +344,7 @@ check("the drop-down opens and a choice changes the form (the key file field app
 await page.click('#modal-bg button[type="submit"]');
 await settle(300);
 check("a valid server is saved and shows in the list", (await page.$('.row[data-kind="server"] >> text=my-box')) !== null);
+await section("servers");
 await page.click('.row[data-kind="server"] >> text=my-box');
 await page.focus(".tree");
 await page.keyboard.press("Delete");
@@ -346,8 +364,10 @@ await page.keyboard.press("Alt+Shift+KeyX");
 await page.click('#modal-bg button.primary');
 await settle(250);
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 const modeBefore = (await state()).sig;
@@ -367,12 +387,12 @@ await page.keyboard.type("stag");
 await page.keyboard.press("Enter");
 await settle(400);
 check("typing a few letters and Enter opens that host", (await state()).tabs === 1 && (await termText(await activeSid())).includes("staging"));
-await page.click('button[title^="New terminal to the right"]');
+await menuItem("New terminal to the right");
 await settle(500);
 s = await state();
 check("the split button on the toolbar opens a second terminal in a mosaic", s.mode === "mosaic" && (await panes()).length === 2);
 await shot("7-toolbar");
-await page.click('button[title^="Snippets"]');
+await menuItem("Snippets");
 await settle(200);
 await page.click("#modal-bg button:has-text('New snippet')");
 await settle(200);
@@ -387,14 +407,16 @@ check("and run in the active terminal", (await termText(await activeSid())).incl
 await clearAll();
 check("an empty screen shows the guide, not a list of hosts", (await page.$(".home .start")) !== null && (await page.$$(".home .card")).length === 0);
 await shot("8-home");
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 check("the same host opens twice when you double-click it twice", (await state()).tabs === 2);
 
 // the vault as a list of named, typed secrets
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(300);
 check("the vault opens and lists its secrets, hidden", (await page.$$(".srow")).length === 1 && (await page.textContent(".vault-list")).includes("••••") && (await page.textContent(".vault-list")).includes("db-1 (login)"));
 check("the list says the type of each secret", (await page.textContent(".vault-list")).includes("Password"));
@@ -498,6 +520,7 @@ await settle(250);
 await page.keyboard.press("Escape");
 await settle(150);
 await clearAll();
+await section("servers");
 await page.click('.row[data-kind="server"]:has-text("staging")');
 await page.evaluate(() => window.oso.editSelected());
 await settle(250);
@@ -510,6 +533,7 @@ await page.click("#modal-bg button.primary");
 await settle(300);
 const stg = await page.evaluate(async () => (await window.oso.be.tree()).servers.find((x) => x.name === "staging"));
 check("notes, kind and proxy are saved with the server", stg.notes === "nginx + API node" && stg.env_kind === "production" && stg.proxy !== null);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=staging');
 await settle(400);
 check("a production machine's tab is red", (await page.$(".tab.prod")) !== null && (await page.$(".pane.prod")) !== null);
@@ -521,6 +545,7 @@ await page.evaluate(async () => {
   await window.oso.refreshTree();
 });
 await settle(300);
+await section("tunnels");
 check("saved tunnels are listed on the left by name", (await page.textContent('.row.tunnel')).includes("postgres of acme"));
 await page.click('.row.tunnel button[title="Switch on"]');
 await settle(1500);
@@ -536,6 +561,7 @@ await page.evaluate(async () => {
 await clearAll();
 
 // accounts of GitHub and Tailscale, and the network question
+await section("accounts");
 check("the accounts of the tools that exist are listed", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: me") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com"));
 await page.click('.row.acct:has-text("work-user") button');
 await settle(300);
@@ -548,6 +574,7 @@ await page.evaluate(async () => {
   await window.oso.refreshTree();
   await window.oso.refreshAccounts();
 });
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=staging');
 await settle(400);
 check("a server on another Tailscale account asks first", (await page.textContent("#modal-bg")).includes("Switch to home.ts.net?") && (await state()).tabs === 0);
@@ -555,10 +582,12 @@ await page.click('[data-act="network-anyway"]');
 await settle(500);
 check("connect anyway opens it", (await state()).tabs === 1);
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=staging');
 await settle(400);
 await page.click('[data-act="network-switch"]');
 await settle(600);
+await section("accounts");
 check("switching changes the account and then opens it", (await state()).tabs === 1 && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@gmail.com"));
 await clearAll();
 // a profile that asks for accounts puts them in use
@@ -571,6 +600,7 @@ await page.evaluate(async () => {
   await window.oso.refreshAccounts();
 });
 await settle(200);
+await section("accounts");
 check("switching profile switches its accounts", (await page.textContent('.acct-head[data-tool="github"]')).includes("in use: work-user") && (await page.textContent('.acct-head[data-tool="tailscale"]')).includes("me@corp.example.com"));
 await shot("9d-accounts");
 await page.evaluate(async () => {
@@ -585,6 +615,7 @@ await page.evaluate(async () => {
 await page.evaluate(async () => {
   await window.oso.be.secretSave({ id: 0, name: "deploy key", kind: "ssh_key", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "PRIVATE");
 });
+await section("servers");
 await page.click('.row[data-kind="server"]:has-text("web-1")');
 await page.evaluate(() => window.oso.editSelected());
 await settle(300);
@@ -607,7 +638,7 @@ await page.evaluate(async () => {
   await be.saveServer({ ...w, auth: "agent" }, null, null);
   await window.oso.refreshTree();
 });
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(300);
 await page.click('[data-act="import"]');
 await settle(200);
@@ -639,7 +670,10 @@ await page.evaluate(async () => {
 });
 await clearAll();
 
-// what AI agents ask: a window per request, naming who, where and the exact command
+// what AI agents ask: in focus mode (no panel to answer in) a window per request, naming who, where and the exact command
+await page.keyboard.press("Alt+z");
+await settle(200);
+check("Alt+Z is focus mode: no rail, no panels", (await page.$eval("#rail", (e) => e.hidden)) && (await page.$eval("#side", (e) => e.hidden)) && (await page.$eval("#app", (e) => e.classList.contains("focus"))));
 await page.evaluate(() => globalThis.__osoMock.approval({ id: 11, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "systemctl restart nginx", production: true, can_remember: false }));
 await settle(200);
 check("a request names who asks and shows the exact command", (await page.textContent("#approval-bg")).includes("Claude in web-1, pane 2 wants to run a command") && (await page.textContent("#approval-bg pre.cmd")) === "systemctl restart nginx");
@@ -662,6 +696,10 @@ await page.click('[data-act="approval-terminal"]');
 await settle(900);
 const typed = await page.evaluate(() => { const sid = window.oso.ws.screen.active; const t = window.oso.panes.get(sid).term.buffer.active; let s = ""; for (let i = 0; i < t.length; i++) s += t.getLine(i).translateToString(true) + "\n"; return s; });
 check("\"open in a terminal\" types the command without running it", typed.includes("sudo systemctl restart x") && !typed.includes("command not found") && (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "13,terminal");
+check("in focus mode a request did not open the right panel", await page.$eval("#rpanel", (e) => e.hidden));
+await page.keyboard.press("Alt+z");
+await settle(200);
+check("Alt+Z again brings back the rail and the panel that was open", !(await page.$eval("#rail", (e) => e.hidden)) && !(await page.$eval("#side", (e) => e.hidden)));
 await clearAll();
 await page.evaluate(async () => { window.oso.settingsDialog(); });
 await settle(200);
@@ -672,7 +710,7 @@ await page.keyboard.press("Escape");
 await settle(150);
 
 // more ways in: .env files, Proton Pass; one-time codes; cloud and production; the command line
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(300);
 await page.click('[data-act="import"]');
 await settle(200);
@@ -692,7 +730,7 @@ await settle(300);
 check("keeping them deletes nothing", (await page.evaluate(() => globalThis.__osoMock.deletedEnv.length)) === 0);
 await page.keyboard.press("Escape");
 await settle(200);
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(300);
 await page.click('[data-act="import"]');
 await settle(200);
@@ -711,13 +749,14 @@ await page.evaluate(async () => {
   const be = window.oso.be;
   await be.secretSave({ id: 0, name: "github 2fa", kind: "totp", profile: null, env_var: null, agent_visible: false, notes: "", updated: 0 }, "GEZDGNBVGY3TQOJQ");
 });
-await page.click(".side-foot .vault");
+await page.click('#rail [data-act="vault"]');
 await settle(300);
 await page.click('.srow:has-text("github 2fa") [data-act="totp-code"]');
 await settle(250);
 check("a one-time-code secret shows its code and the seconds left", /\d{3} \d{3}\s+\(\d+ s left, copied\)/.test(await page.textContent("#toast")));
 await page.keyboard.press("Escape");
 await settle(150);
+await section("servers");
 await page.click('.row[data-kind="server"]:has-text("web-1")');
 await page.evaluate(() => window.oso.editSelected());
 await settle(300);
@@ -755,6 +794,7 @@ await clearAll();
 
 // 13b. groups: a tab saved with its servers and arrangement, opened again in one go
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Alt+v");
@@ -764,16 +804,19 @@ await settle(500);
 s = await state();
 check("a tab with three terminals to save", s.tabs === 1 && s.terms === 3);
 const layoutBefore = await panes();
-await page.click('.tools button[title^="Save this tab as a group"]');
+await menuItem("Save this tab as a group");
 await settle(200);
 await page.fill("#modal-bg input", "ops");
 await page.keyboard.press("Enter");
 await settle(300);
+await section("spaces");
 check("the tab is saved as a group, listed on the left", (await page.$$('.row.group:has-text("ops")')).length === 1 && (await page.$$eval(".row.group small", (e) => e[0].textContent)).includes("3 terminals"));
 check("groups.json is written", JSON.parse((await page.evaluate(() => window.oso.be.readConfig("groups.json"))) ?? "[]").length === 1);
 await page.evaluate(() => { window.oso.groups[0].panes[0].command = "echo from-group"; });
 await clearAll();
+await section("spaces");
 check("with every tab closed, the group is still there", (await page.$$(".row.group")).length === 1 && (await state()).tabs === 0);
+await section("spaces");
 await page.dblclick('.row.group:has-text("ops")');
 await settle(1800);
 s = await state();
@@ -809,7 +852,9 @@ await page.click(".tab.on", { button: "right" });
 await settle(150);
 check("right-clicking a tab offers to save it as a group", (await page.$$eval(".ctx-item", (e) => e.map((x) => x.textContent))).includes("Save as group…"));
 await page.keyboard.press("Escape");
+await section("spaces");
 await page.hover('.row.group:has-text("ops")');
+await section("spaces");
 await page.click('.row.group:has-text("ops") button[title="Edit"]');
 await settle(200);
 check("the group opens in an editor with a field for each terminal", (await page.$$("#modal-bg .group-pane")).length === 3);
@@ -817,18 +862,24 @@ await page.fill("#modal-bg input >> nth=0", "operations");
 await page.check("#gbc");
 await page.click("#modal-bg button.primary");
 await settle(300);
+await section("spaces");
 check("renaming and broadcast are saved", (await page.$$('.row.group:has-text("operations")')).length === 1 && (await page.evaluate(() => window.oso.groups[0].broadcast)));
 await clearAll();
+await section("spaces");
 await page.dblclick('.row.group:has-text("operations")');
 await settle(1500);
 check("a group saved with broadcast opens in broadcast", await page.evaluate(() => window.oso.ws.broadcasting));
+await section("spaces");
 await page.hover('.row.group:has-text("operations")');
+await section("spaces");
 await page.click('.row.group:has-text("operations") button[title="Delete"]');
 await settle(200);
 await page.click("#modal-bg button.primary");
 await settle(300);
+await section("spaces");
 check("deleting a group removes it and leaves the open terminals alone", (await page.$$(".row.group")).length === 0 && (await state()).terms === 3);
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");
@@ -836,6 +887,7 @@ await settle(400);
 
 // 13c. a dropped connection is connected again by itself, keeping what was on screen
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 let sid1 = await activeSid();
@@ -887,6 +939,7 @@ await page.keyboard.type("exit");
 await page.keyboard.press("Enter");
 await settle(600);
 check("typing exit closes the terminal and nothing reconnects", (await state()).terms === 0);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");
@@ -894,6 +947,7 @@ await settle(400);
 
 // 13d. a changed server key is explained, and the old key can be forgotten
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 sid1 = await activeSid();
@@ -907,6 +961,7 @@ await page.click(".keycard button:has-text('forget the old key')");
 await settle(800);
 check("forgetting asks the engine to remove that host's key, and connects again", JSON.stringify(await page.evaluate(() => window.__osoMock.forgotten)) === JSON.stringify(["web1.example.com"]) && (await page.$$(".keycard")).length === 0 && (await state()).terms === 1 && (await page.evaluate(() => window.oso.ws.tabsHere()[0].dead)) === false);
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");
@@ -914,12 +969,13 @@ await settle(400);
 
 // 13e. "tell me when it is done"
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 sid1 = await activeSid();
 await page.keyboard.press("Alt+a");
 await settle(200);
-check("Alt+A switches the watch on: a mark on the tab and on the bell", (await page.$$(".tab .wm")).length === 1 && (await page.$$('.tools .ib.on[title^="Tell me"]')).length === 1);
+check("Alt+A switches the watch on: a mark on the tab and on the bell", (await page.$$(".tab .wm")).length === 1 && (await (async () => { await page.click('[data-act="menu"]'); const n = (await page.$$('.ctx-item.checked:has-text("Tell me")')).length; await page.keyboard.press("Escape"); return n; })()) === 1);
 await page.keyboard.press("Control+n");
 await settle(400);
 await page.evaluate((sid) => window.__osoMock.say(sid, "\r\nBuilding...\r\nfinished ok\r\nweb-1:~$ "), sid1);
@@ -940,6 +996,7 @@ await page.evaluate((sid) => window.__osoMock.lose(sid, 255, "\r\nConnection clo
 await settle(500);
 check("a watched terminal whose connection ends says so", (await page.evaluate(() => window.__osoMock.notices.length)) === 2);
 await clearAll();
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");
@@ -947,6 +1004,7 @@ await settle(400);
 
 // 13f. tunnels: saved port forwards with a switch each
 await clearAll();
+await section("tunnels");
 await page.click('[data-act="sec-tunnels-manage"]');
 await settle(300);
 check("the Tunnels window explains what a tunnel is when there are none", (await page.$eval("#modal-bg .empty", (e) => e.textContent)).includes("keeps a port open"));
@@ -968,6 +1026,7 @@ await shot("13f-tunnels");
 check("its switch turns it on, and the row says it is on", (await page.$eval(".t-row .txt small", (e) => e.textContent)) === "on");
 await page.evaluate(() => window.oso.pollTunnels());
 await settle(200);
+await section("tunnels");
 check("the Tunnels section says that one is on", (await page.textContent('.sec[data-sec="tunnels"] .n')).includes("1 on"));
 await page.click('input.switch');
 await settle(1500);
@@ -1014,6 +1073,7 @@ await settle(200);
 await page.evaluate(async () => { for (const s of window.oso.tree.servers) await window.oso.be.setForwards(s.id, []); await window.oso.refreshTree(); });
 
 // 13g. files: dropped on a terminal, or typed
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
 await page.keyboard.press("Alt+u");
@@ -1056,49 +1116,32 @@ await clearAll();
 await page.keyboard.press("Alt+u");
 await settle(200);
 check("without a terminal there is nothing to copy to", (await page.$$("#modal-bg")).length === 0 || true);
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");
 await settle(400);
 
-// 15. the right panel: sessions and what AI agents asked
+// 15. the right panel: Agents and Activity; it opens by itself for a request
 await clearAll();
 await page.evaluate(() => { globalThis.__osoMock.activity.length = 0; globalThis.__osoMock.approvalAnswers.length = 0; });
+await section("servers");
 const stageWidth = () => page.$eval("#stage", (e) => e.getBoundingClientRect().width);
-const closedWidth = await stageWidth();
-check("the panel is closed at first, with its arrow on the edge", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$("#rtoggle")) !== null && (await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) >= 1499);
+check("the right panel is closed at first, with its arrow on the edge", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$("#rtoggle")) !== null && (await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) >= 1499);
 check("the arrow says what it is and its shortcut", (await page.$eval("#rtoggle", (b) => b.title)).includes("Alt+J"));
+const closedWidth = await stageWidth();
 await page.click("#rtoggle");
 await settle(250);
-check("the arrow opens it", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$('[data-section="sessions"]')) !== null && (await page.$('[data-section="activity"]')) !== null);
-check("it has its two named sections", (await page.textContent('[data-section="sessions"] h3')).startsWith("Sessions") && (await page.textContent('[data-section="activity"] h3')).startsWith("Agent activity"));
+check("the arrow opens it, with two tabs: Agents and Activity (no Sessions)", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$$eval("#rpanel [data-rtab]", (b) => b.map((x) => x.getAttribute("data-rtab")))).join() === "agents,activity" && !(await page.textContent("#rpanel")).includes("Sessions"));
+check("it opens on Agents, which says what it is for when nothing runs", (await page.$('[data-section="agents"]')) !== null && (await page.textContent('[data-section="agents"]')).includes("No agent is running"));
 check("the terminals make room for it", closedWidth - (await stageWidth()) >= 300);
 check("the arrow moves to the panel's border", Math.abs((await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) - (await page.$eval("#rpanel", (e) => e.getBoundingClientRect().left))) <= 1);
-check("with nothing yet, each section says what it is for", (await page.textContent('[data-section="sessions"]')).includes("No open sessions") && (await page.textContent('[data-section="activity"]')).includes("Nothing yet"));
+await page.click('[data-rtab="activity"]');
+await settle(150);
+check("Activity says what it is for when it is empty", (await page.textContent('[data-section="activity"]')).includes("Nothing yet"));
 await shot("10a-panel-empty");
-
-// sessions
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
-await page.dblclick('.row[data-kind="server"] >> text=staging');
-await settle(400);
-const rows = await page.$$eval("[data-session]", (r) => r.map((x) => ({ text: x.textContent, prod: x.classList.contains("prod") })));
-check("each open session is listed with its server", rows.length === 2 && rows.some((r) => r.text.includes("web-1")) && rows.some((r) => r.text.includes("staging")), JSON.stringify(rows));
-check("with its profile and since when", rows.every((r) => /open|just opened/.test(r.text) && /every profile|Default|default/i.test(r.text)), JSON.stringify(rows));
-check("a production server is marked in red", rows.find((r) => r.text.includes("staging")).prod && (await page.$eval('[data-session].prod .badge-prod', (b) => b.textContent)) === "PRODUCTION");
-const first = await page.$eval("[data-session]", (r) => Number(r.getAttribute("data-session")));
-await page.click(`[data-session="${first}"]`);
-await settle(200);
-check("a click goes to that terminal", (await activeSid()) === first);
-const second = await page.$$eval("[data-session]", (r) => Number(r[1].getAttribute("data-session")));
-await page.click(`[data-session="${second}"]`);
-await settle(200);
-check("and to the other one", (await activeSid()) === second);
-await page.hover(`[data-session="${second}"]`);
-await page.click(`[data-session="${second}"] [data-act="session-close"]`);
-await settle(300);
-check("a session closes from the panel", (await page.$$("[data-session]")).length === 1 && (await state()).all === 1);
-await shot("10b-panel-sessions");
 
 // what agents asked: one finished by itself, one you allowed, one you refused
 await page.evaluate(() => {
@@ -1114,7 +1157,7 @@ await page.evaluate(() => {
 await settle(300);
 const cards = await page.$$eval("[data-activity]", (c) => c.map((x) => x.textContent));
 check("each thing an agent asked is a card, newest first, and reading the server list is left out", cards.length === 3 && cards[0].includes("rm -rf /tmp/x") && cards[2].includes("df -h"), JSON.stringify(cards));
-check("a card says which agent, which pane, the server and the exact command", cards[2].includes("Claude · pane 2") && cards[2].includes("web-1") && cards[0].includes("Opencode · pane 3"));
+check("a card says which agent, the server and the exact command", cards[2].includes("Claude") && cards[2].includes("web-1") && cards[0].includes("Opencode"));
 check("it says it was automatic, and by which policy", cards[2].includes("Automatic: read-only policy") && cards[2].includes("exit 0"));
 check("it says you allowed it, and how it ended", cards[1].includes("You allowed it") && cards[1].includes("exit 1"));
 check("and that you refused", cards[0].includes("You said no") && cards[0].includes("not run"));
@@ -1129,11 +1172,20 @@ await page.click('[data-activity="1"] [data-act="activity-toggle"]');
 await settle(100);
 check("and closes again", (await page.$$("[data-role=preview]")).length === 0);
 
-// a request waiting: answered from the panel, with no window over everything
+// the Agents tab: who needs you
+await page.click('[data-rtab="agents"]');
+await settle(150);
+check("Agents lists the agents that asked something, one row each", (await page.$$("[data-agent-row]")).length === 2);
+
+// a request waiting: the panel opens by itself, on Activity, and it is answered there, with no window over everything
+await page.keyboard.press("Alt+j");
+await settle(200);
+check("Alt+J closes the panel", await page.$eval("#rpanel", (e) => e.hidden));
 await page.evaluate(() => globalThis.__osoMock.approval({ id: 21, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "df -h /var", production: false, can_remember: true }));
-await settle(250);
-check("with the panel open, no window covers the screen", (await page.$("#approval-bg")) === null);
-check("the request is at the top of Agent activity, in amber, with its count", (await page.$eval('[data-section="activity"] .rp-scroll > :first-child', (e) => e.getAttribute("data-approval"))) === "21" && (await page.textContent('[data-section="activity"] .pending-n')) === "1");
+await settle(300);
+check("a request opens the right panel by itself, on Activity", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.getAttribute('[data-rtab="activity"]', "aria-selected")) === "true");
+check("and no window covers the screen", (await page.$("#approval-bg")) === null);
+check("it is at the top, in amber, with its count on the tab", (await page.$eval('[data-section="activity"] .rp-scroll > :first-child', (e) => e.getAttribute("data-approval"))) === "21" && (await page.textContent('[data-rtab="activity"] .pending-n')) === "1");
 check("it names who asks and shows the exact command", (await page.textContent('[data-approval="21"]')).includes("Claude in web-1, pane 2 wants to run a command") && (await page.textContent('[data-approval="21"] pre.cmd')) === "df -h /var");
 await shot("10d-panel-pending");
 await page.click('[data-approval="21"] [data-act="panel-once"]');
@@ -1142,6 +1194,7 @@ check("Allow once answers the agent and takes the card away", (await page.evalua
 await page.evaluate(() => globalThis.__osoMock.approval({ id: 22, pane: 3, label: "Opencode in Local, pane 3", agent: "opencode", action: "run", host: "staging", command: "systemctl restart nginx", production: true, can_remember: false }));
 await settle(200);
 check("production cannot be remembered, and is red", (await page.$('[data-approval="22"] [data-act="panel-always"]')) === null && (await page.$('[data-approval="22"] .badge-prod')) !== null);
+check("the Agents tab marks who needs you", (await page.textContent('[data-rtab="agents"] .pending-n')) === "1");
 await page.click('[data-approval="22"] [data-act="panel-deny"]');
 await settle(200);
 check("Deny answers no", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "22,deny");
@@ -1152,11 +1205,16 @@ await page.click('[data-approval="23"] [data-act="panel-always"]');
 await settle(200);
 check("and that answer goes back", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "23,always_read");
 
-// closed: the arrow shows a mark, and a waiting request comes back as a window
+// closed with a request waiting: the window comes, and the arrow is amber
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 24, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "rm /tmp/a", production: false, can_remember: false }));
+await settle(200);
 await page.keyboard.press("Alt+j");
 await settle(250);
-check("Alt+J closes it and the terminals get their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await stageWidth()) - closedWidth) < 3);
-check("nothing new and nothing waiting: no mark", (await page.getAttribute("#rtoggle", "data-mark")) === "none");
+check("closing the panel with a request waiting brings the window (it cannot be missed)", (await page.$("#approval-bg .modal")) !== null && (await page.getAttribute("#rtoggle", "data-mark")) === "pending");
+await page.keyboard.press("Escape");
+await settle(250);
+check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute("#rtoggle", "data-mark")) !== "pending");
+check("Alt+J closed it and the terminals got their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await stageWidth()) - closedWidth) < 3);
 await page.evaluate(() => {
   const now = Math.floor(Date.now() / 1000);
   globalThis.__osoMock.activity.push({ id: 5, ts: now, updated: now, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "free -m", decision: "allowed_without_asking", policy: "read_only_auto", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "" });
@@ -1164,18 +1222,11 @@ await page.evaluate(() => {
 });
 await settle(200);
 check("when an agent runs something with the panel closed, the arrow gets a mark", (await page.getAttribute("#rtoggle", "data-mark")) === "new");
-await page.evaluate(() => globalThis.__osoMock.approval({ id: 24, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "rm /tmp/a", production: false, can_remember: false }));
-await settle(250);
-check("a waiting request makes it amber", (await page.getAttribute("#rtoggle", "data-mark")) === "pending");
-check("and, with the panel closed, the request still comes as a window (it cannot be missed)", (await page.$("#approval-bg .modal")) !== null);
-await page.keyboard.press("Escape");
-await settle(250);
-check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute("#rtoggle", "data-mark")) === "new");
 await page.keyboard.press("Alt+j");
 await settle(300);
 check("opening it again clears the mark", (await page.getAttribute("#rtoggle", "data-mark")) === "none");
 
-// width: drag its border; it is remembered with the open state
+// width: drag its border; it is remembered with the open state and the tab
 const box = await page.$eval("#rgrip", (g) => { const r = g.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
 await page.mouse.move(box.x, box.y);
 await page.mouse.down();
@@ -1184,32 +1235,43 @@ await page.mouse.up();
 await settle(200);
 const widened = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
 check("dragging the border changes the width", widened >= 410 && widened <= 430, String(widened));
-await page.mouse.move(box.x, box.y);
+await page.click('[data-rtab="activity"]');
+// the left panel too: its own width, and the section it was on
+await page.click('[data-rail="secrets"]');
+await settle(200);
+const lbox = await page.$eval("#lgrip", (g) => { const r = g.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+await page.mouse.move(lbox.x, lbox.y);
 await page.mouse.down();
-await page.mouse.move(2, box.y, { steps: 5 });
+await page.mouse.move(lbox.x + 40, lbox.y, { steps: 5 });
 await page.mouse.up();
-check("but not past the limit", (await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) <= 560);
-await page.mouse.move(await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left + 3), 400);
-await page.mouse.down();
-await page.mouse.move(1300, 400, { steps: 5 });
-await page.mouse.up();
-await page.mouse.move(await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left + 3), 400);
-await page.mouse.down();
-await page.mouse.move((await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left)) - 60, 400, { steps: 5 });
-await page.mouse.up();
+await settle(200);
+const leftW = await page.$eval("#side", (e) => Math.round(e.getBoundingClientRect().width));
+check("the left panel is resizable too", leftW >= 295 && leftW <= 315, String(leftW));
 const remembered = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
 await page.reload();
 await page.waitForSelector(".home");
 await settle(400);
-check("after reopening the window it is still open, at the same width", !(await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) - remembered) <= 1, String(remembered));
-check("and the arrow is on its border", (await page.$eval("#rtoggle", (b) => Math.round(b.getBoundingClientRect().right))) >= (await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().left))));
-await page.click("#rtoggle");
-await settle(250);
+check("after reopening the window the right panel is still open, on the same tab, at the same width", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.getAttribute('[data-rtab="activity"]', "aria-selected")) === "true" && Math.abs((await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) - remembered) <= 1, String(remembered));
+check("and the left panel is on the same section, at the same width", (await page.getAttribute('[data-rail="secrets"]', "aria-pressed")) === "true" && Math.abs((await page.$eval("#side", (e) => Math.round(e.getBoundingClientRect().width))) - leftW) <= 1);
+await page.click('[data-rail="secrets"]');
+await settle(150);
+check("a click on the open section closes the left panel", await page.$eval("#side", (e) => e.hidden));
 await page.reload();
 await page.waitForSelector(".home");
 await settle(300);
-check("closed stays closed after reopening", await page.$eval("#rpanel", (e) => e.hidden));
-check("the sheet of shortcuts lists the key", await (async () => { await page.keyboard.press("Shift+Slash"); await settle(250); const t = await page.textContent('[data-sheet="shortcuts"]'); await page.keyboard.press("Escape"); return t.includes("Alt+J") && t.includes("Right panel"); })());
+check("closed stays closed after reopening, and the window never starts in focus mode", (await page.$eval("#side", (e) => e.hidden)) && !(await page.$eval("#app", (e) => e.classList.contains("focus"))));
+await page.keyboard.press("Alt+Shift+2");
+await settle(150);
+check("Alt+Shift+2 opens Servers", (await page.getAttribute('[data-rail="servers"]', "aria-pressed")) === "true");
+await page.keyboard.press("Alt+Shift+4");
+await settle(150);
+check("Alt+Shift+4 swaps it for Tunnels (only one at a time)", (await page.getAttribute('[data-rail="tunnels"]', "aria-pressed")) === "true" && (await page.$$(".sec[data-sec]")).length === 1);
+await page.click('[data-act="menu"]');
+const items = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.textContent));
+check("the top bar has one menu, with what used to be a row of icons", items.length >= 9 && items.some((t) => t.includes("Snippets")) && items.some((t) => t.includes("Focus mode")) && items.some((t) => t.includes("Copy files")) && (await page.$$(".tools .ib")).length <= 2);
+await page.keyboard.press("Escape");
+check("the sheet of shortcuts lists the new keys", await (async () => { await page.keyboard.press("Shift+Slash"); await settle(250); const t = await page.textContent('[data-sheet="shortcuts"]'); await page.keyboard.press("Escape"); return t.includes("Alt+J") && t.includes("Alt+Z") && t.includes("Alt+Shift+1") && t.includes("Left panel"); })());
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");

@@ -15,7 +15,7 @@ describe("hotkeys", () => {
     const { bindings, problems } = buildBindings(null);
     expect(problems).toEqual([]);
     expect(matchAction(bindings, key("Digit2", { altKey: true }))).toBe("tab.2");
-    expect(matchAction(bindings, key("Digit2", { altKey: true, shiftKey: true }))).toBeNull(); // no "send to screen" any more
+    expect(matchAction(bindings, key("Digit2", { altKey: true, shiftKey: true }))).toBe("panel.servers"); // (it used to be "send to screen")
     expect(matchAction(bindings, key("KeyM", { altKey: true }))).toBe("mode.toggle");
     expect(matchAction(bindings, key("ArrowLeft", { altKey: true, shiftKey: true }))).toBe("move.left");
     expect(matchAction(bindings, key("Comma", { altKey: true }))).toBe("tab.prev");

@@ -15,7 +15,7 @@ export interface Group {
 
 /** Which actions belong together. Anything not listed lands in "More", so a new action is never lost. */
 const GROUPS: { title: string; actions: string[] }[] = [
-  { title: "Open", actions: ["search", "local.new", "tab.new", "sidebar.toggle", "rpanel.toggle", "settings", "help.open"] },
+  { title: "Open", actions: ["search", "local.new", "tab.new", "sidebar.toggle", "panel.spaces", "rpanel.toggle", "focus.toggle", "settings", "help.open"] },
   { title: "Tabs", actions: ["tab.1", "tab.prev", "tab.next", "tab.close", "tab.rename", "group.save", "watch.toggle"] },
   { title: "Mosaic", actions: ["mode.toggle", "split.right", "split.down", "focus.left", "move.left", "broadcast.toggle"] },
   { title: "Files and tunnels", actions: ["files.open", "tunnels.open"] },
@@ -26,6 +26,7 @@ const GROUPS: { title: string; actions: string[] }[] = [
 const FAMILY: Record<string, { members: string[]; label: string }> = {
   "tab.1": { members: ["tab.1", "tab.2", "tab.3", "tab.4", "tab.5", "tab.6", "tab.7", "tab.8", "tab.9"], label: "Go to tab 1 … 9 (9 is the last one)" },
   "focus.left": { members: ["focus.left", "focus.right", "focus.up", "focus.down"], label: "Move between terminals" },
+  "panel.spaces": { members: ["panel.spaces", "panel.servers", "panel.secrets", "panel.tunnels", "panel.accounts"], label: "Left panel: Spaces, Servers, Secrets, Tunnels, Accounts (again to close)" },
   "move.left": { members: ["move.left", "move.right", "move.up", "move.down"], label: "Move this terminal (needs a mosaic)" },
 };
 
