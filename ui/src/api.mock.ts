@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountsView, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { AccountsView, Activity, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Profile, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -63,6 +63,8 @@ export function mockBackend(): Backend {
   const forgotten: string[] = [];
   const deletedOriginals: string[] = [];
   const approvalAnswers: [number, string][] = [];
+  /** What the activity panel reads; tests add to it the way the audit log grows. */
+  const activity: Activity[] = [];
   const deletedEnv: string[] = [];
   const connected = { claude: false, opencode: false, codex: false };
   let cliHandler: (e: CliEvent) => void = () => {};
@@ -78,6 +80,7 @@ export function mockBackend(): Backend {
     forgotten,
     deletedOriginals,
     approvalAnswers,
+    activity,
     deletedEnv,
     cli: (e: CliEvent) => cliHandler(e),
     approval: (r: ApprovalRequest) => approvalHandler(r),
@@ -298,6 +301,7 @@ export function mockBackend(): Backend {
       approvalAnswers.push([id, decision]);
       return true;
     },
+    agentActivity: async () => activity.map((a) => ({ ...a })),
     auditRecent: async () => [
       { ts: 1_800_000_000, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", exit_code: 0, note: "" },
       { ts: 1_800_000_060, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "rm -rf /tmp/x", decision: "denied", exit_code: null, note: "" },

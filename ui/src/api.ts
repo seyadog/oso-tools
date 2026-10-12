@@ -223,6 +223,30 @@ export interface AuditEntry {
   note: string;
 }
 
+/** One thing an agent asked, with how it was decided and how it ended (one per request, from the audit log). */
+export interface Activity {
+  id: number;
+  /** When it was asked, and when anything last happened to it (Unix seconds). */
+  ts: number;
+  updated: number;
+  pane: number;
+  agent: string;
+  action: string;
+  host: string;
+  command: string;
+  /** `allowed` (you said yes), `allowed_and_remembered_for_reads`, `allowed_without_asking` (automatic), `denied`, `blocked`. */
+  decision: string;
+  /** The server's policy at that moment: `ask`, `read_only_auto`, `blocked` (empty when none applied). */
+  policy: string;
+  reason: string;
+  state: "running" | "finished" | "failed" | "denied" | "blocked" | "done" | "unknown";
+  exit_code: number | null;
+  bytes_out: number | null;
+  /** The first lines of what it printed, already blanked of secrets. */
+  preview: string;
+  note: string;
+}
+
 export interface TunnelStatus {
   server_id: number;
   forward_id: number;
@@ -300,6 +324,8 @@ export interface Backend {
   onApproval(f: (r: ApprovalRequest) => void): void;
   approvalAnswer(id: number, decision: ApprovalDecision): Promise<boolean>;
   auditRecent(limit: number): Promise<AuditEntry[]>;
+  /** What agents asked, one entry per request, oldest first. */
+  agentActivity(limit: number): Promise<Activity[]>;
   secretList(): Promise<SecretMeta[]>;
   /** `value` null keeps the saved one of an existing secret. */
   secretSave(meta: SecretMeta, value: string | null): Promise<number>;

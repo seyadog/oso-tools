@@ -100,6 +100,17 @@ fn stage_is_read_only(w: &[String]) -> bool {
     }
 }
 
+/// Does the command line run `sudo` as a command (not just mention the word, as `grep sudo /etc/group` does)?
+/// It looks at the first word of every piece between `;`, `&`, `|`, new lines, `(` and backticks.
+pub fn uses_sudo(command: &str) -> bool {
+    command
+        .split([';', '&', '|', '\n', '(', '`', '{', '}'])
+        .any(|piece| {
+            let first = piece.trim_start().trim_start_matches(['!', '$']).split_whitespace().next().unwrap_or("");
+            first == "sudo" || first.ends_with("/sudo")
+        })
+}
+
 /// Is this command line made only of commands that read? Anything unclear says no, which only means "ask".
 pub fn is_read_only(command: &str) -> bool {
     let command = command.trim();
@@ -202,5 +213,15 @@ mod tests {
         assert!(matches!(decide(Blocked, Some(EnvKind::Production), "ls"), Verdict::Block(_)));
         assert_eq!(AiPolicy::default(), Ask);
         assert_eq!(serde_json::to_string(&ReadOnlyAuto).unwrap(), "\"read_only_auto\"");
+    }
+
+    #[test]
+    fn sudo_is_found_where_it_runs_and_not_where_it_is_only_named() {
+        for c in ["sudo ls", "sudo -n du -x /", "ls; sudo reboot", "df -h | sudo tee /x", "echo a && sudo -n true", "/usr/bin/sudo id", "(sudo id)", "true || sudo id", "ls\nsudo id", "echo $(sudo id)", "  sudo   id"] {
+            assert!(uses_sudo(c), "{c:?}");
+        }
+        for c in ["grep sudo /etc/group", "echo sudo", "ls /usr/bin/sudoers", "df -h", "pseudo ls", "cat sudo.txt", ""] {
+            assert!(!uses_sudo(c), "{c:?}");
+        }
     }
 }

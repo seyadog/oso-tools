@@ -53,6 +53,7 @@ export function tauriBackend(): Backend {
     onApproval: (f) => void listen<ApprovalRequest>("approval", (e) => f(e.payload)),
     approvalAnswer: (id, decision) => call("approval_answer", { id, decision }),
     auditRecent: (limit) => call("audit_recent", { limit }),
+    agentActivity: (limit) => call("agent_activity", { limit }),
     secretList: () => call("secret_list"),
     secretSave: (meta, value) => call("secret_save", { meta, value }),
     secretDelete: (id) => call("secret_delete", { id }),

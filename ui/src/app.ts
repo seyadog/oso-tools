@@ -16,6 +16,7 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
+import { RightPanel, SessionRow, profileOf } from "./rpanel";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { profileBar, profileOptions } from "./profiles_ui";
@@ -72,6 +73,10 @@ export class App {
   private fileOver: Pane | null = null;
   /** What AI agents ask, waiting for the person. */
   private approvals!: ApprovalQueue;
+  /** The panel on the right: open sessions and what agents asked. */
+  private rpanel!: RightPanel;
+  /** When the window opened each session (ms), kept in the session's meta so it survives a restart of the window. */
+  private opened = new Map<Id, number>();
 
   snippets: { name: string; command: string }[] = [];
 
@@ -120,6 +125,21 @@ export class App {
       },
     });
     this.be.onApproval((r) => this.approvals.push(r));
+    this.rpanel = new RightPanel({
+      be: this.be,
+      queue: this.approvals,
+      rows: () => this.sessionRows(),
+      focus: (sid) => this.focusSession(sid),
+      close: (sid) => void this.closeSession(sid),
+      paneTitle: (pane) => this.ws.tabs.get(pane)?.title,
+      isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
+      keyText: (a) => this.keyText(a),
+    });
+    this.rpanel.attach(this.root);
+    // with the panel open the requests are answered there; closed, they come in a window over everything
+    this.rpanel.onOpenChange((open) => this.approvals.setInline(open));
+    this.rpanel.refresh().catch(() => {});
+    window.setInterval(() => void this.rpanel.refresh(), 2000);
     // `oso ssh <host>`, `oso host add`, `oso unlock` on the command line: the window follows
     this.be.onCli((e) => {
       if (e.event === "open" && e.data?.server_id != null) void this.openServer(e.data.server_id);
@@ -152,6 +172,7 @@ export class App {
     const live = await this.be.restore(this.guessRows(), this.guessCols()).catch(() => [] as SessionInfo[]);
     this.measure();
     live.forEach((s) => this.since.set(s.sid, Date.now() - 60000));
+    live.forEach((s) => this.opened.set(s.sid, Number(s.meta.opened) || Date.now()));
     const saved = await this.readJson<ReturnType<Workspace["save"]>>("workspace.json");
     this.ws.restore(
       saved,
@@ -296,7 +317,7 @@ export class App {
       void this.be.writeConfig("workspace.json", JSON.stringify(this.ws.save()));
       this.ws.tabs.forEach((t) => {
         const order = this.ws.screens[t.screen].order.indexOf(t.sid);
-        void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order });
+        void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order, opened: this.opened.get(t.sid) });
       });
     }, 300);
   }
@@ -413,6 +434,7 @@ export class App {
 
   private addSession(info: SessionInfo, place?: Place) {
     this.since.set(info.sid, Date.now());
+    this.opened.set(info.sid, Date.now());
     this.ws.addTab({ sid: info.sid, title: info.title, serverId: info.server_id }, place);
     this.focusArea = "terminal";
     this.ensurePane(info.sid);
@@ -702,6 +724,8 @@ export class App {
       this.ws.rekey(sid, info.sid);
       this.since.delete(sid);
       this.since.set(info.sid, Date.now());
+      this.opened.delete(sid);
+      this.opened.set(info.sid, Date.now());
       this.alerts.delete(sid);
       this.watches.delete(sid);
       const r = this.retry.get(sid);
@@ -742,6 +766,7 @@ export class App {
     const pane = this.panes.get(sid);
     this.stopRetry(sid);
     this.since.delete(sid);
+    this.opened.delete(sid);
     this.watches.delete(sid);
     this.alerts.delete(sid);
     this.ws.closeTab(sid);
@@ -765,7 +790,21 @@ export class App {
 
   // ------------------------------------------------------------ rendering
 
+  /** What the right panel lists: every open terminal, in the order of the tabs. */
+  private sessionRows(): SessionRow[] {
+    const order: Id[] = [];
+    for (const g of this.ws.screen.groups) order.push(...leaves(g.tree));
+    for (const id of this.ws.tabs.keys()) if (!order.includes(id)) order.push(id);
+    return order.flatMap((sid) => {
+      const t = this.ws.tabs.get(sid);
+      if (!t) return [];
+      const local = t.serverId === LOCAL;
+      return [{ sid, name: t.title, serverId: t.serverId, local, prod: this.isProd(t.serverId), dead: t.dead, profile: local ? "" : profileOf(this.tree, t.serverId), opened: this.opened.get(sid) }];
+    });
+  }
+
   render() {
+    this.rpanel?.render();
     this.layout();
     this.renderTopbar();
     this.renderSidebar();
@@ -2015,6 +2054,8 @@ export class App {
         return void this.hostPicker();
       case "sudo.fill":
         return void this.fillSudo();
+      case "rpanel.toggle":
+        return this.rpanel.toggle();
       case "sidebar.toggle":
         if (this.focusArea === "terminal") {
           this.focusArea = "sidebar";

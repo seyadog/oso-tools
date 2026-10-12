@@ -61,7 +61,7 @@ await page.keyboard.press("Shift+Slash");
 await settle(250);
 const sheet = await page.textContent('[data-sheet="shortcuts"]');
 check("? opens the sheet of shortcuts", sheet.includes("Shortcuts") && sheet.includes("Mosaic") && sheet.includes("Secrets and agents") && sheet.includes("Files and tunnels"));
-const wanted = await page.evaluate(() => ["search", "local.new", "tab.new", "tab.close", "mode.toggle", "split.right", "broadcast.toggle", "files.open", "tunnels.open", "secrets.open", "sudo.fill", "settings", "help.open", "group.save", "watch.toggle"].map((a) => window.oso.keyText(a)));
+const wanted = await page.evaluate(() => ["search", "local.new", "tab.new", "tab.close", "mode.toggle", "split.right", "broadcast.toggle", "files.open", "tunnels.open", "secrets.open", "sudo.fill", "settings", "help.open", "group.save", "watch.toggle", "rpanel.toggle"].map((a) => window.oso.keyText(a)));
 check("it lists the keys as they are set", wanted.every((k) => sheet.includes(k)), JSON.stringify(wanted.filter((k) => !sheet.includes(k))));
 await page.keyboard.press("Escape");
 await page.keyboard.press("Alt+/");
@@ -1056,6 +1056,160 @@ await clearAll();
 await page.keyboard.press("Alt+u");
 await settle(200);
 check("without a terminal there is nothing to copy to", (await page.$$("#modal-bg")).length === 0 || true);
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(300);
+await page.keyboard.press("Control+n");
+await settle(400);
+
+// 15. the right panel: sessions and what AI agents asked
+await clearAll();
+await page.evaluate(() => { globalThis.__osoMock.activity.length = 0; globalThis.__osoMock.approvalAnswers.length = 0; });
+const stageWidth = () => page.$eval("#stage", (e) => e.getBoundingClientRect().width);
+const closedWidth = await stageWidth();
+check("the panel is closed at first, with its arrow on the edge", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$("#rtoggle")) !== null && (await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) >= 1499);
+check("the arrow says what it is and its shortcut", (await page.$eval("#rtoggle", (b) => b.title)).includes("Alt+J"));
+await page.click("#rtoggle");
+await settle(250);
+check("the arrow opens it", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$('[data-section="sessions"]')) !== null && (await page.$('[data-section="activity"]')) !== null);
+check("it has its two named sections", (await page.textContent('[data-section="sessions"] h3')).startsWith("Sessions") && (await page.textContent('[data-section="activity"] h3')).startsWith("Agent activity"));
+check("the terminals make room for it", closedWidth - (await stageWidth()) >= 300);
+check("the arrow moves to the panel's border", Math.abs((await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) - (await page.$eval("#rpanel", (e) => e.getBoundingClientRect().left))) <= 1);
+check("with nothing yet, each section says what it is for", (await page.textContent('[data-section="sessions"]')).includes("No open sessions") && (await page.textContent('[data-section="activity"]')).includes("Nothing yet"));
+await shot("10a-panel-empty");
+
+// sessions
+await page.dblclick('.row[data-kind="server"] >> text=web-1');
+await settle(400);
+await page.dblclick('.row[data-kind="server"] >> text=staging');
+await settle(400);
+const rows = await page.$$eval("[data-session]", (r) => r.map((x) => ({ text: x.textContent, prod: x.classList.contains("prod") })));
+check("each open session is listed with its server", rows.length === 2 && rows.some((r) => r.text.includes("web-1")) && rows.some((r) => r.text.includes("staging")), JSON.stringify(rows));
+check("with its profile and since when", rows.every((r) => /open|just opened/.test(r.text) && /every profile|Default|default/i.test(r.text)), JSON.stringify(rows));
+check("a production server is marked in red", rows.find((r) => r.text.includes("staging")).prod && (await page.$eval('[data-session].prod .badge-prod', (b) => b.textContent)) === "PRODUCTION");
+const first = await page.$eval("[data-session]", (r) => Number(r.getAttribute("data-session")));
+await page.click(`[data-session="${first}"]`);
+await settle(200);
+check("a click goes to that terminal", (await activeSid()) === first);
+const second = await page.$$eval("[data-session]", (r) => Number(r[1].getAttribute("data-session")));
+await page.click(`[data-session="${second}"]`);
+await settle(200);
+check("and to the other one", (await activeSid()) === second);
+await page.hover(`[data-session="${second}"]`);
+await page.click(`[data-session="${second}"] [data-act="session-close"]`);
+await settle(300);
+check("a session closes from the panel", (await page.$$("[data-session]")).length === 1 && (await state()).all === 1);
+await shot("10b-panel-sessions");
+
+// what agents asked: one finished by itself, one you allowed, one you refused
+await page.evaluate(() => {
+  const now = Math.floor(Date.now() / 1000);
+  globalThis.__osoMock.activity.push(
+    { id: 1, ts: now - 400, updated: now - 399, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", policy: "read_only_auto", reason: "Automatic: the server's policy is “read-only auto” and this command only reads.", state: "finished", exit_code: 0, bytes_out: 90, preview: "Filesystem  Size  Used Avail\n/dev/sda1    40G   12G   26G", note: "812 ms" },
+    { id: 2, ts: now - 200, updated: now - 198, pane: 2, agent: "claude-code", action: "run", host: "staging", command: "systemctl restart nginx", decision: "allowed", policy: "ask", reason: "Production always asks, whatever the server's policy says: you allowed it once.", state: "finished", exit_code: 1, bytes_out: 40, preview: "Failed to restart nginx.service: Unit not found.", note: "" },
+    { id: 3, ts: now - 100, updated: now - 100, pane: 3, agent: "opencode", action: "run", host: "web-1", command: "rm -rf /tmp/x", decision: "denied", policy: "ask", reason: "The server's policy is “ask”: you denied it (or nobody answered in time).", state: "denied", exit_code: null, bytes_out: null, preview: "", note: "" },
+    { id: 4, ts: now - 30, updated: now - 30, pane: 2, agent: "claude-code", action: "context", host: "", command: "", decision: "allowed_without_asking", policy: "", reason: "", state: "done", exit_code: null, bytes_out: null, preview: "", note: "" },
+  );
+  return window.oso.rpanel.refresh();
+});
+await settle(300);
+const cards = await page.$$eval("[data-activity]", (c) => c.map((x) => x.textContent));
+check("each thing an agent asked is a card, newest first, and reading the server list is left out", cards.length === 3 && cards[0].includes("rm -rf /tmp/x") && cards[2].includes("df -h"), JSON.stringify(cards));
+check("a card says which agent, which pane, the server and the exact command", cards[2].includes("Claude · pane 2") && cards[2].includes("web-1") && cards[0].includes("Opencode · pane 3"));
+check("it says it was automatic, and by which policy", cards[2].includes("Automatic: read-only policy") && cards[2].includes("exit 0"));
+check("it says you allowed it, and how it ended", cards[1].includes("You allowed it") && cards[1].includes("exit 1"));
+check("and that you refused", cards[0].includes("You said no") && cards[0].includes("not run"));
+check("a production server is red in the activity too", (await page.$$eval('[data-activity] .rp-where.prod', (e) => e.length)) === 1);
+check("details are closed until asked for", (await page.$$("[data-role=preview]")).length === 0);
+await page.click('[data-activity="1"] [data-act="activity-toggle"]');
+await settle(150);
+const detail = await page.textContent('[data-activity="1"] .rp-detail');
+check("Details shows why it was decided, the exit code and the first lines of the output", detail.includes("read-only auto") && detail.includes("exit code 0") && (await page.textContent('[data-activity="1"] [data-role="preview"]')).includes("/dev/sda1"));
+await shot("10c-panel-activity");
+await page.click('[data-activity="1"] [data-act="activity-toggle"]');
+await settle(100);
+check("and closes again", (await page.$$("[data-role=preview]")).length === 0);
+
+// a request waiting: answered from the panel, with no window over everything
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 21, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "df -h /var", production: false, can_remember: true }));
+await settle(250);
+check("with the panel open, no window covers the screen", (await page.$("#approval-bg")) === null);
+check("the request is at the top of Agent activity, in amber, with its count", (await page.$eval('[data-section="activity"] .rp-scroll > :first-child', (e) => e.getAttribute("data-approval"))) === "21" && (await page.textContent('[data-section="activity"] .pending-n')) === "1");
+check("it names who asks and shows the exact command", (await page.textContent('[data-approval="21"]')).includes("Claude in web-1, pane 2 wants to run a command") && (await page.textContent('[data-approval="21"] pre.cmd')) === "df -h /var");
+await shot("10d-panel-pending");
+await page.click('[data-approval="21"] [data-act="panel-once"]');
+await settle(250);
+check("Allow once answers the agent and takes the card away", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "21,once" && (await page.$('[data-approval="21"]')) === null);
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 22, pane: 3, label: "Opencode in Local, pane 3", agent: "opencode", action: "run", host: "staging", command: "systemctl restart nginx", production: true, can_remember: false }));
+await settle(200);
+check("production cannot be remembered, and is red", (await page.$('[data-approval="22"] [data-act="panel-always"]')) === null && (await page.$('[data-approval="22"] .badge-prod')) !== null);
+await page.click('[data-approval="22"] [data-act="panel-deny"]');
+await settle(200);
+check("Deny answers no", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "22,deny");
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 23, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "uptime", production: false, can_remember: true }));
+await settle(200);
+check("a plain read can be remembered from the panel too", (await page.$('[data-approval="23"] [data-act="panel-always"]')) !== null);
+await page.click('[data-approval="23"] [data-act="panel-always"]');
+await settle(200);
+check("and that answer goes back", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "23,always_read");
+
+// closed: the arrow shows a mark, and a waiting request comes back as a window
+await page.keyboard.press("Alt+j");
+await settle(250);
+check("Alt+J closes it and the terminals get their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await stageWidth()) - closedWidth) < 3);
+check("nothing new and nothing waiting: no mark", (await page.getAttribute("#rtoggle", "data-mark")) === "none");
+await page.evaluate(() => {
+  const now = Math.floor(Date.now() / 1000);
+  globalThis.__osoMock.activity.push({ id: 5, ts: now, updated: now, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "free -m", decision: "allowed_without_asking", policy: "read_only_auto", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "" });
+  return window.oso.rpanel.refresh();
+});
+await settle(200);
+check("when an agent runs something with the panel closed, the arrow gets a mark", (await page.getAttribute("#rtoggle", "data-mark")) === "new");
+await page.evaluate(() => globalThis.__osoMock.approval({ id: 24, pane: 2, label: "Claude in web-1, pane 2", agent: "claude-code", action: "run", host: "web-1", command: "rm /tmp/a", production: false, can_remember: false }));
+await settle(250);
+check("a waiting request makes it amber", (await page.getAttribute("#rtoggle", "data-mark")) === "pending");
+check("and, with the panel closed, the request still comes as a window (it cannot be missed)", (await page.$("#approval-bg .modal")) !== null);
+await page.keyboard.press("Escape");
+await settle(250);
+check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute("#rtoggle", "data-mark")) === "new");
+await page.keyboard.press("Alt+j");
+await settle(300);
+check("opening it again clears the mark", (await page.getAttribute("#rtoggle", "data-mark")) === "none");
+
+// width: drag its border; it is remembered with the open state
+const box = await page.$eval("#rgrip", (g) => { const r = g.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+await page.mouse.move(box.x, box.y);
+await page.mouse.down();
+await page.mouse.move(box.x - 100, box.y, { steps: 5 });
+await page.mouse.up();
+await settle(200);
+const widened = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
+check("dragging the border changes the width", widened >= 410 && widened <= 430, String(widened));
+await page.mouse.move(box.x, box.y);
+await page.mouse.down();
+await page.mouse.move(2, box.y, { steps: 5 });
+await page.mouse.up();
+check("but not past the limit", (await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) <= 560);
+await page.mouse.move(await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left + 3), 400);
+await page.mouse.down();
+await page.mouse.move(1300, 400, { steps: 5 });
+await page.mouse.up();
+await page.mouse.move(await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left + 3), 400);
+await page.mouse.down();
+await page.mouse.move((await page.$eval("#rgrip", (g) => g.getBoundingClientRect().left)) - 60, 400, { steps: 5 });
+await page.mouse.up();
+const remembered = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
+await page.reload();
+await page.waitForSelector(".home");
+await settle(400);
+check("after reopening the window it is still open, at the same width", !(await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) - remembered) <= 1, String(remembered));
+check("and the arrow is on its border", (await page.$eval("#rtoggle", (b) => Math.round(b.getBoundingClientRect().right))) >= (await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().left))));
+await page.click("#rtoggle");
+await settle(250);
+await page.reload();
+await page.waitForSelector(".home");
+await settle(300);
+check("closed stays closed after reopening", await page.$eval("#rpanel", (e) => e.hidden));
+check("the sheet of shortcuts lists the key", await (async () => { await page.keyboard.press("Shift+Slash"); await settle(250); const t = await page.textContent('[data-sheet="shortcuts"]'); await page.keyboard.press("Escape"); return t.includes("Alt+J") && t.includes("Right panel"); })());
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(300);
 await page.keyboard.press("Control+n");

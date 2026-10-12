@@ -204,6 +204,90 @@ fn the_policy_of_a_server_decides_what_goes_through_without_asking() {
 }
 
 #[test]
+fn a_server_nobody_configured_asks_even_for_df_h_and_the_log_says_which_rule_applied() {
+    let sshd = need_sshd!("whichrule");
+    let r = rig("whichrule");
+    // a server added the ordinary way gets the default policy, and the default is to ask
+    let id = add_server(&r, &sshd, "fresh", None, AiPolicy::default(), "");
+    assert_eq!(r.engine.lock().unwrap().store.server(id).unwrap().ai_policy, AiPolicy::Ask);
+    // nobody at the window: it is refused, and nothing ran
+    let alone = call(&r, "oso_run", json!({ "host": "fresh", "command": "df -h" }));
+    assert_eq!(alone["ok"], false, "df -h on a server with no policy must not run by itself: {alone}");
+    assert!(!audit(&r).iter().any(|l| l["decision"] == "finished"), "it did not run");
+    // the person is there and says yes once: it asks, runs, and the record says who decided and why
+    let seen = person(&r.approvals, |_| Decision::Once);
+    let out = call(&r, "oso_run", json!({ "host": "fresh", "command": "df -h" }));
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "it asked");
+    let log = audit(&r);
+    let asked = log.iter().find(|l| l["decision"] == "allowed").expect("an allowed line");
+    assert_eq!(asked["policy"], "ask");
+    assert_eq!(asked["reason"].as_str().unwrap(), "The server's policy is \u{201c}ask\u{201d}: you allowed it once.");
+    let finished = log.iter().find(|l| l["decision"] == "finished").expect("a finished line");
+    assert_eq!(finished["id"], asked["id"], "the two lines belong to one request");
+    assert!(finished["preview"].as_str().unwrap().contains("Filesystem"), "the first lines of the output are kept");
+    // the panel's view of it
+    let acts = oso_core::audit::recent_activity(r.handler.audit_path(), 10);
+    let mine = acts.iter().find(|a| a.command == "df -h" && a.decision == "allowed").unwrap();
+    assert_eq!((mine.state.as_str(), mine.exit_code, mine.policy.as_str(), mine.host.as_str(), mine.pane), ("finished", Some(0), "ask", "fresh", 2));
+    assert!(mine.preview.contains("Filesystem"));
+
+    // a server set to "read-only auto" lets it through, and says that is why
+    add_server(&r, &sshd, "trusted", None, AiPolicy::ReadOnlyAuto, "");
+    seen.lock().unwrap().clear();
+    assert_eq!(call(&r, "oso_run", json!({ "host": "trusted", "command": "df -h" }))["ok"], true);
+    assert!(seen.lock().unwrap().is_empty());
+    let auto = audit(&r).into_iter().find(|l| l["host"] == "trusted" && l["decision"] == "allowed_without_asking").unwrap();
+    assert_eq!(auto["policy"], "read_only_auto");
+    assert!(auto["reason"].as_str().unwrap().starts_with("Automatic"));
+    // and production asks whatever its policy says, with that reason
+    add_server(&r, &sshd, "prod", Some(EnvKind::Production), AiPolicy::ReadOnlyAuto, "");
+    assert_eq!(call(&r, "oso_run", json!({ "host": "prod", "command": "df -h" }))["ok"], true);
+    assert_eq!(seen.lock().unwrap().len(), 1, "production asked");
+    let prod = audit(&r).into_iter().find(|l| l["host"] == "prod" && l["decision"] == "allowed").unwrap();
+    assert!(prod["reason"].as_str().unwrap().starts_with("Production always asks"));
+}
+
+#[test]
+fn what_an_agent_types_and_what_comes_back_are_blanked_of_secrets_in_the_record_too() {
+    let sshd = need_sshd!("recordhides");
+    let r = rig("recordhides");
+    add_server(&r, &sshd, "box", None, AiPolicy::ReadOnlyAuto, "");
+    let out = call(&r, "oso_run", json!({ "host": "box", "command": format!("echo {TRAP_API}") }));
+    assert!(!out.to_string().contains("TRAP"), "{out}");
+    let raw = std::fs::read_to_string(r.handler.audit_path()).unwrap();
+    assert!(!raw.contains("TRAP"), "the log holds no vault secret: {raw}");
+    let acts = oso_core::audit::recent_activity(r.handler.audit_path(), 10);
+    assert!(acts.iter().any(|a| a.command.contains("[hidden by oso]") && a.preview.contains("[hidden by oso]")), "{acts:?}");
+}
+
+#[test]
+fn sudo_on_a_server_with_no_saved_sudo_password_says_so_instead_of_failing_quietly() {
+    let sshd = need_sshd!("sudonote");
+    let r = rig("sudonote");
+    let id = add_server(&r, &sshd, "bare", None, AiPolicy::ReadOnlyAuto, "");
+    person(&r.approvals, |_| Decision::Once);
+    // the command hides its own errors, as the real one did: the agent would see nothing wrong
+    let out = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -n true 2>/dev/null; echo after" }));
+    assert_eq!(out["ok"], true, "{out}");
+    let note = out["result"]["sudo_note"].as_str().expect("a note about sudo");
+    assert!(note.contains("no sudo password saved for bare") && note.contains("add the sudo password for bare in oso"), "{note}");
+    // a command that only names the word gets no note
+    let plain = call(&r, "oso_run", json!({ "host": "bare", "command": "echo sudo" }));
+    assert!(plain["result"].get("sudo_note").is_none(), "{plain}");
+    // with a password saved the note changes: it is saved, but oso does not type it into a command run this way
+    r.engine.lock().unwrap().vault_set(id, true, Some(TRAP_SUDO)).unwrap();
+    let saved = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -n true; echo after" }));
+    let note = saved["result"]["sudo_note"].as_str().expect("a note about sudo");
+    assert!(!note.contains("no sudo password saved") && note.contains("does not type a sudo password"), "{note}");
+    assert!(!saved.to_string().contains("TRAP"), "the password never comes back");
+    // the vault locked: it cannot tell, and says so
+    r.engine.lock().unwrap().vault_lock();
+    let locked = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -n true" }));
+    assert!(locked["result"]["sudo_note"].as_str().unwrap().contains("vault is locked"), "{locked}");
+}
+
+#[test]
 fn always_for_reads_changes_the_servers_policy_but_only_for_a_read_and_never_on_production() {
     let sshd = need_sshd!("always");
     let r = rig("always");

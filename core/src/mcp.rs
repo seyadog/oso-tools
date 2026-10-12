@@ -31,12 +31,12 @@ pub fn tools() -> Value {
         },
         {
             "name": "oso_run",
-            "description": "Run one command on a server through ssh, with no terminal, and get its stdout, stderr and exit code (each cut at 64 KB). oso logs in with the saved credentials for you. The user is asked to approve it, seeing the exact command, unless the server was set to let read-only commands through and this is one; production servers always ask. Pass the whole command line as one string. Prefer commands that only read. If the user says no, do not retry the same command.",
+            "description": "Run one command on a server through ssh, with no terminal, and get its stdout, stderr and exit code (each cut at 64 KB). oso logs in with the saved credentials for you. The user is asked to approve it, seeing the exact command, unless the server was set to let read-only commands through and this is one; production servers always ask. Pass the whole command line as one string. Prefer commands that only read. If the user says no, do not retry the same command. A command that uses sudo runs with no terminal, so a sudo that asks for a password cannot be answered; when a command uses sudo the answer carries a `sudo_note` saying whether a sudo password is saved for that server. Never hide a command's errors (2>/dev/null) when you need to know why it failed.",
             "inputSchema": { "type": "object", "properties": { "host": host, "command": { "type": "string", "description": "The command line, run by the remote shell." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Default 60." } }, "required": ["host", "command"], "additionalProperties": false },
         },
         {
             "name": "oso_sudo",
-            "description": "Run a command with sudo on THIS computer. oso types the user's sudo password; you never see it. The user is asked to approve the exact command each time. For sudo on a remote server, use oso_run with a command that starts with sudo instead.",
+            "description": "Run a command with sudo on THIS computer. oso types the user's sudo password; you never see it. The user is asked to approve the exact command each time. It is not for remote servers: a command with sudo on a server goes through oso_run, which does not type a sudo password (read its `sudo_note`).",
             "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "The command, without the word sudo; it runs as `sudo sh -c`." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["command"], "additionalProperties": false },
         },
         {

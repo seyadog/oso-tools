@@ -54,6 +54,7 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "help.open": "Mod+/",
   "secrets.open": "Mod+S",
   "local.new": "Mod+Shift+L",
+  "rpanel.toggle": "Mod+J",
 };
 
 /** What each action does, for the settings screen. */
@@ -86,6 +87,7 @@ export const LABELS: Record<string, string> = {
   "help.open": "Shortcuts and help (also ? when you are not typing)",
   "secrets.open": "Secrets",
   "local.new": "New local terminal (in the active profile)",
+  "rpanel.toggle": "Right panel (sessions and AI activity), open or closed",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tab.${i + 1}`, `Go to tab ${i + 1}  (9 goes to the last one)`])),
 };
 

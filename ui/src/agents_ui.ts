@@ -31,39 +31,60 @@ export interface QueueCtx {
   openInTerminal(r: ApprovalRequest): Promise<void>;
 }
 
-/** Shows requests one at a time, over whatever else is open (it never closes another dialog). */
+/**
+ * What agents ask, waiting for an answer. By default each one is shown in a window over everything else, one at a time
+ * (they queue). While the side panel is open (`inline`), no window is shown: the panel lists them and answers them.
+ */
 export class ApprovalQueue {
-  private waiting: ApprovalRequest[] = [];
-  private shown: ApprovalRequest | null = null;
+  private queue: ApprovalRequest[] = [];
   private root: HTMLElement | null = null;
+  private inline = false;
+  private listeners: (() => void)[] = [];
 
   constructor(private ctx: QueueCtx) {}
 
   push(r: ApprovalRequest) {
-    this.waiting.push(r);
-    if (!this.shown) this.next();
-    else this.draw();
+    this.queue.push(r);
+    this.changed();
   }
 
   get pending(): number {
-    return this.waiting.length + (this.shown ? 1 : 0);
+    return this.queue.length;
   }
 
-  private next() {
-    this.shown = this.waiting.shift() ?? null;
+  /** Everything waiting, oldest first. */
+  list(): ApprovalRequest[] {
+    return [...this.queue];
+  }
+
+  /** Called whenever something is added or answered. */
+  onChange(f: () => void) {
+    this.listeners.push(f);
+  }
+
+  /** True while another place (the side panel) shows and answers the requests, so no window is needed. */
+  setInline(on: boolean) {
+    if (this.inline === on) return;
+    this.inline = on;
     this.draw();
   }
 
-  private async answer(r: ApprovalRequest, d: ApprovalDecision) {
-    if (this.shown !== r) return;
-    this.shown = null;
+  private changed() {
+    this.draw();
+    this.listeners.forEach((f) => f());
+  }
+
+  /** Answers one request, from the window or from the panel. A request answered twice counts once. */
+  async answer(r: ApprovalRequest, d: ApprovalDecision) {
+    if (!this.queue.includes(r)) return;
+    this.queue = this.queue.filter((x) => x !== r);
+    this.changed();
     if (d === "terminal") await this.ctx.openInTerminal(r).catch(() => {});
     await this.ctx.be.approvalAnswer(r.id, d).catch(() => false);
-    this.next();
   }
 
   private draw() {
-    const r = this.shown;
+    const r = this.inline ? undefined : this.queue[0];
     if (!r) {
       this.root?.remove();
       this.root = null;
@@ -83,7 +104,7 @@ export class ApprovalQueue {
     const deny = btn("", "Deny", "deny", "approval-deny");
     const actions = el("div", { class: "actions" }, btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"));
     if (r.can_remember) actions.prepend(btn("", "Always for read-only commands on this host", "always_read", "approval-always"));
-    const more = this.waiting.length ? el("div", { class: "hint" }, `${this.waiting.length} more waiting after this one`) : null;
+    const more = this.queue.length > 1 ? el("div", { class: "hint" }, `${this.queue.length - 1} more waiting after this one`) : null;
     const box = el(
       "div",
       { class: `modal approval${r.production ? " prod" : ""}`, role: "alertdialog", "aria-label": actionTitle(r) },

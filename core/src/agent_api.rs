@@ -18,6 +18,7 @@ use crate::store::{EnvKind, Server};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -37,10 +38,14 @@ pub struct Handler {
     audit: Audit,
     /// The program that runs a command as root (the tests give another one).
     pub sudo_program: String,
+    /// Numbers the requests (the time it started, in ms, then one more each), so that the lines of one request in
+    /// the audit log can be put together.
+    next_id: AtomicU64,
 }
 
 /// Who is asking, from where.
 struct Ctx {
+    id: u64,
     pane: u64,
     title: String,
     agent: String,
@@ -66,6 +71,25 @@ fn ok(v: Value) -> Value {
 
 fn no(msg: impl Into<String>) -> Value {
     json!({ "ok": false, "error": msg.into() })
+}
+
+fn policy_word(p: AiPolicy) -> &'static str {
+    match p {
+        AiPolicy::ReadOnlyAuto => "read_only_auto",
+        AiPolicy::Ask => "ask",
+        AiPolicy::Blocked => "blocked",
+    }
+}
+
+/// Why a request had to ask, as the start of the sentence that says how it ended.
+fn why_asked(t: &Target) -> &'static str {
+    if t.env == Some(EnvKind::Production) {
+        "Production always asks, whatever the server's policy says"
+    } else if t.policy == AiPolicy::ReadOnlyAuto {
+        "The server lets only plain reads through, and this is not one"
+    } else {
+        "The server's policy is \u{201c}ask\u{201d}"
+    }
 }
 
 fn env_word(e: Option<EnvKind>) -> &'static str {
@@ -194,7 +218,8 @@ struct Target {
 impl Handler {
     pub fn new(engine: Arc<Mutex<Engine>>, approvals: Arc<Approvals>) -> Handler {
         let path = engine.lock().map(|e| e.store_path().with_file_name("audit.jsonl")).unwrap_or_default();
-        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into() }
+        let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1).max(1);
+        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into(), next_id: AtomicU64::new(start) }
     }
 
     pub fn audit_path(&self) -> &std::path::Path {
@@ -204,7 +229,7 @@ impl Handler {
     /// Answers one request. Never panics on a bad one: the answer says what was wrong.
     pub fn handle(&self, call: AgentCall) -> Value {
         let agent = call.body.get("agent").and_then(Value::as_str).unwrap_or("").chars().take(60).collect();
-        let ctx = Ctx { pane: call.sid, title: call.title, agent };
+        let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, title: call.title, agent };
         let tool = call.body.get("tool").and_then(Value::as_str).unwrap_or("");
         let args = call.body.get("args").cloned().unwrap_or(Value::Null);
         match tool {
@@ -223,9 +248,24 @@ impl Handler {
     }
 
     fn log(&self, ctx: &Ctx, action: &str, host: &str, command: &str, decision: &str, extra: impl FnOnce(&mut Entry)) {
-        let mut e = Entry { pane: ctx.pane, agent: ctx.agent.clone(), action: action.into(), host: host.into(), command: command.chars().take(2000).collect(), decision: decision.into(), ..Default::default() };
+        let mut e = Entry { id: ctx.id, pane: ctx.pane, agent: ctx.agent.clone(), action: action.into(), host: host.into(), command: command.chars().take(2000).collect(), decision: decision.into(), ..Default::default() };
         extra(&mut e);
+        // the log is shown in the window: whatever the agent put in the command or got back is blanked of the vault's secrets
+        let hide = self.engine().vault.values_to_hide();
+        for field in [&mut e.command, &mut e.note, &mut e.preview, &mut e.reason] {
+            *field = redact(field, &hide);
+        }
         self.audit.log(e);
+    }
+
+    /// `log` for a request that had a server policy applied to it.
+    #[allow(clippy::too_many_arguments)]
+    fn log_why(&self, ctx: &Ctx, action: &str, t: &Target, command: &str, decision: &str, reason: &str, extra: impl FnOnce(&mut Entry)) {
+        self.log(ctx, action, &t.name, command, decision, |e| {
+            e.policy = policy_word(t.policy).into();
+            e.reason = reason.into();
+            extra(e);
+        });
     }
 
     // ------------------------------------------------------------ reading
@@ -327,6 +367,19 @@ impl Handler {
         Ok(Target { id: s.id, name: s.name.clone(), policy: s.ai_policy, env: s.env_kind })
     }
 
+    /// What to tell an agent whose command uses `sudo` on a server: oso runs it with no terminal, so a sudo that asks
+    /// for a password cannot be answered, and the agent must not be left guessing why the sudo part came out empty.
+    fn sudo_note(&self, server_id: u64, name: &str) -> Option<String> {
+        let mut e = self.engine();
+        if !e.vault.is_unlocked() {
+            return Some(format!("This command uses sudo. oso's vault is locked, so it cannot tell whether a sudo password is saved for {name}: ask the user to unlock it in oso."));
+        }
+        if e.vault.get(server_id, crate::vault::Kind::Sudo).is_none() {
+            return Some(format!("This command uses sudo, and there is no sudo password saved for {name}. Without one, sudo only works if the server lets this user run it without a password; if the sudo part failed or printed nothing, that is why. Ask the user to add the sudo password for {name} in oso (edit the server), or to run it themselves in a terminal. Do not ask them to type the password to you."));
+        }
+        Some(format!("This command uses sudo. oso does not type a sudo password into a command run this way: it works only if {name} lets this user run sudo without a password. If it failed for that reason, ask the user to run it in a terminal of oso, where oso types the saved password."))
+    }
+
     fn run(&self, ctx: &Ctx, args: &Value) -> Value {
         let (Some(host), Some(command)) = (args.get("host").and_then(Value::as_str), args.get("command").and_then(Value::as_str)) else {
             return no("oso_run needs `host` and `command`.");
@@ -340,16 +393,18 @@ impl Handler {
             Err(m) => return no(m),
         };
         let production = t.env == Some(EnvKind::Production);
+        let sudo_note = policy::uses_sudo(command).then(|| self.sudo_note(t.id, &t.name)).flatten();
         match policy::decide(t.policy, t.env, command) {
             Verdict::Block(why) => {
-                self.log(ctx, "run", &t.name, command, "blocked", |_| {});
+                self.log_why(ctx, "run", &t, command, "blocked", "The server's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.", |_| {});
                 return no(why);
             }
-            Verdict::Auto => self.log(ctx, "run", &t.name, command, "allowed_without_asking", |_| {}),
+            Verdict::Auto => self.log_why(ctx, "run", &t, command, "allowed_without_asking", "Automatic: the server's policy is \u{201c}read-only auto\u{201d} and this command only reads.", |_| {}),
             Verdict::Ask => {
                 let can_remember = !production && policy::is_read_only(command);
+                let asked = why_asked(&t);
                 match self.ask(ctx, "run", &t.name, command, production, can_remember) {
-                    Decision::Once => self.log(ctx, "run", &t.name, command, "allowed", |_| {}),
+                    Decision::Once => self.log_why(ctx, "run", &t, command, "allowed", &format!("{asked}: you allowed it once."), |_| {}),
                     Decision::AlwaysRead if can_remember => {
                         // the window cannot widen what is allowed: the rule is checked here too
                         {
@@ -360,15 +415,15 @@ impl Handler {
                                 let _ = e.store.save();
                             }
                         }
-                        self.log(ctx, "run", &t.name, command, "allowed_and_remembered_for_reads", |_| {});
+                        self.log_why(ctx, "run", &t, command, "allowed_and_remembered_for_reads", &format!("{asked}: you allowed it and chose \u{201c}always for read-only commands\u{201d} on this server."), |_| {});
                     }
-                    Decision::AlwaysRead => self.log(ctx, "run", &t.name, command, "allowed", |_| {}),
+                    Decision::AlwaysRead => self.log_why(ctx, "run", &t, command, "allowed", &format!("{asked}: you allowed it once."), |_| {}),
                     Decision::Terminal => {
-                        self.log(ctx, "run", &t.name, command, "denied", |e| e.note = "the person runs it themselves".into());
+                        self.log_why(ctx, "run", &t, command, "denied", &format!("{asked}: you chose to run it yourself in a terminal."), |e| e.note = "the person runs it themselves".into());
                         return no("The user chose to run this command themselves, in a terminal. Do not try it again; wait for what they tell you.");
                     }
                     Decision::Deny => {
-                        self.log(ctx, "run", &t.name, command, "denied", |_| {});
+                        self.log_why(ctx, "run", &t, command, "denied", &format!("{asked}: you denied it (or nobody answered in time)."), |_| {});
                         return no("The user did not allow this command.");
                     }
                 }
@@ -398,22 +453,27 @@ impl Handler {
         let result = if needs_prompt { run_in_pty(opts, timeout) } else { run_plain(opts, timeout) };
         match result {
             Err(e) => {
-                self.log(ctx, "run", &t.name, command, "failed", |x| x.note = e.chars().take(200).collect());
+                self.log_why(ctx, "run", &t, command, "failed", "", |x| x.note = e.chars().take(200).collect());
                 no(format!("Could not run it: {e}"))
             }
             Ok(c) => {
                 let (stdout, t1) = cap(redact(&c.stdout, &hide));
                 let (stderr, t2) = cap(redact(&c.stderr, &hide));
-                self.log(ctx, "run", &t.name, command, "finished", |x| {
+                self.log_why(ctx, "run", &t, command, "finished", "", |x| {
                     x.exit_code = c.code;
                     x.bytes_out = Some(stdout.len() + stderr.len());
+                    x.preview = crate::audit::preview_of(&stdout, &stderr);
                     x.note = format!("{} ms{}", started.elapsed().as_millis(), if c.timed_out { ", timed out" } else { "" });
                 });
-                ok(json!({
+                let mut answer = json!({
                     "host": t.name, "exit_code": c.code, "stdout": stdout, "stderr": stderr,
                     "truncated": t1 || t2, "timed_out": c.timed_out,
                     "note": if needs_prompt { "This login needed a typed password, so stdout and stderr come mixed in `stdout`." } else { "" },
-                }))
+                });
+                if let Some(why) = sudo_note {
+                    answer["sudo_note"] = json!(why);
+                }
+                ok(answer)
             }
         }
     }
@@ -435,13 +495,16 @@ impl Handler {
             }
         }
         match self.ask(ctx, "sudo", "this computer", &format!("sudo {command}"), false, false) {
-            Decision::Once | Decision::AlwaysRead => self.log(ctx, "sudo", "this computer", command, "allowed", |_| {}),
+            Decision::Once | Decision::AlwaysRead => self.log(ctx, "sudo", "this computer", command, "allowed", |e| e.reason = "sudo always asks: you allowed it once.".into()),
             Decision::Terminal => {
-                self.log(ctx, "sudo", "this computer", command, "denied", |e| e.note = "the person runs it themselves".into());
+                self.log(ctx, "sudo", "this computer", command, "denied", |e| {
+                    e.note = "the person runs it themselves".into();
+                    e.reason = "sudo always asks: you chose to run it yourself in a terminal.".into();
+                });
                 return no("The user chose to run this themselves, in a terminal. Do not try it again; wait for what they tell you.");
             }
             Decision::Deny => {
-                self.log(ctx, "sudo", "this computer", command, "denied", |_| {});
+                self.log(ctx, "sudo", "this computer", command, "denied", |e| e.reason = "sudo always asks: you denied it (or nobody answered in time).".into());
                 return no("The user did not allow this command.");
             }
         }
@@ -490,10 +553,10 @@ impl Handler {
         };
         let shown = wanted.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
         match self.ask(ctx, "run_with", "this computer", &format!("{command}    [with the secrets: {shown}]"), false, false) {
-            Decision::Once | Decision::AlwaysRead => self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "allowed", |_| {}),
+            Decision::Once | Decision::AlwaysRead => self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "allowed", |e| e.reason = "Handing secrets to a command always asks: you allowed it once.".into()),
             Decision::Terminal => return no("The user chose to run this themselves, in a terminal. Do not try it again."),
             Decision::Deny => {
-                self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "denied", |_| {});
+                self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "denied", |e| e.reason = "Handing secrets to a command always asks: you denied it (or nobody answered in time).".into());
                 return no("The user did not allow this command.");
             }
         }
@@ -531,6 +594,7 @@ impl Handler {
                 self.log(ctx, action, host, command, "finished", |x| {
                     x.exit_code = c.code;
                     x.bytes_out = Some(stdout.len() + stderr.len());
+                    x.preview = crate::audit::preview_of(&stdout, &stderr);
                 });
                 ok(json!({ "exit_code": c.code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": c.timed_out }))
             }
@@ -560,11 +624,11 @@ impl Handler {
             match self.ask(ctx, "tunnel", &server_name, &desc, production, false) {
                 Decision::Once | Decision::AlwaysRead => {}
                 _ => {
-                    self.log(ctx, "tunnel", &server_name, &desc, "denied", |_| {});
+                    self.log(ctx, "tunnel", &server_name, &desc, "denied", |e| e.reason = "Starting a tunnel always asks: you denied it (or nobody answered in time).".into());
                     return no("The user did not allow this.");
                 }
             }
-            self.log(ctx, "tunnel", &server_name, &desc, "allowed", |_| {});
+            self.log(ctx, "tunnel", &server_name, &desc, "allowed", |e| e.reason = "Starting a tunnel always asks: you allowed it.".into());
             if let Err(e) = self.engine().tunnel_start(server_id, forward_id, true) {
                 return no(format!("Could not start it: {e:?}"));
             }
@@ -580,7 +644,7 @@ impl Handler {
             }
         }
         self.engine().tunnel_stop(server_id, forward_id);
-        self.log(ctx, "tunnel", &server_name, &desc, "allowed_without_asking", |_| {});
+        self.log(ctx, "tunnel", &server_name, &desc, "allowed_without_asking", |e| e.reason = "Automatic: stopping a tunnel does not ask.".into());
         ok(json!({ "tunnel": name, "state": "off" }))
     }
 }
@@ -645,11 +709,11 @@ mod tests {
 
     #[test]
     fn the_label_says_who_and_where() {
-        let c = Ctx { pane: 2, title: "acme-api".into(), agent: "claude-code".into() };
+        let c = Ctx { id: 1, pane: 2, title: "acme-api".into(), agent: "claude-code".into() };
         assert_eq!(c.label(), "Claude in acme-api, pane 2");
-        let c = Ctx { pane: 3, title: "Local".into(), agent: "opencode".into() };
+        let c = Ctx { id: 1, pane: 3, title: "Local".into(), agent: "opencode".into() };
         assert_eq!(c.label(), "Opencode in Local, pane 3");
-        let c = Ctx { pane: 1, title: "x".into(), agent: String::new() };
+        let c = Ctx { id: 1, pane: 1, title: "x".into(), agent: String::new() };
         assert_eq!(c.label(), "An AI agent in x, pane 1");
     }
 

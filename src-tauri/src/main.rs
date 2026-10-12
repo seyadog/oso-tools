@@ -197,6 +197,13 @@ fn audit_recent(state: State<AppState>, limit: usize) -> Res<Vec<Value>> {
     Ok(lines[lines.len().saturating_sub(limit.min(500))..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect())
 }
 
+/// What agents asked, one entry per request (decided how, and how it ended), oldest first: the activity panel.
+#[tauri::command]
+fn agent_activity(state: State<AppState>, limit: usize) -> Res<Vec<oso_core::audit::Activity>> {
+    let path = engine!(state).store_path().with_file_name("audit.jsonl");
+    Ok(oso_core::audit::recent_activity(&path, limit.clamp(1, 300)))
+}
+
 fn agent_of(name: &str) -> Res<oso_core::integration::Agent> {
     oso_core::integration::Agent::parse(name).ok_or_else(|| "unknown agent".to_string())
 }
@@ -624,6 +631,7 @@ fn main() {
             profile_set_proxy,
             approval_answer,
             audit_recent,
+            agent_activity,
             integration_status,
             integration_plan,
             integration_apply,
