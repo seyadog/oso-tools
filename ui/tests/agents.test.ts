@@ -18,12 +18,24 @@ describe("what an agent asks", () => {
   });
 });
 
-import { QUIET_MS, doneByQuiet } from "../src/agents";
+import { MIN_WORK_MS, QUIET_MS, doneByQuiet, workStart } from "../src/agents";
 describe("an agent without hooks", () => {
   it("is done when it worked and then stayed quiet", () => {
     expect(doneByQuiet(undefined, 1000, 100000)).toBe(false);
     expect(doneByQuiet(5, 100000 - QUIET_MS + 1, 100000)).toBe(false);
     expect(doneByQuiet(5, 100000 - QUIET_MS, 100000)).toBe(true);
     expect(doneByQuiet(5, 0, 100000)).toBe(false);
+  });
+});
+
+describe("a blink of output is not work", () => {
+  it("needs a long enough run before silence means done", () => {
+    expect(doneByQuiet(5, 1, 100000, MIN_WORK_MS - 1)).toBe(false);
+    expect(doneByQuiet(5, 1, 100000, MIN_WORK_MS)).toBe(true);
+  });
+  it("a silence longer than the quiet time starts a new run", () => {
+    expect(workStart(undefined, undefined, 50)).toBe(50);
+    expect(workStart(10, 40, 50)).toBe(10);
+    expect(workStart(10, 40, 40 + QUIET_MS + 1)).toBe(40 + QUIET_MS + 1);
   });
 });

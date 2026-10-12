@@ -21,6 +21,8 @@ export const DEFAULT_SOUNDS: SoundSettings = { enabled: true, volume: 0.7, finis
 
 /** One agent (or watched terminal) does not sound more often than this. */
 export const MIN_GAP_MS = 5000;
+/** "Finished" is the one that was repeating: one per terminal per minute is plenty. */
+export const FINISHED_GAP_MS = 60000;
 
 const KEY = "oso.sound";
 
@@ -101,7 +103,7 @@ export class SoundPlayer {
 
   /** An agent or a terminal calls for you. `lookingAtIt`: the window is in front and that tab is on show. */
   async notify(event: SoundEvent, sid: number, lookingAtIt: boolean, now = Date.now()) {
-    if (!shouldPlay({ enabled: this.settings.enabled, lookingAtIt, last: this.last.get(sid), now })) return;
+    if (!shouldPlay({ enabled: this.settings.enabled, lookingAtIt, last: this.last.get(sid), now, gap: event === "finished" ? FINISHED_GAP_MS : MIN_GAP_MS })) return;
     this.last.set(sid, now);
     await this.play(event, sid);
   }

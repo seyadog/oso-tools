@@ -19,7 +19,7 @@ import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel } from "./rpanel";
-import { AgentState, AgentStatus, doneByQuiet, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { AgentState, AgentStatus, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
 import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
@@ -935,6 +935,8 @@ export class App {
   private agents: AgentStatus[] = [];
   /** When an agent without hooks was last seen producing output (so that its silence afterwards means it is done). */
   private workedAt = new Map<number, number>();
+  /** When the present run of work began (see `workStart`). */
+  private workBegan = new Map<number, number>();
   /** The state each agent was in the last time, so that only a change is news. */
   private agentSeen = new Map<number, AgentState>();
 
@@ -955,7 +957,10 @@ export class App {
     // looking at a tab whose agent finished calms it down
     const on = this.ws.screen.active;
     if (on != null && document.hasFocus() && this.agents.some((a) => a.sid === on && a.state === "finished")) void this.be.agentAck(on).catch(() => {});
-    if (on != null && document.hasFocus()) this.workedAt.delete(on);
+    if (on != null && document.hasFocus()) {
+      this.workedAt.delete(on);
+      this.workBegan.delete(on);
+    }
     this.renderTopbar();
     this.applyAlerts();
     this.rpanel.render();
@@ -969,8 +974,11 @@ export class App {
       let e = effectiveState(a, guess);
       // no hooks to say "finished": it worked on screen, then went quiet
       if (a.source === "process") {
-        if (e.guessed && e.state === "working") this.workedAt.set(a.sid, Date.now());
-        else if (e.state === "idle" && doneByQuiet(this.workedAt.get(a.sid), pane?.lastOutputAt ?? 0, Date.now())) e = { state: "finished", guessed: true };
+        const now = Date.now();
+        if (e.guessed && e.state === "working") {
+          this.workBegan.set(a.sid, workStart(this.workBegan.get(a.sid), this.workedAt.get(a.sid), now));
+          this.workedAt.set(a.sid, now);
+        } else if (e.state === "idle" && doneByQuiet(this.workedAt.get(a.sid), pane?.lastOutputAt ?? 0, now, (this.workedAt.get(a.sid) ?? 0) - (this.workBegan.get(a.sid) ?? 0))) e = { state: "finished", guessed: true };
         else if (e.state === "needs_you") this.workedAt.delete(a.sid);
       }
       const space = this.ws.tabs.get(a.sid)?.space;

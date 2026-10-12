@@ -1358,7 +1358,7 @@ check("the Agents tab lists each agent with its folder, branch and state", rows1
 check("who needs you comes first, the one waiting longest on top", rows16.map((r) => r.state).join() === "needs_you,needs_you,working" && rows16[0].sid === t2 && rows16[1].sid === t3);
 check("the tab says which tab it is, with a state mark of its own", (await page.textContent(`[data-agent-row="${t1}"]`)).includes("tab 1") && (await page.$$(".tab .adot")).length === 3 && (await page.getAttribute(`.tab[data-sid="${t2}"] .adot`, "data-state")) === "needs_you");
 check("the Agents tab carries the number of those who need you", (await page.textContent('[data-rtab="agents"] .pending-n')) === "2");
-check("they are in a group of their own: no Space", (await page.textContent('[data-section="agents"] .rp-space')) === "No Space");
+check("they are in a group of their own: no Space", (await page.$$eval('[data-section="agents"] .rp-space', (h) => h.length)) >= 1);
 await shot("11a-agents");
 await page.click(`[data-agent-row="${t3}"]`);
 await settle(200);

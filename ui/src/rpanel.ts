@@ -389,29 +389,44 @@ export class RightPanel {
     add.onclick = () => this.ctx.newAgent();
     list.append(el("div", { class: "rp-bar" }, add));
     if (!this.agentRows.length) list.append(el("div", { class: "rp-empty" }, "No agent is running. Start one from a Space (New agent), or run claude, opencode or codex in a terminal of oso: it shows up here with what it is doing."));
-    let space: string | null = null;
-    for (const r of this.agentRows) {
-      if (r.space !== space) {
-        space = r.space;
-        list.append(el("h4", { class: "rp-space" }, r.space || "No Space"));
-      }
-      const meta = [r.folder, r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
-      const row = el(
-        "div",
-        { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
-        el("span", { class: "sdot" }),
-        el("div", { class: "txt" }, el("b", {}, r.name, el("span", { class: "st" }, STATE_WORD[r.state])), el("small", {}, r.where), meta ? el("small", {}, meta) : null),
-      );
-      row.onclick = () => this.ctx.focus(r.sid);
-      row.onkeydown = (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          this.ctx.focus(r.sid);
-        }
-      };
-      list.append(row);
+    // two groups: the ones doing something (or asking for you) and the ones standing there
+    const busy = (r: AgentRow) => r.state === "needs_you" || r.state === "working";
+    const groups: [string, string, AgentRow[]][] = [
+      ["busy", "Working", this.agentRows.filter(busy)],
+      ["parked", "Standing by", this.agentRows.filter((r) => !busy(r))],
+    ];
+    for (const [id, title, rows] of groups) {
+      if (!rows.length) continue;
+      list.append(el("h4", { class: "rp-space", "data-group": id }, title, el("span", { class: "n" }, String(rows.length))));
+      for (const r of rows) list.append(this.agentRow(r, now));
     }
     return el("section", { class: "rp-sec rp-agents", "data-section": "agents" }, list);
+  }
+
+  private agentRow(r: AgentRow, now: number): HTMLElement {
+    const repo = r.folder || r.where;
+    const meta = [r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
+    const row = el(
+      "div",
+      { class: `rp-agent ${r.state}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
+      el("span", { class: "sdot" }),
+      el(
+        "div",
+        { class: "txt" },
+        el("b", { class: "repo" }, repo, el("span", { class: "st" }, STATE_WORD[r.state])),
+        el("small", { class: "who" }, r.name, r.space ? ` · ${r.space}` : ""),
+        el("small", {}, r.where),
+        meta ? el("small", {}, meta) : null,
+      ),
+    );
+    row.onclick = () => this.ctx.focus(r.sid);
+    row.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        this.ctx.focus(r.sid);
+      }
+    };
+    return row;
   }
 
   private activitySection(pending: ApprovalRequest[], nowS: number): HTMLElement {

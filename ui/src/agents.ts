@@ -48,8 +48,16 @@ export function effectiveState(s: AgentStatus, guess: "needs_you" | "working" | 
 export const QUIET_MS = 6000;
 
 /** Without hooks nothing says "finished": an agent that worked (output was arriving) and then stayed silent is done. */
-export function doneByQuiet(workedAt: number | undefined, lastOutputAt: number, now: number): boolean {
-  return workedAt !== undefined && lastOutputAt > 0 && now - lastOutputAt >= QUIET_MS;
+export function doneByQuiet(workedAt: number | undefined, lastOutputAt: number, now: number, workedFor = Infinity): boolean {
+  return workedAt !== undefined && lastOutputAt > 0 && now - lastOutputAt >= QUIET_MS && workedFor >= MIN_WORK_MS;
+}
+
+/** A blink of output (a spinner, a clock, a redraw) is not work: it must go on for this long before silence means "done". */
+export const MIN_WORK_MS = 15000;
+
+/** When did this run of work start? A silence longer than `QUIET_MS` between two sightings starts a new run. */
+export function workStart(start: number | undefined, lastSeen: number | undefined, now: number): number {
+  return start === undefined || lastSeen === undefined || now - lastSeen > QUIET_MS ? now : start;
 }
 
 /** An agent as the attention queue sees it. */
