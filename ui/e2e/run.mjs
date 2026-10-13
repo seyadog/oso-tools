@@ -1156,7 +1156,7 @@ const closedWidth = await stageWidth();
 check("the quick look at the AI agents is a thin strip on the far right, folded at first", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 30 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().left)) >= (await page.$eval("#main", (e) => e.getBoundingClientRect().right)) - 1);
 await page.click('[data-act="mini-toggle"]');
 await settle(150);
-check("its arrow opens a small list, and the terminals give up room only for it", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) > 40 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 80);
+check("its arrow opens a small list, and the terminals give up room only for it", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) > 30 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 80);
 await page.click('[data-act="mini-toggle"]');
 await settle(150);
 check("and folds again", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 30);

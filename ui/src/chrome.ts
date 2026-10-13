@@ -16,8 +16,8 @@ export const SECTIONS: { key: Exclude<Section, "">; label: string; icon: string;
 
 export const RAIL_WIDTH = 48;
 /** The quick look at the AI agents, folded (only an arrow) and open (names). */
-export const MINI_FOLDED = 12;
-export const MINI_OPEN = 52;
+export const MINI_FOLDED = 10;
+export const MINI_OPEN = 40;
 export const LEFT_MIN = 200;
 export const LEFT_MAX = 480;
 export const LEFT_DEFAULT = 264;

@@ -570,7 +570,7 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 #mini .adot { width: 6px; height: 6px; border-radius: 50%; flex: none; margin: 0; box-shadow: none; animation: none; background: var(--muted); }
 #mini .adot[data-state="working"] { background: var(--green); }
 #mini .adot[data-state="needs_you"] { background: var(--orange); }
-#mini .mini-row { display: flex; align-items: center; gap: 3px; padding: 2px 4px; text-align: left; min-width: 0; color: var(--dim); }
+#mini .mini-row { display: flex; align-items: center; justify-content: center; padding: 2px 2px; text-align: left; min-width: 0; color: var(--dim); }
 #mini .mini-row:hover { background: var(--hover); }
 #mini .mini-name { font-weight: 700; overflow: hidden; white-space: nowrap; color: var(--muted); }
 #mini .mini-name[data-state="working"] { color: var(--green); }
