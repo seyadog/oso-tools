@@ -219,3 +219,14 @@ describe("the address of a tunnel", () => {
     expect(tunnelUrl({ ...f, kind: "dynamic" })).toBeNull();
   });
 });
+
+describe("closed terminals", () => {
+  it("stay in the list once per server and folder, and not while one is open", async () => {
+    const { rememberClosed, notRunning } = await import("../src/agents");
+    let l = rememberClosed([], { server: 3, title: "web1", cwd: "", folder: "web1", space: null }, 1000);
+    l = rememberClosed(l, { server: 3, title: "web1", cwd: "", folder: "web1", space: null }, 2000);
+    l = rememberClosed(l, { server: 0, title: "Local", cwd: "/a", folder: "a", space: null }, 3000);
+    expect(l.map((s) => s.server)).toEqual([0, 3]);
+    expect(notRunning(l, [{ kind: "term", cwd: "", server: 3 }]).map((s) => s.server)).toEqual([0]);
+  });
+});

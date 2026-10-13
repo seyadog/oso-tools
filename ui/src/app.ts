@@ -19,7 +19,7 @@ import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel, agentColor } from "./rpanel";
-import { AgentState, AgentStatus, SavedAgent, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { AgentState, AgentStatus, SavedAgent, baseName, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, rememberClosed, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
 import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
@@ -154,7 +154,7 @@ export class App {
       be: this.be,
       queue: this.approvals,
       agents: () => this.agentRows(),
-      savedAgents: () => notRunning(this.savedAgents, this.agents),
+      savedAgents: () => notRunning(this.savedAgents, [...this.agents.map((a) => ({ kind: a.kind, cwd: a.cwd })), ...[...this.ws.tabs.values()].filter((t) => !t.dead).map((t) => ({ kind: "term", cwd: t.cwd ?? "", server: t.serverId }))]),
       resumeAgent: (s) => void this.resumeAgent(s),
       forgetAgent: (s) => this.forgetAgent(s),
       newAgent: () => this.newAgent(null),
@@ -872,6 +872,12 @@ export class App {
     this.opened.delete(sid);
     this.watches.delete(sid);
     this.alerts.delete(sid);
+    const closing = this.ws.tabs.get(sid);
+    if (kill && closing && !this.agents.some((a) => a.sid === sid)) {
+      const server = this.tree.servers.find((x) => x.id === closing.serverId);
+      this.savedAgents = rememberClosed(this.savedAgents, { server: closing.serverId, title: closing.title, cwd: closing.cwd ?? "", folder: closing.cwd ? baseName(closing.cwd) : (server?.name ?? closing.title), space: closing.space ?? null }, Date.now());
+      storeSavedAgents(this.savedAgents);
+    }
     this.ws.closeTab(sid);
     pane?.dispose();
     this.panes.delete(sid);
@@ -984,6 +990,13 @@ export class App {
   /** A remembered agent: a terminal in its folder (and Space) and the agent started again. */
   private async resumeAgent(s: SavedAgent) {
     const sp = s.space != null ? (this.spaces.find((x) => x.id === s.space) ?? null) : null;
+    if (s.kind === "term") {
+      const server = s.server ?? LOCAL;
+      if (server !== LOCAL && !this.tree.servers.some((x) => x.id === server)) return void toast(`“${s.name}” is not in your servers any more`);
+      const t = await this.openIn(sp, server, server === LOCAL ? s.cwd : "");
+      if (t && s.name) this.ws.setTitle(t.sid, s.name);
+      return;
+    }
     const kind = (await this.be.agentKinds().catch(() => [] as AgentKindRow[])).find((k) => k.id === s.kind);
     const info = await this.openIn(sp, LOCAL, s.cwd);
     if (!info) return;
@@ -993,7 +1006,7 @@ export class App {
   }
 
   private forgetAgent(s: SavedAgent) {
-    this.savedAgents = this.savedAgents.filter((x) => !(x.kind === s.kind && x.cwd === s.cwd));
+    this.savedAgents = this.savedAgents.filter((x) => !(x.kind === s.kind && x.cwd === s.cwd && x.server === s.server));
     storeSavedAgents(this.savedAgents);
     this.rpanel.render();
   }
