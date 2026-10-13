@@ -131,7 +131,7 @@ export class App {
   // ------------------------------------------------------------ start
 
   async start() {
-    this.root.append(this.rail, this.side, this.miniEl, this.main);
+    this.root.append(this.rail, this.side, this.main, this.miniEl);
     this.topbar.append(this.tabsEl, this.toolsEl);
     this.main.append(this.topbar, this.stage);
     this.stage.append(this.hint);
@@ -1456,7 +1456,7 @@ export class App {
     clear(m);
     const needs = rows.filter((r) => r.state === "needs_you").length;
     const arrow = el("button", { class: "mini-arrow", type: "button", "data-act": "mini-toggle", "aria-expanded": String(this.miniOpen), title: `${this.miniOpen ? "Fold" : "Quick look at"} the AI agents${rows.length ? `: ${rows.length} running` : ""}${pending ? `, ${pending} waiting for you` : ""}` });
-    arrow.append(icon(this.miniOpen ? "chevron-left" : "chevron-right", 12));
+    arrow.append(icon(this.miniOpen ? "chevron-right" : "chevron-left", 10));
     arrow.onclick = () => {
       this.miniOpen = !this.miniOpen;
       storeSet("oso.ui.mini", this.miniOpen ? "open" : "closed");
@@ -1471,13 +1471,13 @@ export class App {
       for (const r of rows.slice(0, 8)) m.append(el("span", { class: "mini-dot adot", "data-state": r.state, style: `--ag: ${agentColor(r.sid)}`, title: `${r.folder || r.name}: ${STATE_WORD[r.state]}` }));
       return;
     }
-    if (!rows.length) m.append(el("div", { class: "mini-empty" }, "No agent running"));
+    if (!rows.length) m.append(el("div", { class: "mini-empty", title: "No agent running" }, "–"));
     for (const r of rows) {
-      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "adot", "data-state": r.state }), el("span", { class: "mini-name", style: `color:${agentColor(r.sid)}` }, r.folder || r.name));
+      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "adot", "data-state": r.state }), el("span", { class: "mini-name", style: `color:${agentColor(r.sid)}` }, (r.folder || r.name).slice(0, 5)));
       row.onclick = () => this.focusSession(r.sid);
       m.append(row);
     }
-    if (pending) m.append(el("div", { class: "mini-wait" }, `${pending} waiting for you`));
+    if (pending) m.append(el("div", { class: "mini-wait", title: `${pending} waiting for you` }, `${pending}!`));
   }
 
   /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */

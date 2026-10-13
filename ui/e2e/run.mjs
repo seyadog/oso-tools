@@ -1153,10 +1153,10 @@ const stageWidth = () => page.$eval("#stage", (e) => e.getBoundingClientRect().w
 check("the AI agents panel is closed at first, with its button in the rail and the right edge free", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$('[data-rail="agents"]')) !== null && (await page.$("#rtoggle")) === null);
 check("the button says what it is and its shortcut", (await page.$eval('[data-rail="agents"]', (b) => b.title)).includes("AI agents"));
 const closedWidth = await stageWidth();
-check("the quick look at the AI agents is a thin strip beside the left panel, folded at first", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 30 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().left)) >= (await page.$eval("#side", (e) => e.getBoundingClientRect().right)) - 1);
+check("the quick look at the AI agents is a thin strip on the far right, folded at first", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 30 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().left)) >= (await page.$eval("#main", (e) => e.getBoundingClientRect().right)) - 1);
 await page.click('[data-act="mini-toggle"]');
 await settle(150);
-check("its arrow opens a small list, and the terminals give up room only for it", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) > 100 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 160 && (await page.textContent("#mini")).includes("No agent running"));
+check("its arrow opens a small list, and the terminals give up room only for it", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) > 40 && (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 80);
 await page.click('[data-act="mini-toggle"]');
 await settle(150);
 check("and folds again", (await page.$eval("#mini", (e) => e.getBoundingClientRect().width)) < 30);
