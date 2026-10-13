@@ -18,7 +18,7 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
-import { AgentRow, RightPanel, STATE_WORD, agentColor } from "./rpanel";
+import { AgentRow, RightPanel, agentColor } from "./rpanel";
 import { AgentState, AgentStatus, SavedAgent, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
@@ -26,7 +26,7 @@ import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
 import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
-import { LEFT_DEFAULT, MINI_FOLDED, MINI_OPEN, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
+import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
@@ -90,10 +90,6 @@ export class App {
   private approvals!: ApprovalQueue;
   /** The panel on the right: open sessions and what agents asked. */
   private rpanel!: RightPanel;
-  /** The quick look at the AI agents (only names and states) beside the left panel, folded or open. */
-  private miniEl = el("aside", { id: "mini", "aria-label": "AI agents, quick look" });
-  private miniOpen = store("oso.ui.mini") === "open";
-  private miniSig = "";
   /** When the window opened each session (ms), kept in the session's meta so it survives a restart of the window. */
   private opened = new Map<Id, number>();
   /** Who is using this computer, for the label of a local terminal. */
@@ -131,7 +127,7 @@ export class App {
   // ------------------------------------------------------------ start
 
   async start() {
-    this.root.append(this.rail, this.side, this.main, this.miniEl);
+    this.root.append(this.rail, this.side, this.main);
     this.topbar.append(this.tabsEl, this.toolsEl);
     this.main.append(this.topbar, this.stage);
     this.stage.append(this.hint);
@@ -179,8 +175,6 @@ export class App {
     this.applyChrome();
     void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
-    window.setInterval(() => this.renderMini(), 1000);
-    this.renderMini();
     window.setInterval(() => void this.rpanel.refresh(), 2000);
     // which agents run in the terminals, and what each is doing; a notice when one needs you and oso is not in front
     this.be.onNotifyClick((sid) => this.focusSession(sid));
@@ -1436,48 +1430,8 @@ export class App {
     this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
     this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
-    // the quick look is useless while the whole list is on show
-    const mini = !this.focusMode && this.leftSection !== "agents";
-    this.miniEl.hidden = !mini;
-    this.root.style.setProperty("--mw", mini ? `${this.miniOpen ? MINI_OPEN : MINI_FOLDED}px` : "0px");
     this.side.hidden = !open;
     this.rail.hidden = this.focusMode;
-  }
-
-  /** The quick look: a thin strip with an arrow; open, one line per agent (a dot for its state, and its name). */
-  private renderMini() {
-    if (!this.rpanel) return;
-    const rows = this.agentRows();
-    const pending = this.approvals.pending;
-    const sig = JSON.stringify([this.miniOpen, this.leftSection === "agents", this.focusMode, pending, rows.map((r) => [r.sid, r.folder || r.name, r.state])]);
-    if (sig === this.miniSig) return;
-    this.miniSig = sig;
-    const m = this.miniEl;
-    clear(m);
-    const needs = rows.filter((r) => r.state === "needs_you").length;
-    const arrow = el("button", { class: "mini-arrow", type: "button", "data-act": "mini-toggle", "aria-expanded": String(this.miniOpen), title: `${this.miniOpen ? "Fold" : "Quick look at"} the AI agents${rows.length ? `: ${rows.length} running` : ""}${pending ? `, ${pending} waiting for you` : ""}` });
-    arrow.append(icon(this.miniOpen ? "chevron-right" : "chevron-left", 10));
-    arrow.onclick = () => {
-      this.miniOpen = !this.miniOpen;
-      storeSet("oso.ui.mini", this.miniOpen ? "open" : "closed");
-      this.miniSig = "";
-      this.applyChrome();
-      this.renderMini();
-    };
-    m.dataset.attention = pending || needs ? "1" : "";
-    m.append(arrow);
-    if (!this.miniOpen) {
-      if (rows.length) m.append(el("span", { class: "mini-n" }, String(rows.length)));
-      for (const r of rows.slice(0, 8)) m.append(el("span", { class: "mini-dot adot", "data-state": r.state, style: `--ag: ${agentColor(r.sid)}`, title: `${r.folder || r.name}: ${STATE_WORD[r.state]}` }));
-      return;
-    }
-    if (!rows.length) m.append(el("div", { class: "mini-empty", title: "No agent running" }, "–"));
-    for (const r of rows) {
-      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "mini-name", "data-state": r.state }, (r.folder || r.name).slice(0, 5)));
-      row.onclick = () => this.focusSession(r.sid);
-      m.append(row);
-    }
-    if (pending) m.append(el("div", { class: "mini-wait", title: `${pending} waiting for you` }, `${pending}!`));
   }
 
   /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
