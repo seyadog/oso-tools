@@ -18,7 +18,7 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
-import { AgentRow, RightPanel, agentColor } from "./rpanel";
+import { AgentRow, RightPanel, STATE_WORD, agentColor } from "./rpanel";
 import { AgentState, AgentStatus, SavedAgent, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
@@ -26,7 +26,7 @@ import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
 import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
-import { LEFT_DEFAULT, AGENTS_WIDTH, STRIP_WIDTH, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
+import { LEFT_DEFAULT, MINI_FOLDED, MINI_OPEN, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
@@ -90,8 +90,10 @@ export class App {
   private approvals!: ApprovalQueue;
   /** The panel on the right: open sessions and what agents asked. */
   private rpanel!: RightPanel;
-  /** The AI agents column, beside the left panel, is open. */
-  private agentsOpen = store("oso.ui.agents") === "open";
+  /** The quick look at the AI agents (only names and states) beside the left panel, folded or open. */
+  private miniEl = el("aside", { id: "mini", "aria-label": "AI agents, quick look" });
+  private miniOpen = store("oso.ui.mini") === "open";
+  private miniSig = "";
   /** When the window opened each session (ms), kept in the session's meta so it survives a restart of the window. */
   private opened = new Map<Id, number>();
   /** Who is using this computer, for the label of a local terminal. */
@@ -129,7 +131,7 @@ export class App {
   // ------------------------------------------------------------ start
 
   async start() {
-    this.root.append(this.rail, this.side, this.main);
+    this.root.append(this.rail, this.side, this.miniEl, this.main);
     this.topbar.append(this.tabsEl, this.toolsEl);
     this.main.append(this.topbar, this.stage);
     this.stage.append(this.hint);
@@ -166,18 +168,19 @@ export class App {
       isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
       keyText: (a) => this.keyText(a),
       reveal: () => {
-        if (!this.agentsOpen || this.focusMode) this.toggleAgents(true);
+        if (this.leftSection !== "agents" || this.focusMode) this.toggleSection("agents", true);
       },
       markChanged: () => this.updateAgentsBadge(),
-      toggle: () => this.toggleAgents(),
     });
-    this.rpanel.attach(this.root);
+    this.rpanel.attach(this.side);
     // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
     this.rpanel.onOpenChange(() => this.syncInline());
-    this.rpanel.setOpen(this.agentsOpen);
+    this.rpanel.setOpen(this.leftSection === "agents");
     this.applyChrome();
     void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
+    window.setInterval(() => this.renderMini(), 1000);
+    this.renderMini();
     window.setInterval(() => void this.rpanel.refresh(), 2000);
     // which agents run in the terminals, and what each is doing; a notice when one needs you and oso is not in front
     this.be.onNotifyClick((sid) => this.focusSession(sid));
@@ -1431,28 +1434,57 @@ export class App {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
     this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
-    const aw = this.focusMode ? 0 : this.agentsOpen ? AGENTS_WIDTH : STRIP_WIDTH;
-    this.root.style.setProperty("--aw", `${aw}px`);
-    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth, aw);
+    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
+    // the quick look is useless while the whole list is on show
+    const mini = !this.focusMode && this.leftSection !== "agents";
+    this.miniEl.hidden = !mini;
+    this.root.style.setProperty("--mw", mini ? `${this.miniOpen ? MINI_OPEN : MINI_FOLDED}px` : "0px");
     this.side.hidden = !open;
     this.rail.hidden = this.focusMode;
   }
 
-  /** The AI agents column, beside the left panel: open (small) or folded to its strip. */
-  toggleAgents(forceOpen = false) {
-    if (this.focusMode) this.setFocusMode(false);
-    this.agentsOpen = forceOpen || !this.agentsOpen;
-    storeSet("oso.ui.agents", this.agentsOpen ? "open" : "closed");
-    this.rpanel?.setOpen(this.agentsOpen);
-    this.applyChrome();
-    this.updateAgentsBadge();
+  /** The quick look: a thin strip with an arrow; open, one line per agent (a dot for its state, and its name). */
+  private renderMini() {
+    if (!this.rpanel) return;
+    const rows = this.agentRows();
+    const pending = this.approvals.pending;
+    const sig = JSON.stringify([this.miniOpen, this.leftSection === "agents", this.focusMode, pending, rows.map((r) => [r.sid, r.folder || r.name, r.state])]);
+    if (sig === this.miniSig) return;
+    this.miniSig = sig;
+    const m = this.miniEl;
+    clear(m);
+    const needs = rows.filter((r) => r.state === "needs_you").length;
+    const arrow = el("button", { class: "mini-arrow", type: "button", "data-act": "mini-toggle", "aria-expanded": String(this.miniOpen), title: `${this.miniOpen ? "Fold" : "Quick look at"} the AI agents${rows.length ? `: ${rows.length} running` : ""}${pending ? `, ${pending} waiting for you` : ""}` });
+    arrow.append(icon(this.miniOpen ? "chevron-left" : "chevron-right", 12));
+    arrow.onclick = () => {
+      this.miniOpen = !this.miniOpen;
+      storeSet("oso.ui.mini", this.miniOpen ? "open" : "closed");
+      this.miniSig = "";
+      this.applyChrome();
+      this.renderMini();
+    };
+    m.dataset.attention = pending || needs ? "1" : "";
+    m.append(arrow);
+    if (!this.miniOpen) {
+      if (rows.length) m.append(el("span", { class: "mini-n" }, String(rows.length)));
+      for (const r of rows.slice(0, 8)) m.append(el("span", { class: "mini-dot adot", "data-state": r.state, style: `--ag: ${agentColor(r.sid)}`, title: `${r.folder || r.name}: ${STATE_WORD[r.state]}` }));
+      return;
+    }
+    if (!rows.length) m.append(el("div", { class: "mini-empty" }, "No agent running"));
+    for (const r of rows) {
+      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "adot", "data-state": r.state }), el("span", { class: "mini-name", style: `color:${agentColor(r.sid)}` }, r.folder || r.name));
+      row.onclick = () => this.focusSession(r.sid);
+      m.append(row);
+    }
+    if (pending) m.append(el("div", { class: "mini-wait" }, `${pending} waiting for you`));
   }
 
   /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
-  toggleSection(key: Exclude<Section, "">) {
+  toggleSection(key: Exclude<Section, "">, forceOpen = false) {
     if (this.focusMode) this.setFocusMode(false);
-    this.leftSection = clickSection(this.leftSection, key);
+    this.leftSection = forceOpen ? key : clickSection(this.leftSection, key);
+    this.rpanel?.setOpen(this.leftSection === "agents");
     storeSet("oso.ui.left", this.leftSection);
     this.applyChrome();
     this.renderRail();
@@ -1478,7 +1510,7 @@ export class App {
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("resizing-lpanel");
     const move = (m: PointerEvent) => {
-      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.agentsOpen ? AGENTS_WIDTH : STRIP_WIDTH);
+      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth);
       this.applyChrome();
     };
     const up = () => {
@@ -1501,14 +1533,10 @@ export class App {
       const on = this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
       b.append(icon(sec.icon, 21));
+      if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
     }
-    // the AI agents: not a section of the left panel, it folds the small column beside it open or shut
-    const ag = el("button", { class: `rail-btn${this.agentsOpen ? " on" : ""}`, type: "button", "data-act": "rail-agents", "aria-label": "AI agents", "aria-pressed": String(this.agentsOpen) });
-    ag.append(icon("agent", 21), el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
-    ag.onclick = () => this.toggleAgents();
-    top.append(ag);
     const bottom = el("div", { class: "rail-bottom" });
     const tool = (iconName: string, title: string, act: string, run: () => void, cls = "") => {
       const b = el("button", { class: `rail-btn small ${cls}`.trim(), type: "button", title, "aria-label": title, "data-act": act });
@@ -1524,40 +1552,22 @@ export class App {
       tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog()),
     );
     this.rail.append(top, bottom);
-    if (this.rpanel) this.updateRailAgents(this.agents.length, this.approvals.pending, this.rpanel.mark());
     this.updateAgentsBadge();
   }
 
-  /** The same count and mark on the rail button. */
-  private updateRailAgents(n: number, pending: number, mark: string) {
-    const r = this.rail.querySelector('[data-act="rail-agents"]') as HTMLElement | null;
-    if (!r) return;
-    const num = r.querySelector(".rail-n") as HTMLElement;
-    num.textContent = n ? String(n) : "";
-    num.hidden = !n;
-    r.dataset.mark = mark;
-    r.classList.toggle("on", this.agentsOpen);
-    r.setAttribute("aria-pressed", String(this.agentsOpen));
-    r.title = `AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
-  }
-
-  /** The strip of the AI agents: an arrow, how many run, and the mark (a request waits, or news). */
+  /** The number on the AI agents button (how many run) and its mark (a request waits, or news). */
   private updateAgentsBadge() {
-    if (!this.rpanel) return;
-    const b = this.rpanel.arrow;
+    const b = this.rail?.querySelector('[data-rail="agents"]') as HTMLElement | null;
+    if (!b || !this.rpanel) return;
     const n = this.agents.length;
+    const num = b.querySelector(".rail-n") as HTMLElement | null;
+    if (num) {
+      num.textContent = n ? String(n) : "";
+      num.hidden = !n;
+    }
+    b.dataset.mark = this.rpanel.mark();
     const pending = this.approvals.pending;
-    const mark = this.rpanel.mark();
-    const sig = `${this.agentsOpen}|${n}|${pending}|${mark}`;
-    if (b.dataset.sig === sig) return;
-    b.dataset.sig = sig;
-    this.updateRailAgents(n, pending, mark);
-    clear(b);
-    b.append(icon(this.agentsOpen ? "chevron-left" : "chevron-right", 13), el("span", { class: "rail-n" }, n ? String(n) : ""), el("span", { class: "rp-vert" }, "AI agents"), el("span", { class: "rail-mark" }));
-    (b.querySelector(".rail-n") as HTMLElement).hidden = !n;
-    b.dataset.mark = mark;
-    b.setAttribute("aria-expanded", String(this.agentsOpen));
-    b.title = `${this.agentsOpen ? "Close" : "Open"} the AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
+    b.title = `AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
   }
 
   private visibleServers(): Server[] {
@@ -1656,6 +1666,8 @@ export class App {
       ),
     );
     clear(this.treeEl);
+    this.treeEl.hidden = this.leftSection === "agents";
+    this.spaceEl.hidden = this.leftSection === "agents";
     this.searchWrap.hidden = this.leftSection !== "servers";
     switch (this.leftSection) {
       case "servers": {
@@ -1676,6 +1688,9 @@ export class App {
         break;
       case "accounts":
         this.renderAccounts();
+        break;
+      case "agents":
+        this.rpanel.render(true);
         break;
     }
   }
@@ -2651,8 +2666,7 @@ export class App {
       case "sudo.fill":
         return void this.fillSudo();
       case "rpanel.toggle":
-      case "panel.agents":
-        return this.toggleAgents();
+        return this.toggleSection("agents");
       case "focus.toggle":
         return this.setFocusMode(!this.focusMode);
       case "attention.next":
@@ -2664,6 +2678,7 @@ export class App {
       case "panel.secrets":
       case "panel.tunnels":
       case "panel.accounts":
+      case "panel.agents":
         return this.toggleSection(arg as Exclude<Section, "">);
       case "sidebar.toggle":
         if (this.focusArea === "terminal") {
