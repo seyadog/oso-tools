@@ -104,6 +104,7 @@ export function tauriBackend(): Backend {
         f({ type: p.type === "drop" ? "drop" : "over", paths: "paths" in p ? p.paths : [], x: p.position.x / scale, y: p.position.y / scale });
       }),
     notify: (title, body) => call("notify", { title, body }),
+    openUrl: (url) => call("open_url", { url }),
     forgetHostKey: (host) => call("forget_host_key", { host }),
     readConfig: (name) => call("read_config", { name }),
     writeConfig: (name, text) => call("write_config", { name, text }),

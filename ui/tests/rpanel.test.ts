@@ -127,6 +127,20 @@ describe("requests waiting for an answer", () => {
     return { q, answers, typed };
   };
 
+  it("Allow all answers what comes without asking, but a production host still asks", () => {
+    const { q, answers } = make();
+    q.push(req(1));
+    q.push(req(2, { production: true }));
+    q.setAllowAll(true);
+    q.push(req(3));
+    q.push(req(4, { production: true }));
+    expect(answers).toEqual([[1, "once"], [3, "once"]]);
+    expect(q.list().map((r) => r.id)).toEqual([2, 4]);
+    q.setAllowAll(false);
+    q.push(req(5));
+    expect(q.list().map((r) => r.id)).toEqual([2, 4, 5]);
+  });
+
   it("lists what is waiting, and an answer from the panel takes it off and tells the agent once", async () => {
     const { q, answers } = make();
     let changes = 0;
@@ -192,5 +206,16 @@ describe("remembered agents", () => {
     expect(a.map((s) => s.cwd).sort()).toEqual(["/a", "/b"]);
     expect(rememberAgents(a, [live("/a")], 1500)).toBe(a);
     expect(notRunning(a, [{ kind: "claude", cwd: "/a" }]).map((s) => s.cwd)).toEqual(["/b"]);
+  });
+});
+
+describe("the address of a tunnel", () => {
+  it("is a link only for a port opened on this computer", async () => {
+    const { tunnelUrl } = await import("../src/tunnels");
+    const f = { id: 1, name: "", auto: false, kind: "local" as const, bind_port: 8080, host: "web", port: 80 };
+    expect(tunnelUrl(f)).toBe("http://localhost:8080");
+    expect(tunnelUrl({ ...f, port: 443 })).toBe("https://localhost:8080");
+    expect(tunnelUrl({ ...f, kind: "remote" })).toBeNull();
+    expect(tunnelUrl({ ...f, kind: "dynamic" })).toBeNull();
   });
 });

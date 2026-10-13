@@ -3,13 +3,34 @@
 import { Backend, Forward, Server, TunnelStatus, VaultLockedError } from "./api";
 import { clear, confirmBox, el, field, makeSelect, openModal, toast } from "./dom";
 import { icon, serverColor } from "./icons";
-import { KIND_LABEL, Kind, describe, problem, sameTunnel } from "./tunnels";
+import { KIND_LABEL, Kind, describe, problem, sameTunnel, tunnelUrl } from "./tunnels";
 
 export interface Ctx {
   be: Backend;
   servers(): Server[];
   refreshTree(): Promise<void>;
   unlock(offerWithout: boolean): Promise<"unlocked" | "without" | "cancel">;
+}
+
+/** Opens an address in the browser, saying so when it cannot. */
+export async function openInBrowser(be: Backend, url: string) {
+  try {
+    await be.openUrl(url);
+  } catch (e) {
+    toast(`${(e as Error).message}. The address is ${url}`, 6000);
+  }
+}
+
+/** A small button that copies the text. */
+export function copyButton(text: string): HTMLButtonElement {
+  const b = el("button", { class: "ib", type: "button", title: "Copy the address", "aria-label": "Copy the address", "data-act": "copy-url" }) as HTMLButtonElement;
+  b.append(icon("copy", 14));
+  b.onclick = (e) => {
+    e.stopPropagation();
+    void navigator.clipboard?.writeText(text).catch(() => {});
+    toast("Address copied");
+  };
+  return b;
 }
 
 const key = (s: number, f: number) => `${s}:${f}`;
@@ -90,13 +111,23 @@ export function tunnelsDialog(ctx: Ctx, onClose: () => void = () => {}) {
               }
               tunnelsDialog(ctx, onClose);
             };
+            // the address to type in the browser: a link that opens it, and a button that copies it
+            const url = tunnelUrl(f);
+            const link =
+              url && st?.state === "up"
+                ? el("div", { class: "t-link" }, el("a", { href: url, "data-open-url": url, title: "Open in the browser" }, url), copyButton(url))
+                : null;
+            if (link) (link.firstChild as HTMLElement).onclick = (e) => {
+              e.preventDefault();
+              void openInBrowser(ctx.be, url!);
+            };
             const state = st?.state === "up" ? "on" : st?.state === "starting" ? "connecting…" : "";
             list.append(
               el(
                 "div",
                 { class: `t-row${st?.state === "up" ? " up" : ""}${st?.state === "failed" ? " failed" : ""}` },
                 sw,
-                el("div", { class: "txt" }, el("b", {}, f.name.trim() || describe(f)), st?.state === "failed" ? el("small", { class: "err" }, st.message) : el("small", {}, [f.name.trim() ? describe(f) : "", f.auto ? "with every terminal" : "", state].filter(Boolean).join(" · "))),
+                el("div", { class: "txt" }, el("b", {}, f.name.trim() || describe(f)), st?.state === "failed" ? el("small", { class: "err" }, st.message) : el("small", {}, [f.name.trim() ? describe(f) : "", f.auto ? "with every terminal" : "", state].filter(Boolean).join(" · ")), link),
                 edit,
                 del,
               ),

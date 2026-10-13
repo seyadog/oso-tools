@@ -380,7 +380,7 @@ export class RightPanel {
     const nowS = Math.floor(now / 1000);
     const pending = this.ctx.queue.list();
     this.agentRows = sortAgents(this.ctx.agents());
-    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), this.ctx.savedAgents().map((s) => [s.cwd, s.kind, openFor(s.last, now)]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
+    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), this.ctx.savedAgents().map((s) => [s.cwd, s.kind, openFor(s.last, now)]), pending.map((r) => r.id), this.ctx.queue.allowAll, this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
     if (!force && sig === this.sig) return;
     this.sig = sig;
     const cur = this.body.querySelector(".rp-scroll") as HTMLElement | null;
@@ -475,6 +475,23 @@ export class RightPanel {
 
   private activitySection(pending: ApprovalRequest[], nowS: number): HTMLElement {
     const list = el("div", { class: "rp-scroll" });
+    const q = this.ctx.queue;
+    const mode = (on: boolean, text: string, tip: string) => {
+      const b = el("button", { class: `seg${q.allowAll === on ? " on" : ""}`, type: "button", title: tip, "aria-pressed": String(q.allowAll === on), "data-act": on ? "allow-all" : "ask" }, text);
+      b.onclick = () => {
+        q.setAllowAll(on);
+        this.render();
+      };
+      return b;
+    };
+    list.append(
+      el(
+        "div",
+        { class: `rp-mode${q.allowAll ? " all" : ""}` },
+        el("div", { class: "segs", role: "group", "aria-label": "What oso does when an agent asks" }, mode(false, "Ask", "Every request waits for your answer"), mode(true, "Allow all", "Allow everything without asking, except production hosts. Until you close oso.")),
+        q.allowAll ? el("small", {}, "Everything is allowed without asking, except hosts marked production. It goes back to Ask when you close oso.") : null,
+      ),
+    );
     for (const r of pending) list.append(this.pendingCard(r));
     const shown = this.activity.filter((a) => a.action !== "context" && a.action !== "hosts");
     for (const a of [...shown].reverse()) list.append(this.activityCard(a, nowS));

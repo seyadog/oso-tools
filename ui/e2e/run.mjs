@@ -1236,7 +1236,7 @@ await page.evaluate(() => globalThis.__osoMock.approval({ id: 21, pane: 2, label
 await settle(300);
 check("a request opens the right panel by itself, on Activity", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.getAttribute('[data-rtab="activity"]', "aria-selected")) === "true");
 check("and no window covers the screen", (await page.$("#approval-bg")) === null);
-check("it is at the top, in amber, with its count on the tab", (await page.$eval('[data-section="activity"] .rp-scroll > :first-child', (e) => e.getAttribute("data-approval"))) === "21" && (await page.textContent('[data-rtab="activity"] .pending-n')) === "1");
+check("it is at the top, in amber, with its count on the tab", (await page.$eval('[data-section="activity"] .rp-scroll > .rp-mode + *', (e) => e.getAttribute("data-approval"))) === "21" && (await page.textContent('[data-rtab="activity"] .pending-n')) === "1");
 check("it names who asks and shows the exact command", (await page.textContent('[data-approval="21"]')).includes("Claude in web-1, pane 2 wants to run a command") && (await page.textContent('[data-approval="21"] pre.cmd')) === "df -h /var");
 await shot("10d-panel-pending");
 await page.click('[data-approval="21"] [data-act="panel-once"]');

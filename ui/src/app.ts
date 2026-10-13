@@ -31,8 +31,8 @@ import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
 import { KIND_LABEL, secretForm, secretsDialog } from "./secrets_ui";
-import { describe as describeTunnel } from "./tunnels";
-import { switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
+import { describe as describeTunnel, tunnelUrl } from "./tunnels";
+import { copyButton, openInBrowser, switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
@@ -1271,6 +1271,11 @@ export class App {
     const menu = this.ibtn("more", `Menu: new terminals, broadcast, files, snippets…`, () => {}, false);
     menu.dataset.act = "menu";
     menu.onclick = () => this.openMenu(menu);
+    // the vault, in words: it is where the secrets are looked at, copied and changed
+    const vb = el("button", { class: `btn small vault-btn${this.vault.unlocked ? " open" : ""}`, type: "button", "data-act": "top-vault", title: `${this.vault.unlocked ? "Vault unlocked" : this.vault.exists ? "Vault locked" : "Create the vault"}: see and change your secrets  (${this.keyText("secrets.open")})` });
+    vb.append(icon(this.vault.unlocked ? "unlock" : "lock", 14), this.vault.exists ? "Vault" : "Create vault");
+    vb.onclick = () => void this.vaultDialog();
+    this.toolsEl.append(vb);
     this.toolsEl.append(el("span", { class: "version", title: "The version of oso you are running" }, versionLabel()), menu);
   }
 
@@ -1968,7 +1973,21 @@ export class App {
         else await switchOn(this.tunnelCtx(), s.id, f.id);
         await this.pollTunnels();
       };
-      row.append(dot, el("span", { class: "txt" }, el("b", {}, f.name.trim() || describeTunnel(f)), el("small", {}, st?.state === "failed" ? st.message : `${f.name.trim() ? describeTunnel(f) + " · " : ""}${s.name}`)), sw);
+      const url = tunnelUrl(f);
+      const sub = url && st?.state === "up" ? el("small", {}, el("a", { href: url, "data-open-url": url, title: "Open in the browser" }, url), ` · ${s.name}`) : el("small", {}, st?.state === "failed" ? st.message : `${f.name.trim() ? describeTunnel(f) + " · " : ""}${s.name}`);
+      const link = sub.querySelector("a");
+      if (link) link.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void openInBrowser(this.be, url!);
+      };
+      const edit = this.ibtn("edit", "Edit this tunnel", () => {});
+      edit.style.cssText = "width:24px;height:24px";
+      edit.onclick = (e) => {
+        e.stopPropagation();
+        tunnelForm(this.tunnelCtx(), s.id, f, () => void this.refreshTree());
+      };
+      row.append(dot, el("span", { class: "txt" }, el("b", {}, f.name.trim() || describeTunnel(f)), sub), ...(url && st?.state === "up" ? [copyButton(url)] : []), edit, sw);
       this.treeEl.append(row);
     }
   }

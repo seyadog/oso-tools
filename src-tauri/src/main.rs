@@ -511,6 +511,32 @@ fn transfer_clear(state: State<AppState>, id: u64) -> Res<()> {
     Ok(())
 }
 
+/// Opens a tunnel's address in the browser. Only `http(s)://localhost` or `127.0.0.1` with a port: nothing else is launched.
+fn is_local_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else { return false };
+    let host_port = rest.split('/').next().unwrap_or("");
+    let Some((host, port)) = host_port.split_once(':') else { return false };
+    (host == "localhost" || host == "127.0.0.1") && !port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit())
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Res<()> {
+    if !is_local_url(&url) {
+        return Err("only the address of a tunnel on this computer can be opened".into());
+    }
+    let mut c = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not open the browser: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = c.wait();
+    });
+    Ok(())
+}
+
 /// A desktop notification (the ones of the desktop itself, through `notify-send`). Quietly nothing if there is none.
 #[tauri::command]
 fn notify(title: String, body: String) {
@@ -830,6 +856,7 @@ fn main() {
             fill_sudo,
             forget_host_key,
             notify,
+            open_url,
             set_forwards,
             tunnel_start,
             tunnel_stop,
@@ -842,4 +869,20 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running oso");
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::is_local_url;
+
+    #[test]
+    fn only_a_local_address_with_a_port_is_opened() {
+        assert!(is_local_url("http://localhost:8080"));
+        assert!(is_local_url("https://127.0.0.1:8443/path?x=1"));
+        assert!(!is_local_url("http://localhost"));
+        assert!(!is_local_url("http://evil.com:80"));
+        assert!(!is_local_url("http://localhost:80@evil.com"));
+        assert!(!is_local_url("file:///etc/passwd"));
+        assert!(!is_local_url("-oProxyCommand=x"));
+    }
 }

@@ -44,3 +44,9 @@ export function problem(kind: Kind, bind: string, host: string, port: string): s
 export function sameTunnel(a: Forward, b: Forward): boolean {
   return a.kind === b.kind && a.bind_port === b.bind_port && a.host === b.host && a.port === b.port;
 }
+
+/** The address to put in a browser for a tunnel that opens a port on this computer (`null` for the others). */
+export function tunnelUrl(f: Forward): string | null {
+  if (f.kind !== "local") return null;
+  return `${[443, 8443].includes(f.port) ? "https" : "http"}://localhost:${f.bind_port}`;
+}

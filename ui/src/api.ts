@@ -460,6 +460,8 @@ export interface Backend {
   fillSudo(sid: number, serverId: number): Promise<void>;
   forgetHostKey(host: string): Promise<string>;
   notify(title: string, body: string): Promise<void>;
+  /** Opens the address of a tunnel (`http://localhost:PORT`) in the browser. */
+  openUrl(url: string): Promise<void>;
   setForwards(serverId: number, forwards: Forward[]): Promise<void>;
   tunnelStart(serverId: number, forwardId: number, useVault?: boolean): Promise<void>;
   tunnelStop(serverId: number, forwardId: number): Promise<void>;

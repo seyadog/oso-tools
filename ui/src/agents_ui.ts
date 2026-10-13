@@ -49,9 +49,26 @@ export class ApprovalQueue {
   private listeners: (() => void)[] = [];
   private pushListeners: ((r: ApprovalRequest) => void)[] = [];
 
+  /** "Allow all": requests are allowed without asking, except those on a production host. Only for this run of the window. */
+  private allowAllOn = false;
+
   constructor(private ctx: QueueCtx) {}
 
+  get allowAll(): boolean {
+    return this.allowAllOn;
+  }
+
+  setAllowAll(on: boolean) {
+    this.allowAllOn = on;
+    if (on) for (const r of this.queue.filter((x) => !x.production)) void this.answer(r, "once");
+    else this.changed();
+  }
+
   push(r: ApprovalRequest) {
+    if (this.allowAllOn && !r.production) {
+      void this.ctx.be.approvalAnswer(r.id, "once").catch(() => false);
+      return;
+    }
     this.queue.push(r);
     this.changed();
     this.pushListeners.forEach((f) => f(r));

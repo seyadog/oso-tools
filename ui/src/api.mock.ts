@@ -83,6 +83,7 @@ export function mockBackend(): Backend {
   let cliHandler: (e: CliEvent) => void = () => {};
   let approvalHandler: (r: ApprovalRequest) => void = () => {};
   const notices: [string, string][] = [];
+  const opened: string[] = [];
   const tunnelState = new Map<string, TunnelStatus>();
   const transferList: TransferStatus[] = [];
   const started: unknown[] = [];
@@ -550,6 +551,7 @@ export function mockBackend(): Backend {
     transferClear: async (id) => void transferList.splice(transferList.findIndex((t) => t.id === id), 1),
     onFileDrag: (f) => void (fileDrag = f),
     notify: async (title, body) => void notices.push([title, body]),
+    openUrl: async (url) => void opened.push(url),
     forgetHostKey: async (host) => {
       forgotten.push(host);
       return `Host ${host} found: line 1`;

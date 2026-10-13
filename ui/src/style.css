@@ -546,3 +546,14 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .rp-agent.saved:hover .rp-forget, .rp-agent .rp-forget:focus-visible { visibility: visible; }
 .rp-agent .rp-forget:hover { color: var(--fg); }
 .tab .tab-proj { font-weight: 600; margin-right: 6px; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-link { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.t-link a, .row.tunnel small a { color: var(--accent); text-decoration: underline; cursor: pointer; }
+.row.tunnel .ib { flex: none; }
+.rp-mode { margin: 0 0 10px; }
+.rp-mode .segs { display: inline-flex; border: 1px solid var(--border, #3a3a44); border-radius: 6px; overflow: hidden; }
+.rp-mode .seg { background: none; border: 0; color: var(--muted); padding: 4px 12px; cursor: pointer; font: inherit; font-size: 12px; }
+.rp-mode .seg.on { background: var(--accent); color: #111; font-weight: 600; }
+.rp-mode.all .seg.on { background: var(--amber); }
+.rp-mode small { display: block; margin-top: 6px; color: var(--amber); font-size: 12px; line-height: 1.35; }
+.vault-btn { display: inline-flex; align-items: center; gap: 6px; }
+.vault-btn.open { color: var(--green); }
