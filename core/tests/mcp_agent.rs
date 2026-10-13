@@ -802,3 +802,227 @@ fn an_agent_waiting_for_a_window_that_closes_is_told_so() {
     assert_eq!(r["ok"], false);
     assert!(r["error"].as_str().unwrap().contains("window was closed"), "{r}");
 }
+
+// ---- files, disk to disk
+
+const SECRET_BODY: &str = "TRAP-FILE-BODY-91ab";
+
+fn sha(path: &Path) -> String {
+    oso_core::transfer::sha256_file(path).unwrap()
+}
+
+/// The folder the agent works in (`work`) and the folder that stands for the server's disk (`far`), both fresh.
+fn folders(r: &Rig) -> (PathBuf, PathBuf) {
+    let (work, far) = (r.dir.join("work").canonicalize().unwrap_or_else(|_| r.dir.join("work")), r.dir.join("far"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&far).unwrap();
+    (work.canonicalize().unwrap(), far.canonicalize().unwrap())
+}
+
+fn with_cwd(mut args: Value, work: &Path) -> Value {
+    args["_cwd"] = json!(work.to_string_lossy());
+    args
+}
+
+fn leftovers(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.contains("oso-part")).collect()
+}
+
+#[test]
+fn a_file_goes_up_after_the_person_saw_it_and_only_replaces_when_told_to() {
+    let sshd = need_sshd!("put");
+    let r = rig("put");
+    add_server(&r, &sshd, "example-api", None, AiPolicy::ReadOnlyAuto, "");
+    let (work, far) = folders(&r);
+    std::fs::write(work.join("app.tar"), SECRET_BODY).unwrap();
+    let want = sha(&work.join("app.tar"));
+    let put = |r: &Rig, extra: Value| {
+        let mut args = json!({ "host": "example-api", "local_path": "app.tar", "remote_path": far.join("app.tar").to_string_lossy() });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        call(r, "oso_put", with_cwd(args, &work))
+    };
+
+    // no window to ask: nothing happens (even on a server that lets reads through)
+    assert_eq!(put(&r, json!({}))["ok"], false);
+    assert!(!far.join("app.tar").exists());
+
+    let seen = person(&r.approvals, |_| Decision::Once);
+    let out = put(&r, json!({ "sha256": want }));
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!((out["result"]["files"].as_i64(), out["result"]["bytes"].as_u64(), out["result"]["sha256_checked_on_server"].as_bool()), (Some(1), Some(SECRET_BODY.len() as u64), Some(true)));
+    assert_eq!(std::fs::read_to_string(far.join("app.tar")).unwrap(), SECRET_BODY);
+    assert!(!out.to_string().contains(SECRET_BODY), "the content never comes back to the agent");
+    let q = seen.lock().unwrap()[0].clone();
+    assert_eq!((q.action.as_str(), q.host.as_str(), q.can_remember), ("put", "example-api", false), "a transfer always asks and has no 'always'");
+    for part in ["app.tar", &format!("{} B", SECRET_BODY.len()), &far.join("app.tar").to_string_lossy(), "Nothing on the server is replaced", &want] {
+        assert!(q.command.contains(part), "the person sees {part:?}: {}", q.command);
+    }
+
+    // it is there already: stops, unchanged
+    std::fs::write(work.join("app.tar"), "NEW").unwrap();
+    let again = put(&r, json!({}));
+    assert_eq!(again["ok"], false);
+    assert!(again["error"].as_str().unwrap().contains("overwrite=true"), "{again}");
+    assert_eq!(std::fs::read_to_string(far.join("app.tar")).unwrap(), SECRET_BODY);
+    // told to replace: replaced
+    assert_eq!(put(&r, json!({ "overwrite": true }))["ok"], true);
+    assert_eq!(std::fs::read_to_string(far.join("app.tar")).unwrap(), "NEW");
+
+    // a hash that is not the file's: nothing is sent
+    let other = far.join("never.tar");
+    let bad = call(&r, "oso_put", with_cwd(json!({ "host": "example-api", "local_path": "app.tar", "remote_path": other.to_string_lossy(), "sha256": want }), &work));
+    assert!(bad["error"].as_str().unwrap().contains("not sent"), "{bad}");
+    assert!(!other.exists());
+
+    let log = audit(&r);
+    assert!(log.iter().any(|l| l["action"] == "put" && l["decision"] == "finished"));
+    assert!(!std::fs::read_to_string(r.handler.audit_path()).unwrap().contains(SECRET_BODY));
+}
+
+#[test]
+fn what_an_agent_may_send_is_limited_before_anybody_is_asked() {
+    let sshd = need_sshd!("put-limits");
+    let r = rig("put-limits");
+    add_server(&r, &sshd, "example-api", None, AiPolicy::Ask, "");
+    let (work, far) = folders(&r);
+    let outside = r.dir.join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    std::fs::write(work.join("a.txt"), "a").unwrap();
+    let seen = person(&r.approvals, |_| Decision::Once);
+    let try_put = |local: &str, remote: &str| call(&r, "oso_put", with_cwd(json!({ "host": "example-api", "local_path": local, "remote_path": remote }), &work));
+    for (local, remote, why) in [
+        (outside.to_str().unwrap(), "/x/y", "outside"),
+        ("../outside.txt", "/x/y", "outside"),
+        ("a.txt", "/tmp/$(reboot)", "expand"),
+        ("a.txt", "/tmp/a;b", "expand"),
+        ("missing.txt", "/x/y", "Cannot read"),
+    ] {
+        let o = try_put(local, remote);
+        assert_eq!(o["ok"], false, "{local} {remote}");
+        assert!(o["error"].as_str().unwrap().contains(why), "{local} {remote}: {o}");
+    }
+    // a link in the folder that points out of it
+    std::os::unix::fs::symlink(&outside, work.join("link")).unwrap();
+    assert!(try_put("link", "/x/y")["error"].as_str().unwrap().contains("outside"));
+    assert!(seen.lock().unwrap().is_empty(), "none of these reached the person");
+    assert_eq!(std::fs::read_dir(&far).unwrap().count(), 0);
+
+    // a server that is blocked for agents is not used for this either
+    let blocked = rig_like(&r);
+    person(&blocked.approvals, |_| Decision::Once);
+    {
+        let mut e = r.engine.lock().unwrap();
+        let mut s = e.store.servers[0].clone();
+        s.ai_policy = AiPolicy::Blocked;
+        e.store.update_server(s);
+    }
+    let b = call(&blocked, "oso_put", with_cwd(json!({ "host": "example-api", "local_path": "a.txt", "remote_path": far.join("a.txt").to_string_lossy() }), &work));
+    assert_eq!(b["ok"], false);
+    assert!(!far.join("a.txt").exists());
+}
+
+#[test]
+fn a_denied_transfer_moves_nothing_and_production_says_so() {
+    let sshd = need_sshd!("put-deny");
+    let r = rig("put-deny");
+    add_server(&r, &sshd, "example-api", Some(EnvKind::Production), AiPolicy::ReadOnlyAuto, "");
+    let (work, far) = folders(&r);
+    std::fs::write(work.join("a.txt"), "a").unwrap();
+    let seen = person(&r.approvals, |_| Decision::Deny);
+    let o = call(&r, "oso_put", with_cwd(json!({ "host": "example-api", "local_path": "a.txt", "remote_path": far.join("a.txt").to_string_lossy() }), &work));
+    assert_eq!(o["ok"], false);
+    assert!(seen.lock().unwrap()[0].production);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!far.join("a.txt").exists());
+    assert!(audit(&r).iter().any(|l| l["action"] == "put" && l["decision"] == "denied"));
+}
+
+#[test]
+fn a_folder_goes_up_whole_and_is_never_merged_into_one_that_exists() {
+    let sshd = need_sshd!("put-dir");
+    let r = rig("put-dir");
+    add_server(&r, &sshd, "example-api", None, AiPolicy::Ask, "");
+    let (work, far) = folders(&r);
+    std::fs::create_dir_all(work.join("site/css")).unwrap();
+    std::fs::write(work.join("site/index.html"), "<p>").unwrap();
+    std::fs::write(work.join("site/css/a.css"), "b{}").unwrap();
+    let seen = person(&r.approvals, |_| Decision::Once);
+    let args = json!({ "host": "example-api", "local_path": "site", "remote_path": far.join("www").to_string_lossy() });
+    let o = call(&r, "oso_put", with_cwd(args.clone(), &work));
+    assert_eq!((o["ok"].clone(), o["result"]["files"].as_i64()), (json!(true), Some(2)), "{o}");
+    assert_eq!(std::fs::read_to_string(far.join("www/css/a.css")).unwrap(), "b{}");
+    assert!(seen.lock().unwrap()[0].command.contains("css/a.css"), "every file is listed");
+    let again = call(&r, "oso_put", with_cwd(json!({ "host": "example-api", "local_path": "site", "remote_path": far.join("www").to_string_lossy(), "overwrite": true }), &work));
+    assert_eq!(again["ok"], false, "a folder is not replaced even with overwrite");
+    assert_eq!(std::fs::read_dir(far.join("www")).unwrap().count(), 2);
+}
+
+#[test]
+fn a_file_comes_down_only_whole_and_only_when_its_hash_is_right() {
+    let sshd = need_sshd!("get");
+    let r = rig("get");
+    add_server(&r, &sshd, "example-api", None, AiPolicy::Ask, "");
+    let (work, far) = folders(&r);
+    std::fs::write(far.join("db.sql"), SECRET_BODY).unwrap();
+    let want = sha(&far.join("db.sql"));
+    let get = |extra: Value| {
+        let mut args = json!({ "host": "example-api", "remote_path": far.join("db.sql").to_string_lossy(), "local_path": "db.sql" });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        call(&r, "oso_get", with_cwd(args, &work))
+    };
+    assert_eq!(get(json!({}))["ok"], false, "no window: no");
+    let seen = person(&r.approvals, |_| Decision::Once);
+
+    // wrong hash: thrown away, nothing in place, no half file left
+    let bad = get(json!({ "sha256": "0".repeat(64) }));
+    assert_eq!(bad["ok"], false);
+    assert!(bad["error"].as_str().unwrap().contains("thrown away"), "{bad}");
+    assert!(!work.join("db.sql").exists());
+    assert!(leftovers(&work).is_empty(), "{:?}", leftovers(&work));
+
+    let out = get(json!({ "sha256": want }));
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(std::fs::read_to_string(work.join("db.sql")).unwrap(), SECRET_BODY);
+    assert!(!out.to_string().contains(SECRET_BODY));
+    assert_eq!((out["result"]["bytes"].as_u64(), out["result"]["sha256_checked"].as_bool()), (Some(SECRET_BODY.len() as u64), Some(true)));
+    let q = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!((q.action.as_str(), q.can_remember), ("get", false));
+    assert!(q.command.contains(&work.join("db.sql").to_string_lossy().to_string()) && q.command.contains("db.sql"));
+
+    // it exists here: stops; with overwrite the new one takes its place
+    std::fs::write(far.join("db.sql"), "SECOND").unwrap();
+    let stop = get(json!({}));
+    assert!(stop["error"].as_str().unwrap().contains("overwrite=true"));
+    assert_eq!(std::fs::read_to_string(work.join("db.sql")).unwrap(), SECRET_BODY);
+    assert_eq!(get(json!({ "overwrite": true }))["ok"], true);
+    assert_eq!(std::fs::read_to_string(work.join("db.sql")).unwrap(), "SECOND");
+
+    // a path that is not there, a destination outside the working folder
+    let gone = call(&r, "oso_get", with_cwd(json!({ "host": "example-api", "remote_path": far.join("nope").to_string_lossy(), "local_path": "nope" }), &work));
+    assert!(gone["error"].as_str().unwrap().contains("does not exist"), "{gone}");
+    assert!(!work.join("nope").exists() && leftovers(&work).is_empty());
+    let n = seen.lock().unwrap().len();
+    let out_of = call(&r, "oso_get", with_cwd(json!({ "host": "example-api", "remote_path": far.join("db.sql").to_string_lossy(), "local_path": "/etc/oso-test" }), &work));
+    assert!(out_of["error"].as_str().unwrap().contains("outside"));
+    assert_eq!(seen.lock().unwrap().len(), n, "not even asked");
+}
+
+#[test]
+fn a_folder_comes_down_with_everything_in_it() {
+    let sshd = need_sshd!("get-dir");
+    let r = rig("get-dir");
+    add_server(&r, &sshd, "example-api", None, AiPolicy::Ask, "");
+    let (work, far) = folders(&r);
+    std::fs::create_dir_all(far.join("logs/old")).unwrap();
+    std::fs::write(far.join("logs/a.log"), "1").unwrap();
+    std::fs::write(far.join("logs/old/b.log"), "22").unwrap();
+    person(&r.approvals, |_| Decision::Once);
+    let o = call(&r, "oso_get", with_cwd(json!({ "host": "example-api", "remote_path": far.join("logs").to_string_lossy(), "local_path": "logs-copy" }), &work));
+    assert_eq!((o["ok"].clone(), o["result"]["files"].as_i64(), o["result"]["bytes"].as_u64()), (json!(true), Some(2), Some(3)), "{o}");
+    assert_eq!(std::fs::read_to_string(work.join("logs-copy/old/b.log")).unwrap(), "22");
+    assert!(leftovers(&work).is_empty());
+}

@@ -45,6 +45,16 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "command": { "type": "string" }, "secrets": { "type": "array", "items": { "type": "string" }, "description": "Names of the secrets, as oso_context lists them." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["command", "secrets"], "additionalProperties": false },
         },
         {
+            "name": "oso_put",
+            "description": "Copy a file or folder from THIS computer to a server, disk to disk: the content never passes through you, so never paste a file's content into oso_run to copy it. `local_path` must be inside your working folder (or your scratch folder); `remote_path` is the full path the file will have on the server (for a folder, the path of the new folder, which must not exist yet). Nothing on the server is replaced unless `overwrite` is true (a file only). Pass `sha256` (of the file here) and oso checks it before sending and again on the server. The user is asked to approve it each time, seeing every file with its size and the destination; production and `blocked` rules apply. At most 1 GB and 2000 files. Never send keys or anything from ~/.ssh: oso refuses it.",
+            "inputSchema": { "type": "object", "properties": { "host": host, "local_path": { "type": "string", "description": "A file or folder here, absolute or relative to your working folder." }, "remote_path": { "type": "string", "description": "Where it goes on the server (a plain path: no quotes, $, ; | & * ? and the like)." }, "sha256": { "type": "string", "description": "Optional. The expected sha256 (hex) of the file; verified before sending and on the server after. One file only." }, "overwrite": { "type": "boolean", "description": "Replace an existing file on the server. Default false." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Default 600." } }, "required": ["host", "local_path", "remote_path"], "additionalProperties": false },
+        },
+        {
+            "name": "oso_get",
+            "description": "Copy a file or folder from a server to THIS computer, disk to disk: the content never passes through you. `local_path` is the full path it will have here, inside your working folder (or your scratch folder); it arrives under a temporary name and takes its place only when it is complete (and, if you pass `sha256`, only when the hash matches). An existing file is replaced only with `overwrite` true. The user is asked to approve it each time; the sizes are read from the server after they allow it, and more than 1 GB or 2000 files is refused. To read a small file's text, oso_run with cat is still the way.",
+            "inputSchema": { "type": "object", "properties": { "host": host, "remote_path": { "type": "string", "description": "A file or folder on the server (a plain path)." }, "local_path": { "type": "string", "description": "Where it goes here, absolute or relative to your working folder." }, "sha256": { "type": "string", "description": "Optional. The expected sha256 (hex) of the file; checked before it is put in place. One file only." }, "overwrite": { "type": "boolean", "description": "Replace an existing local file. Default false." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Default 600." } }, "required": ["host", "remote_path", "local_path"], "additionalProperties": false },
+        },
+        {
             "name": "oso_focus",
             "description": "What the user is looking at in oso right now: the server they have selected, the server of the terminal in front, and the servers they have an SSH session open on (names only, never what is on a screen), limited to what you may use. Call it when the user says \"this server\", \"the one I am on\" or \"the one I selected\". Empty answers mean nothing is selected.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
@@ -185,7 +195,17 @@ impl Daemon {
 }
 
 impl Backend for Daemon {
-    fn call(&self, tool: &str, args: Value, agent: &str) -> Value {
+    fn call(&self, tool: &str, mut args: Value, agent: &str) -> Value {
+        // the folder the agent works in decides where a transfer may read and write: it comes from this process, never from the
+        // agent's own words (anything it put under that name is dropped)
+        if matches!(tool, "oso_put" | "oso_get") {
+            if let Some(o) = args.as_object_mut() {
+                o.remove("_cwd");
+                if let Ok(cwd) = std::env::current_dir() {
+                    o.insert("_cwd".into(), json!(cwd.to_string_lossy()));
+                }
+            }
+        }
         self.call_within(tool, args, agent, std::time::Duration::from_secs(900))
     }
 }
@@ -276,7 +296,7 @@ mod tests {
         let (a, _) = talk(&[json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })]);
         let tools = a[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_focus", "oso_tunnel"]);
+        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_put", "oso_get", "oso_focus", "oso_tunnel"]);
         assert!(tools[0]["description"].as_str().unwrap().starts_with("Call this first"));
         assert!(tools[2]["description"].as_str().unwrap().contains("asked to approve"));
         for t in tools {

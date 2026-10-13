@@ -28,4 +28,5 @@ pub mod spaces;
 pub mod sounds;
 pub mod store;
 pub mod totp;
+pub mod transfer;
 pub mod vault;

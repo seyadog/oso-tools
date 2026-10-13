@@ -15,6 +15,7 @@ use crate::jobs::Job;
 use crate::policy::{self, AiPolicy, Verdict};
 use crate::session::SpawnOpts;
 use crate::spaces::Space;
+use crate::transfer;
 use crate::store::{EnvKind, Server};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -30,6 +31,9 @@ const MAX_OUTPUT: usize = 64 * 1024;
 const APPROVAL_WAIT: Duration = Duration::from_secs(300);
 const DEFAULT_TIMEOUT: u64 = 60;
 const MAX_TIMEOUT: u64 = 300;
+/// A file transfer may take longer than a command.
+const TRANSFER_TIMEOUT: u64 = 600;
+const MAX_TRANSFER_TIMEOUT: u64 = 3600;
 /// Past this many servers `oso_context` gives names only and says to search.
 const MANY_SERVERS: usize = 25;
 
@@ -160,6 +164,9 @@ fn cap(mut s: String) -> (String, bool) {
     (s, true)
 }
 
+/// What running a program gave: what it left, or why it could not run.
+type Ran = Result<Captured, String>;
+
 /// What a finished program left.
 struct Captured {
     stdout: String,
@@ -265,6 +272,18 @@ impl Scope {
     }
 }
 
+/// What `oso_put` and `oso_get` were asked, checked.
+struct TransferArgs {
+    host: String,
+    local: String,
+    remote: String,
+    sha256: Option<String>,
+    overwrite: bool,
+    timeout: Duration,
+    cwd: Option<String>,
+    roots: Vec<std::path::PathBuf>,
+}
+
 /// What an `oso_run` needs, worked out while the engine was locked.
 struct Target {
     id: u64,
@@ -296,6 +315,8 @@ impl Handler {
             "oso_run" => self.run(&ctx, &args),
             "oso_sudo" => self.sudo(&ctx, &args),
             "oso_run_with" => self.run_with(&ctx, &args),
+            "oso_put" => self.put(&ctx, &args),
+            "oso_get" => self.get(&ctx, &args),
             "oso_tunnel" => self.tunnel(&ctx, &args),
             "oso_focus" => self.focus(&ctx),
             // not an MCP tool: what an agent's own hooks report (`oso hook`), for the Agents panel
@@ -529,28 +550,11 @@ impl Handler {
                 }
             }
         }
-        // the connection is built only now, after the answer: secrets are not held while waiting
-        let (mut opts, extra, hide) = {
-            let mut guard = self.engine();
-            let e = &mut *guard;
-            let Some(server) = e.store.server(t.id).cloned() else { return no("That server no longer exists.") };
-            let argv = connect::ssh_argv(&e.store, &server);
-            let mut o = connect::opts_for(&e.store, &mut e.vault, t.id, argv, 24, 200, true);
-            if let Err(m) = e.agent_env(t.id, &mut o) {
-                return no(format!("{m:?}"));
-            }
-            (o, e.ssh_extra.clone(), e.vault.values_to_hide())
-        };
-        // [ssh options…, extra…, --, target, command]
-        let target = opts.argv.pop().unwrap_or_default();
-        let needs_prompt = !opts.fills.is_empty();
-        opts.argv.extend(extra);
-        if !needs_prompt {
-            opts.argv.extend(["-T".into(), "-o".into(), "BatchMode=yes".into()]);
-        }
-        opts.argv.extend(["--".into(), target, command.to_string()]);
         let started = Instant::now();
-        let result = if needs_prompt { run_in_pty(opts, timeout) } else { run_plain(opts, timeout) };
+        let (result, needs_prompt, hide) = match self.exec_remote(&t, command, timeout) {
+            Ok(r) => r,
+            Err(m) => return no(m),
+        };
         match result {
             Err(e) => {
                 self.log_why(ctx, "run", &t, command, "failed", "", |x| x.note = e.chars().take(200).collect());
@@ -577,6 +581,312 @@ impl Handler {
                 ok(answer)
             }
         }
+    }
+
+    /// Runs `command` on the server through ssh (no terminal unless the login needs a typed password). The connection is built
+    /// only now, after the person answered: secrets are not held while waiting. Gives what came back, whether it had to go
+    /// through a terminal (stdout and stderr mixed) and the secrets to blank out of anything shown.
+    fn exec_remote(&self, t: &Target, command: &str, timeout: Duration) -> Result<(Ran, bool, Vec<Zeroizing<String>>), String> {
+        let (mut opts, extra, hide) = {
+            let mut guard = self.engine();
+            let e = &mut *guard;
+            let Some(server) = e.store.server(t.id).cloned() else { return Err("That server no longer exists.".into()) };
+            let argv = connect::ssh_argv(&e.store, &server);
+            let mut o = connect::opts_for(&e.store, &mut e.vault, t.id, argv, 24, 200, true);
+            if let Err(m) = e.agent_env(t.id, &mut o) {
+                return Err(format!("{m:?}"));
+            }
+            (o, e.ssh_extra.clone(), e.vault.values_to_hide())
+        };
+        // [ssh options…, extra…, --, target, command]
+        let target = opts.argv.pop().unwrap_or_default();
+        let needs_prompt = !opts.fills.is_empty();
+        opts.argv.extend(extra);
+        if !needs_prompt {
+            opts.argv.extend(["-T".into(), "-o".into(), "BatchMode=yes".into()]);
+        }
+        opts.argv.extend(["--".into(), target, command.to_string()]);
+        let result = if needs_prompt { run_in_pty(opts, timeout) } else { run_plain(opts, timeout) };
+        Ok((result, needs_prompt, hide))
+    }
+
+    /// `scp` between this computer and the server, the same login and jump hosts as `exec_remote`. `local` are paths here.
+    fn exec_scp(&self, t: &Target, dir: connect::Direction, local: &[String], remote: &str, timeout: Duration) -> Result<(Ran, Vec<Zeroizing<String>>), String> {
+        let (opts, hide) = {
+            let mut guard = self.engine();
+            let e = &mut *guard;
+            let Some(server) = e.store.server(t.id).cloned() else { return Err("That server no longer exists.".into()) };
+            let mut o = connect::opts_for(&e.store, &mut e.vault, t.id, vec![], 24, 200, true);
+            let mut extra = e.ssh_extra.clone();
+            extra.push("-q".into());
+            if o.fills.is_empty() {
+                extra.extend(["-o".into(), "BatchMode=yes".into()]);
+            }
+            o.argv = connect::scp_argv(&e.store, &server, dir, local, remote, &extra);
+            if let Err(m) = e.agent_env(t.id, &mut o) {
+                return Err(format!("{m:?}"));
+            }
+            (o, e.vault.values_to_hide())
+        };
+        let result = if opts.fills.is_empty() { run_plain(opts, timeout) } else { run_in_pty(opts, timeout) };
+        Ok((result, hide))
+    }
+
+
+    // ------------------------------------------------------------ files, disk to disk
+
+    /// The arguments every transfer takes, checked.
+    fn transfer_args(&self, tool: &str, args: &Value) -> Result<TransferArgs, String> {
+        let text = |k: &str| args.get(k).and_then(Value::as_str);
+        let (Some(host), Some(local), Some(remote)) = (text("host"), text("local_path"), text("remote_path")) else {
+            return Err(format!("{tool} needs `host`, `local_path` and `remote_path`."));
+        };
+        transfer::remote_path_ok(remote)?;
+        let sha256 = text("sha256").map(transfer::clean_sha256).transpose()?;
+        let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+        let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(TRANSFER_TIMEOUT).clamp(1, MAX_TRANSFER_TIMEOUT));
+        // the working folder is put in by `oso mcp` itself, from its own process: it is not something the agent says
+        let cwd = text("_cwd").map(str::to_string);
+        Ok(TransferArgs { host: host.into(), local: local.into(), remote: remote.into(), sha256, overwrite, timeout, roots: transfer::allowed_roots(cwd.as_deref()), cwd })
+    }
+
+    /// Asks about a transfer. `Ok` when the person allowed it; `Err` is the answer to give the agent.
+    fn ask_transfer(&self, ctx: &Ctx, action: &str, t: &Target, what: &str, summary: &str) -> Result<(), Value> {
+        if t.policy == AiPolicy::Blocked {
+            self.log_why(ctx, action, t, what, "blocked", "The server's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.", |_| {});
+            return Err(no("This server is blocked for AI agents."));
+        }
+        // a file transfer writes somewhere, so it always asks, whatever the server's policy and whatever was remembered for reads
+        let production = t.env == Some(EnvKind::Production);
+        let asked = if production { "Production always asks, whatever the server's policy says" } else { "A file transfer always asks" };
+        match self.ask(ctx, action, &t.name, summary, production, false) {
+            Decision::Once | Decision::AlwaysRead => {
+                self.log_why(ctx, action, t, what, "allowed", &format!("{asked}: you allowed it once."), |_| {});
+                Ok(())
+            }
+            Decision::Terminal | Decision::Deny => {
+                self.log_why(ctx, action, t, what, "denied", &format!("{asked}: you denied it (or nobody answered in time)."), |_| {});
+                Err(no("The user did not allow this transfer."))
+            }
+        }
+    }
+
+    /// What the server answered to a small command, or why there is no answer.
+    fn probe(&self, t: &Target, command: &str) -> Result<(Captured, Vec<Zeroizing<String>>), String> {
+        let (result, _, hide) = self.exec_remote(t, command, Duration::from_secs(60))?;
+        let c = result.map_err(|e| format!("Could not reach the server: {e}"))?;
+        if c.timed_out {
+            return Err("The server did not answer in time.".into());
+        }
+        Ok((c, hide))
+    }
+
+    fn put(&self, ctx: &Ctx, args: &Value) -> Value {
+        let a = match self.transfer_args("oso_put", args) {
+            Ok(a) => a,
+            Err(m) => return no(m),
+        };
+        let local = match transfer::check_local(&a.local, a.cwd.as_deref(), &a.roots) {
+            Ok(p) => p,
+            Err(m) => return no(m),
+        };
+        let survey = match transfer::survey(&local) {
+            Ok(s) => s,
+            Err(m) => return no(m),
+        };
+        if survey.files.is_empty() {
+            return no("There is nothing to send in that folder.");
+        }
+        if let Some(why) = transfer::too_big(&survey) {
+            return no(why);
+        }
+        if a.sha256.is_some() && survey.is_dir {
+            return no("`sha256` is for one file; a folder has no single hash.");
+        }
+        // what is on disk must be what the agent was told it is
+        let local_sha = if survey.is_dir { None } else { transfer::sha256_file(&local).ok() };
+        if let (Some(want), Some(got)) = (&a.sha256, &local_sha) {
+            if want != got {
+                return no(format!("The file here has sha256 {got}, not {want}: it was not sent."));
+            }
+        }
+        let t = match self.target(ctx, &a.host) {
+            Ok(t) => t,
+            Err(m) => return no(m),
+        };
+        let what = format!("put {} \u{2192} {}:{} ({} file{}, {})", local.display(), t.name, a.remote, survey.files.len(), if survey.files.len() == 1 { "" } else { "s" }, transfer::human(survey.total));
+        let mut summary = format!("Send {} to {}\n", if survey.is_dir { "a folder" } else { "a file" }, t.name);
+        summary.push_str(&format!("From this computer: {}\n", local.display()));
+        summary.push_str(&format!("To the server:      {}\n", a.remote));
+        summary.push_str(&format!("{} file{}, {} in all\n", survey.files.len(), if survey.files.len() == 1 { "" } else { "s" }, transfer::human(survey.total)));
+        summary.push_str(&transfer::file_lines(&survey.files, 15));
+        summary.push_str(if a.overwrite && !survey.is_dir { "Replaces the file on the server if it is already there.\n" } else { "Nothing on the server is replaced: if it is already there, it stops.\n" });
+        if let Some(h) = &a.sha256 {
+            summary.push_str(&format!("Checked against sha256 {h} here and on the server.\n"));
+        }
+        if let Err(answer) = self.ask_transfer(ctx, "put", &t, &what, &summary) {
+            return answer;
+        }
+        let fail = |this: &Self, note: String| {
+            this.log_why(ctx, "put", &t, &what, "failed", "", |x| x.note = note.chars().take(300).collect());
+            no(note)
+        };
+        // is the destination free?
+        let q = transfer::remote_arg(&a.remote);
+        let state = match self.probe(&t, &format!("if [ -d {q} ]; then echo DIR; elif [ -e {q} ]; then echo FILE; else echo NONE; fi")) {
+            Ok((c, _)) => c.stdout.lines().map(str::trim).rev().find(|l| matches!(*l, "NONE" | "FILE" | "DIR")).unwrap_or("").to_string(),
+            Err(m) => return fail(self, m),
+        };
+        match (state.as_str(), survey.is_dir) {
+            ("NONE", _) => {}
+            ("FILE", false) if a.overwrite => {}
+            ("FILE", false) => return fail(self, format!("{} already exists on {}: nothing was sent. Pass overwrite=true to replace it.", a.remote, t.name)),
+            ("DIR", false) => return fail(self, format!("{} is a folder on {}: give the full path of the file (for example {}/{}).", a.remote, t.name, a.remote.trim_end_matches('/'), survey.files[0].0)),
+            (_, true) => return fail(self, format!("{} already exists on {}: a folder is only sent to a path that is free (oso does not merge or replace folders).", a.remote, t.name)),
+            _ => return fail(self, format!("The server answered {state:?} when asked about {}.", a.remote)),
+        }
+        let started = Instant::now();
+        let (result, hide) = match self.exec_scp(&t, connect::Direction::Up, &[local.to_string_lossy().into_owned()], &a.remote, a.timeout) {
+            Ok(r) => r,
+            Err(m) => return fail(self, m),
+        };
+        let c = match result {
+            Ok(c) => c,
+            Err(m) => return fail(self, format!("Could not run scp: {m}")),
+        };
+        if c.timed_out || c.code != Some(0) {
+            let err = redact(&strip_ansi(&format!("{}{}", c.stderr, c.stdout)), &hide);
+            return fail(self, if c.timed_out { "The transfer took too long and was stopped; the file may be half there.".into() } else { format!("scp failed (exit {}): {}", c.code.map(|c| c.to_string()).unwrap_or_default(), err.trim().chars().take(600).collect::<String>()) });
+        }
+        // arrived: is it the same?
+        let mut verified = false;
+        if let Some(want) = &a.sha256 {
+            match self.probe(&t, &format!("sha256sum -- {q}")) {
+                Ok((c, _)) => {
+                    let got = c.stdout.split_whitespace().next().unwrap_or("").to_lowercase();
+                    if &got != want {
+                        return fail(self, format!("It was sent, but the file on the server has sha256 {got:?}, not {want}: it is NOT the same. It is still there at {}; check it or remove it.", a.remote));
+                    }
+                    verified = true;
+                }
+                Err(m) => return fail(self, format!("It was sent, but its sha256 could not be checked on the server: {m}")),
+            }
+        }
+        self.log_why(ctx, "put", &t, &what, "finished", "", |x| {
+            x.exit_code = Some(0);
+            x.note = format!("{} ms{}", started.elapsed().as_millis(), if verified { ", sha256 checked" } else { "" });
+        });
+        ok(json!({
+            "host": t.name, "direction": "put", "local_path": local.to_string_lossy(), "remote_path": a.remote,
+            "files": survey.files.len(), "bytes": survey.total, "sha256": local_sha, "sha256_checked_on_server": verified,
+        }))
+    }
+
+    fn get(&self, ctx: &Ctx, args: &Value) -> Value {
+        let a = match self.transfer_args("oso_get", args) {
+            Ok(a) => a,
+            Err(m) => return no(m),
+        };
+        let dest = match transfer::check_local(&a.local, a.cwd.as_deref(), &a.roots) {
+            Ok(p) => p,
+            Err(m) => return no(m),
+        };
+        let dest_meta = std::fs::symlink_metadata(&dest).ok();
+        if let Some(m) = &dest_meta {
+            if !m.is_file() {
+                return no(format!("{} already exists and is not a plain file: oso does not replace it.", dest.display()));
+            }
+            if !a.overwrite {
+                return no(format!("{} already exists: nothing was downloaded. Pass overwrite=true to replace it.", dest.display()));
+            }
+        }
+        let t = match self.target(ctx, &a.host) {
+            Ok(t) => t,
+            Err(m) => return no(m),
+        };
+        let what = format!("get {}:{} \u{2192} {}", t.name, a.remote, dest.display());
+        let mut summary = format!("Bring a file or folder from {}\n", t.name);
+        summary.push_str(&format!("From the server:    {}\n", a.remote));
+        summary.push_str(&format!("To this computer:   {}\n", dest.display()));
+        summary.push_str(&format!("Sizes are read from the server once you allow this; more than {} or {} files is refused.\n", transfer::human(transfer::MAX_BYTES), transfer::MAX_FILES));
+        summary.push_str(if dest_meta.is_some() { "Replaces the file here (it is only replaced when the whole download arrived).\n" } else { "Nothing here is replaced.\n" });
+        if let Some(h) = &a.sha256 {
+            summary.push_str(&format!("Checked against sha256 {h} before it is put in place.\n"));
+        }
+        if let Err(answer) = self.ask_transfer(ctx, "get", &t, &what, &summary) {
+            return answer;
+        }
+        let fail = |this: &Self, note: String| {
+            this.log_why(ctx, "get", &t, &what, "failed", "", |x| x.note = note.chars().take(300).collect());
+            no(note)
+        };
+        let q = transfer::remote_arg(&a.remote);
+        let listing = match self.probe(&t, &format!("if [ -d {q} ]; then echo DIR; elif [ -f {q} ]; then echo FILE; else echo MISSING; exit 3; fi; find -H {q} -type f -printf '%s\\t%p\\n'")) {
+            Ok((c, _)) if c.stdout.len() >= MAX_OUTPUT => return fail(self, format!("There are too many files in {} to list: pack them into one (tar) first.", a.remote)),
+            Ok((c, _)) => c.stdout,
+            Err(m) => return fail(self, m),
+        };
+        let (is_dir, files) = match transfer::parse_listing(&listing) {
+            Ok(r) => r,
+            Err(m) => return fail(self, m),
+        };
+        let survey = transfer::Survey { is_dir, total: files.iter().map(|f| f.1).sum(), files };
+        if let Some(why) = transfer::too_big(&survey) {
+            return fail(self, why);
+        }
+        if is_dir && (dest_meta.is_some() || a.sha256.is_some()) {
+            return fail(self, if a.sha256.is_some() { "`sha256` is for one file; that is a folder.".into() } else { format!("{} is a file here, and that is a folder on the server.", dest.display()) });
+        }
+        let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let part = dest.with_file_name(format!(".{name}.oso-part-{}", ctx.id));
+        let cleanup = |p: &std::path::Path| {
+            let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        };
+        let started = Instant::now();
+        let (result, hide) = match self.exec_scp(&t, connect::Direction::Down, &[part.to_string_lossy().into_owned()], &a.remote, a.timeout) {
+            Ok(r) => r,
+            Err(m) => return fail(self, m),
+        };
+        let c = match result {
+            Ok(c) => c,
+            Err(m) => return fail(self, format!("Could not run scp: {m}")),
+        };
+        if c.timed_out || c.code != Some(0) {
+            cleanup(&part);
+            let err = redact(&strip_ansi(&format!("{}{}", c.stderr, c.stdout)), &hide);
+            return fail(self, if c.timed_out { "The download took too long and was stopped; nothing was put in place.".into() } else { format!("scp failed (exit {}): {}", c.code.map(|c| c.to_string()).unwrap_or_default(), err.trim().chars().take(600).collect::<String>()) });
+        }
+        // what arrived is looked at before it takes its place
+        let got = match transfer::survey(&part) {
+            Ok(g) => g,
+            Err(m) => {
+                cleanup(&part);
+                return fail(self, format!("What arrived is not what the server listed: {m}"));
+            }
+        };
+        if got.is_dir != is_dir || got.files.len() != survey.files.len() || got.total != survey.total {
+            cleanup(&part);
+            return fail(self, format!("What arrived ({} files, {}) is not what the server listed ({} files, {}): it was not put in place.", got.files.len(), transfer::human(got.total), survey.files.len(), transfer::human(survey.total)));
+        }
+        let sha = if is_dir { None } else { transfer::sha256_file(&part).ok() };
+        if let (Some(want), Some(have)) = (&a.sha256, &sha) {
+            if want != have {
+                cleanup(&part);
+                return fail(self, format!("The file that arrived has sha256 {have}, not {want}: it was thrown away and nothing was put in place."));
+            }
+        }
+        if let Err(e) = std::fs::rename(&part, &dest) {
+            cleanup(&part);
+            return fail(self, format!("It arrived but could not be put at {}: {e}", dest.display()));
+        }
+        self.log_why(ctx, "get", &t, &what, "finished", "", |x| {
+            x.exit_code = Some(0);
+            x.note = format!("{} ms{}", started.elapsed().as_millis(), if a.sha256.is_some() { ", sha256 checked" } else { "" });
+        });
+        ok(json!({
+            "host": t.name, "direction": "get", "remote_path": a.remote, "local_path": dest.to_string_lossy(),
+            "files": survey.files.len(), "bytes": survey.total, "sha256": sha, "sha256_checked": a.sha256.is_some(),
+        }))
     }
 
     // ------------------------------------------------------------ on this computer

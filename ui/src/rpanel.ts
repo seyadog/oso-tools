@@ -106,6 +106,10 @@ export function actionWord(a: Activity): string {
       return "with secrets";
     case "tunnel":
       return "tunnel";
+    case "put":
+      return "sends files";
+    case "get":
+      return "brings files";
     default:
       return "";
   }

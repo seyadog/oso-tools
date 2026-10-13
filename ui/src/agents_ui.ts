@@ -13,6 +13,10 @@ export function actionTitle(r: ApprovalRequest): string {
       return `${r.label} wants to run a command with secrets`;
     case "tunnel":
       return `${r.label} wants to change a tunnel`;
+    case "put":
+      return `${r.label} wants to send files to a server`;
+    case "get":
+      return `${r.label} wants to bring files from a server`;
     default:
       return `${r.label} wants to run a command`;
   }
@@ -133,7 +137,9 @@ export class ApprovalQueue {
       return b;
     };
     const deny = btn("", "Deny", "deny", "approval-deny");
-    const actions = el("div", { class: "actions" }, btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"));
+    // a copy of files is not something to type into a terminal: only commands have that button
+    const transfer = r.action === "put" || r.action === "get";
+    const actions = el("div", { class: "actions" }, transfer ? null : btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"));
     if (r.can_remember) actions.prepend(btn("", "Always for read-only commands on this host", "always_read", "approval-always"));
     const more = this.queue.length > 1 ? el("div", { class: "hint" }, `${this.queue.length - 1} more waiting after this one`) : null;
     const box = el(
@@ -142,7 +148,7 @@ export class ApprovalQueue {
       el("h2", {}, actionTitle(r)),
       el("div", { class: "where" }, r.host, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
       cmdPre(r.command),
-      el("div", { class: "hint" }, "It is run only if you allow it. The agent never sees a password or a key."),
+      el("div", { class: "hint" }, transfer ? "Nothing is copied unless you allow it. The files go from disk to disk: the agent never sees what is in them." : "It is run only if you allow it. The agent never sees a password or a key."),
       more,
       actions,
     );

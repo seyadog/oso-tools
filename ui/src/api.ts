@@ -217,7 +217,7 @@ export interface ApprovalRequest {
   /** "Claude in example-api, pane 2". */
   label: string;
   agent: string;
-  action: "run" | "sudo" | "run_with" | "tunnel";
+  action: "run" | "sudo" | "run_with" | "tunnel" | "put" | "get";
   host: string;
   command: string;
   production: boolean;

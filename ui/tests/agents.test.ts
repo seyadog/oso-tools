@@ -10,6 +10,8 @@ describe("what an agent asks", () => {
     expect(actionTitle(req({ action: "sudo" }))).toContain("use sudo on this computer");
     expect(actionTitle(req({ action: "run_with" }))).toContain("with secrets");
     expect(actionTitle(req({ action: "tunnel" }))).toContain("tunnel");
+    expect(actionTitle(req({ action: "put" }))).toContain("send files to a server");
+    expect(actionTitle(req({ action: "get" }))).toContain("bring files from a server");
   });
   it("writes a line for the record", () => {
     const e: AuditEntry = { ts: 1, pane: 2, agent: "x", action: "run", host: "web-1", command: "df -h", decision: "allowed_without_asking", exit_code: 0, note: "" };
