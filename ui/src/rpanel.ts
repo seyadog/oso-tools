@@ -176,6 +176,10 @@ export interface PanelCtx {
   resumeAgent(s: SavedAgent): void;
   /** Takes a remembered agent off the list. */
   forgetAgent(s: SavedAgent): void;
+  /** Brings the Agents section of the left panel forward (a request came in). */
+  reveal(): void;
+  /** The mark of the rail button may have changed. */
+  markChanged(): void;
   /** "+ New agent". */
   newAgent(): void;
   /** Goes to the tab of this terminal. */
@@ -209,13 +213,11 @@ const store = {
 export class RightPanel {
   /** The panel itself, and the arrow on its edge (both go inside `#app`). */
   readonly el = el("aside", { id: "rpanel", "aria-label": "Agents and AI activity", hidden: true });
-  readonly arrow = el("button", { id: "rtoggle", type: "button", "data-act": "rpanel-toggle" });
-  private grip = el("div", { id: "rgrip", title: "Drag to change the width" });
   private body = el("div", { class: "rp-inner" });
-  open = store.get("oso.rpanel") === "open";
+  /** Whether the Agents section of the left panel is the one on show (the app sets it). */
+  open = false;
   /** Which of its two tabs is on show. */
   tab: "agents" | "activity" = store.get("oso.rpanel.tab") === "activity" ? "activity" : "agents";
-  width = clampWidth(Number(store.get("oso.rpanel.w") ?? PANEL_DEFAULT), window.innerWidth);
   private activity: Activity[] = [];
   private loaded = false;
   /** The newest thing the person has seen in the panel. */
@@ -229,9 +231,7 @@ export class RightPanel {
   private openListeners: ((open: boolean) => void)[] = [];
 
   constructor(private ctx: PanelCtx) {
-    this.el.append(this.grip, this.body);
-    this.arrow.onclick = () => this.toggle();
-    this.grip.addEventListener("pointerdown", (e) => this.startResize(e));
+    this.el.append(this.body);
     ctx.queue.onChange(() => {
       this.render();
       void this.refresh();
@@ -241,16 +241,14 @@ export class RightPanel {
       if (ctx.focusMode()) return;
       this.tab = "activity";
       store.set("oso.rpanel.tab", "activity");
-      this.setOpen(true);
+      ctx.reveal();
       this.render(true);
     });
-    window.addEventListener("resize", () => this.apply());
   }
 
-  /** Puts the panel and its arrow inside the window's grid. */
-  attach(app: HTMLElement) {
-    app.append(this.el, this.arrow);
-    this.apply();
+  /** Puts it inside the left panel (it is only shown while the AI agents section is open). */
+  attach(parent: HTMLElement) {
+    parent.append(this.el);
     this.render(true);
   }
 
@@ -262,54 +260,11 @@ export class RightPanel {
   setOpen(on: boolean) {
     if (on === this.open) return;
     this.open = on;
-    store.set("oso.rpanel", on ? "open" : "closed");
+    this.el.hidden = !on;
     if (on) this.markSeen();
-    this.apply();
     this.openListeners.forEach((f) => f(on));
     this.render(true);
     if (on) void this.refresh();
-  }
-
-  toggle() {
-    this.setOpen(!this.open);
-  }
-
-  /** Puts the width and the open/closed state on the page. */
-  private apply() {
-    this.width = clampWidth(this.width, window.innerWidth);
-    const app = this.el.parentElement;
-    this.el.hidden = !this.open;
-    this.el.style.width = `${this.width}px`;
-    app?.style.setProperty("--rw", this.open ? `${this.width}px` : "0px");
-    this.arrow.classList.toggle("open", this.open);
-    clear(this.arrow);
-    this.arrow.append(icon(this.open ? "chevron-right" : "chevron-left", 14), el("span", { class: "mark" }));
-    const tip = this.open ? "Close the side panel" : "Open the side panel: sessions and AI activity";
-    const key = this.ctx.keyText("rpanel.toggle");
-    this.arrow.title = key ? `${tip}  (${key})` : tip;
-    this.arrow.setAttribute("aria-expanded", String(this.open));
-    this.updateMark();
-  }
-
-  private startResize(e: PointerEvent) {
-    e.preventDefault();
-    const target = this.grip;
-    target.setPointerCapture(e.pointerId);
-    document.body.classList.add("resizing-rpanel");
-    const move = (m: PointerEvent) => {
-      this.width = clampWidth(window.innerWidth - m.clientX, window.innerWidth);
-      this.apply();
-    };
-    const up = () => {
-      target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", up);
-      target.removeEventListener("pointercancel", up);
-      document.body.classList.remove("resizing-rpanel");
-      store.set("oso.rpanel.w", String(this.width));
-    };
-    target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", up);
-    target.addEventListener("pointercancel", up);
   }
 
   // -------------------------------------------------------------- data
@@ -337,12 +292,13 @@ export class RightPanel {
     }
   }
 
+  /** The mark on the rail button: amber for a request waiting, a dot for news; the number of agents is the app's. */
+  mark(): Mark {
+    return this.open ? "none" : markFor(this.ctx.queue.pending, latestUpdate(this.activity), this.seen);
+  }
+
   private updateMark() {
-    const m = markFor(this.ctx.queue.pending, latestUpdate(this.activity), this.seen);
-    const shown = this.open ? "none" : m;
-    this.arrow.dataset.mark = shown;
-    const dot = this.arrow.querySelector(".mark") as HTMLElement | null;
-    if (dot) dot.title = shown === "pending" ? "An AI agent is waiting for your answer" : shown === "new" ? "An AI agent did something since you last looked" : "";
+    this.ctx.markChanged();
   }
 
   // -------------------------------------------------------------- drawing

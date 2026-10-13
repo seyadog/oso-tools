@@ -47,7 +47,7 @@ const tabMenuItem = async (text) => { await page.click(".tab.on", { button: "rig
 // 0. a first start explains itself: getting started, named sections, empty states with a button, the version
 check("the first start shows Getting started with its four steps", (await page.$$("[data-step-row]")).length === 4 && (await page.textContent('[data-start="card"]')).includes("0 of 4 done"));
 check("each step has its own button", (await page.$$("[data-step]")).length === 4);
-check("the rail has the five sections, in order, and the panel shows only the open one", (await page.$$eval("#rail [data-rail]", (e) => e.map((x) => x.getAttribute("data-rail")))).join() === "spaces,servers,secrets,tunnels,accounts" && (await page.$$eval(".sec[data-sec]", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers");
+check("the rail has the six sections, in order, and the panel shows only the open one", (await page.$$eval("#rail [data-rail]", (e) => e.map((x) => x.getAttribute("data-rail")))).join() === "spaces,servers,secrets,tunnels,accounts,agents" && (await page.$$eval(".sec[data-sec]", (e) => e.map((x) => x.getAttribute("data-sec")))).join() === "servers");
 check("the rail is a thin bar of icons", (await page.$eval("#rail", (r) => Math.round(r.getBoundingClientRect().width))) === 48);
 check("the first time, Servers is open and the right panel is closed", (await page.getAttribute('[data-rail="servers"]', "aria-pressed")) === "true" && (await page.$eval("#rpanel", (e) => e.hidden)));
 check("the version is at the top right", /^v\d+\.\d+\.\d+/.test(await page.textContent(".tools .version")));
@@ -1150,21 +1150,23 @@ await clearAll();
 await page.evaluate(() => { globalThis.__osoMock.activity.length = 0; globalThis.__osoMock.approvalAnswers.length = 0; });
 await section("servers");
 const stageWidth = () => page.$eval("#stage", (e) => e.getBoundingClientRect().width);
-check("the right panel is closed at first, with its arrow on the edge", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$("#rtoggle")) !== null && (await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) >= 1499);
-check("the arrow says what it is and its shortcut", (await page.$eval("#rtoggle", (b) => b.title)).includes("Alt+J"));
+check("the AI agents panel is closed at first, with its button in the rail and the right edge free", (await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$('[data-rail="agents"]')) !== null && (await page.$("#rtoggle")) === null);
+check("the button says what it is and its shortcut", (await page.$eval('[data-rail="agents"]', (b) => b.title)).includes("AI agents"));
 const closedWidth = await stageWidth();
-await page.click("#rtoggle");
+await page.click('[data-rail="agents"]');
 await settle(250);
 check("the arrow opens it, with two tabs: Agents and Activity (no Sessions)", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$$eval("#rpanel [data-rtab]", (b) => b.map((x) => x.getAttribute("data-rtab")))).join() === "agents,activity" && !(await page.textContent("#rpanel")).includes("Sessions"));
 check("it opens on Agents, which says what it is for when nothing runs", (await page.$('[data-section="agents"]')) !== null && (await page.textContent('[data-section="agents"]')).includes("No agent is running"));
-check("the terminals make room for it", closedWidth - (await stageWidth()) >= 300);
-check("the arrow moves to the panel's border", Math.abs((await page.$eval("#rtoggle", (b) => b.getBoundingClientRect().right)) - (await page.$eval("#rpanel", (e) => e.getBoundingClientRect().left))) <= 1);
+check("the terminals do not lose room: the panel takes the place of the left one", Math.abs((await stageWidth()) - closedWidth) < 3);
+check("it is inside the left panel", (await page.$eval("#rpanel", (e) => e.parentElement.id)) === "side");
 await page.click('[data-rtab="activity"]');
 await settle(150);
 check("Activity says what it is for when it is empty", (await page.textContent('[data-section="activity"]')).includes("Nothing yet"));
 await shot("10a-panel-empty");
+await section("servers");
 await page.dblclick('.row[data-kind="server"] >> text=web-1');
 await settle(400);
+await section("agents");
 
 // what agents asked: one finished by itself, one you allowed, one you refused
 await page.evaluate(() => {
@@ -1260,31 +1262,22 @@ await page.evaluate(() => globalThis.__osoMock.approval({ id: 24, pane: 2, label
 await settle(200);
 await page.keyboard.press("Alt+j");
 await settle(250);
-check("closing the panel with a request waiting brings the window (it cannot be missed)", (await page.$("#approval-bg .modal")) !== null && (await page.getAttribute("#rtoggle", "data-mark")) === "pending");
+check("closing the panel with a request waiting brings the window (it cannot be missed)", (await page.$("#approval-bg .modal")) !== null && (await page.getAttribute('[data-rail="agents"]', "data-mark")) === "pending");
 await page.keyboard.press("Escape");
 await settle(250);
-check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute("#rtoggle", "data-mark")) !== "pending");
-check("Alt+J closed it and the terminals got their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await stageWidth()) - closedWidth) < 3);
+check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute('[data-rail="agents"]', "data-mark")) !== "pending");
+check("Alt+J closed it and the terminals got their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && (await stageWidth()) - closedWidth >= -3);
 await page.evaluate(() => {
   const now = Math.floor(Date.now() / 1000);
   globalThis.__osoMock.activity.push({ id: 5, ts: now, updated: now, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "free -m", decision: "allowed_without_asking", policy: "read_only_auto", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "" });
   return window.oso.rpanel.refresh();
 });
 await settle(200);
-check("when an agent runs something with the panel closed, the arrow gets a mark", (await page.getAttribute("#rtoggle", "data-mark")) === "new");
+check("when an agent runs something with the panel closed, the arrow gets a mark", (await page.getAttribute('[data-rail="agents"]', "data-mark")) === "new");
 await page.keyboard.press("Alt+j");
 await settle(300);
-check("opening it again clears the mark", (await page.getAttribute("#rtoggle", "data-mark")) === "none");
+check("opening it again clears the mark", (await page.getAttribute('[data-rail="agents"]', "data-mark")) === "none");
 
-// width: drag its border; it is remembered with the open state and the tab
-const box = await page.$eval("#rgrip", (g) => { const r = g.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
-await page.mouse.move(box.x, box.y);
-await page.mouse.down();
-await page.mouse.move(box.x - 100, box.y, { steps: 5 });
-await page.mouse.up();
-await settle(200);
-const widened = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
-check("dragging the border changes the width", widened >= 410 && widened <= 430, String(widened));
 await page.click('[data-rtab="activity"]');
 // the left panel too: its own width, and the section it was on
 await page.click('[data-rail="secrets"]');
@@ -1297,11 +1290,9 @@ await page.mouse.up();
 await settle(200);
 const leftW = await page.$eval("#side", (e) => Math.round(e.getBoundingClientRect().width));
 check("the left panel is resizable too", leftW >= 295 && leftW <= 315, String(leftW));
-const remembered = await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width));
 await page.reload();
 await page.waitForSelector(".home");
 await settle(400);
-check("after reopening the window the right panel is still open, on the same tab, at the same width", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.getAttribute('[data-rtab="activity"]', "aria-selected")) === "true" && Math.abs((await page.$eval("#rpanel", (e) => Math.round(e.getBoundingClientRect().width))) - remembered) <= 1, String(remembered));
 check("and the left panel is on the same section, at the same width", (await page.getAttribute('[data-rail="secrets"]', "aria-pressed")) === "true" && Math.abs((await page.$eval("#side", (e) => Math.round(e.getBoundingClientRect().width))) - leftW) <= 1);
 await page.click('[data-rail="secrets"]');
 await settle(150);
@@ -1349,7 +1340,7 @@ await page.evaluate(({ t1, t2, t3, now }) => {
   return window.oso.pollAgents();
 }, { t1, t2, t3, now });
 await settle(300);
-if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click("#rtoggle");
+if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click('[data-rail="agents"]');
 await settle(200);
 await page.click('[data-rtab="agents"]');
 await settle(200);
@@ -1415,7 +1406,7 @@ await page.evaluate((t2) => window.oso.focusSession(t2), t2);
 await page.evaluate(() => window.oso.pollAgents());
 await settle(200);
 check("looking at the tab of an agent that finished tells the engine", (await page.evaluate(() => globalThis.__osoMock.agentAcks)).includes(t2));
-if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click("#rtoggle");
+if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click('[data-rail="agents"]');
 await settle(150);
 
 // the title of a tab is renamed by double-clicking it
@@ -1684,14 +1675,14 @@ const tabItems = await page.$$eval(".ctx-menu .ctx-item", (b) => b.map((x) => x.
 check("right-clicking a tab offers: rename, save in a Space, close", tabItems.length === 3 && tabItems[0].startsWith("Rename") && tabItems[1].startsWith("Save in a Space") && tabItems[2].startsWith("Close"), JSON.stringify(tabItems));
 await page.keyboard.press("Escape");
 // "+ New agent" is in the Agents panel
-if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click("#rtoggle");
+if (await page.$eval("#rpanel", (e) => e.hidden)) await page.click('[data-rail="agents"]');
 await settle(200);
 await page.click('[data-rtab="agents"]');
 await page.click('[data-act="agents-new"]');
 await settle(250);
 check("the Agents panel has a \"+ New agent\" button", (await page.$('[data-name="launch-folder"]')) !== null);
 await page.keyboard.press("Escape");
-if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click("#rtoggle");
+if (!(await page.$eval("#rpanel", (e) => e.hidden))) await page.click('[data-rail="agents"]');
 // the palette is in the sheet of shortcuts and in the tip of the home screen
 await page.keyboard.press("Shift+Slash");
 await settle(250);

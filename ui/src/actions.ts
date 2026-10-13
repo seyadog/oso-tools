@@ -84,11 +84,12 @@ export const ACTIONS: ActionDef[] = [
   { id: "attention.next", label: "Next agent that needs you", describe: "Jump to the next agent that needs you", icon: "bell", when: (c) => c.attention, keywords: "agent queue waiting" },
   // look of the window
   { id: "focus.toggle", label: "Focus mode: only the terminals", describe: "Focus mode: hide every panel, only the terminals", icon: "focus", keywords: "zen hide panels" },
-  { id: "rpanel.toggle", label: "Right panel: agents and activity", describe: "Right panel (agents and AI activity), open or closed", icon: "chevron-right", keywords: "agents activity" },
+  { id: "rpanel.toggle", label: "Left panel: AI agents and activity", describe: "Left panel: AI agents and their activity, open or closed", icon: "agent", keywords: "agents activity" },
   { id: "sidebar.toggle", label: "Servers list ⇄ terminal", describe: "Servers list ⇄ terminal (opens the Servers panel if it is closed)", icon: "server" },
   { id: "panel.spaces", label: "Left panel: Spaces", describe: "Left panel: Spaces (again to close it)", icon: "layers" },
   { id: "panel.servers", label: "Left panel: Servers", describe: "Left panel: Servers", icon: "server" },
   { id: "panel.secrets", label: "Left panel: Secrets", describe: "Left panel: Secrets", icon: "key" },
+  { id: "panel.agents", label: "Left panel: AI agents", describe: "Left panel: AI agents and activity", icon: "agent" },
   { id: "panel.tunnels", label: "Left panel: Tunnels", describe: "Left panel: Tunnels", icon: "tunnel" },
   { id: "panel.accounts", label: "Left panel: Accounts", describe: "Left panel: Accounts", icon: "user" },
   // tools and settings

@@ -130,11 +130,9 @@ export interface SavedAgent {
   space: number | null;
   /** The last time it was seen running (ms). */
   last: number;
-  /** A closed terminal (kind `term`): the server it was on (0 is this computer). */
-  server?: number;
 }
 
-const savedKey = (s: { kind: string; cwd: string; server?: number }) => `${s.kind}\n${s.cwd}\n${s.server ?? ""}`;
+const savedKey = (s: { kind: string; cwd: string }) => `${s.kind}\n${s.cwd}`;
 
 /** The remembered agents with what runs now written in (newest first). Returns the same list when nothing changed. */
 export function rememberAgents(saved: SavedAgent[], live: Omit<SavedAgent, "last">[], now: number): SavedAgent[] {
@@ -150,15 +148,8 @@ export function rememberAgents(saved: SavedAgent[], live: Omit<SavedAgent, "last
   return changed ? [...map.values()].sort((a, b) => b.last - a.last).slice(0, 40) : saved;
 }
 
-/** A terminal the person closed stays in the list (one entry per server and folder), to open it again in one click. */
-export function rememberClosed(saved: SavedAgent[], t: { server: number; title: string; cwd: string; folder: string; space: number | null }, now: number): SavedAgent[] {
-  const entry: SavedAgent = { kind: "term", name: t.title, cwd: t.cwd, folder: t.folder, branch: "", space: t.space, last: now, server: t.server };
-  const same = (s: SavedAgent) => s.kind === "term" && s.server === t.server && s.cwd === t.cwd;
-  return [entry, ...saved.filter((s) => !same(s))].slice(0, 40);
-}
-
 /** The remembered agents that do not run right now. */
-export function notRunning(saved: SavedAgent[], live: { kind: string; cwd: string; server?: number }[]): SavedAgent[] {
+export function notRunning(saved: SavedAgent[], live: { kind: string; cwd: string }[]): SavedAgent[] {
   const on = new Set(live.map(savedKey));
   return saved.filter((s) => !on.has(savedKey(s)));
 }
@@ -168,7 +159,7 @@ const SAVED_KEY = "oso.agents.saved";
 export function loadSavedAgents(): SavedAgent[] {
   try {
     const v = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "[]");
-    return Array.isArray(v) ? v.filter((s) => s && typeof s.cwd === "string" && typeof s.kind === "string") : [];
+    return Array.isArray(v) ? v.filter((s) => s && typeof s.cwd === "string" && typeof s.kind === "string" && s.kind !== "term") : [];
   } catch {
     return [];
   }

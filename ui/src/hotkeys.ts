@@ -65,6 +65,7 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "panel.servers": "Mod+Shift+2",
   "panel.secrets": "Mod+Shift+3",
   "panel.tunnels": "Mod+Shift+4",
+  "panel.agents": "Mod+Shift+6",
   "panel.accounts": "Mod+Shift+5",
 };
 

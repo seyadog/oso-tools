@@ -19,7 +19,7 @@ import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
 import { AgentRow, RightPanel, agentColor } from "./rpanel";
-import { AgentState, AgentStatus, SavedAgent, baseName, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, rememberClosed, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { AgentState, AgentStatus, SavedAgent, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
 import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
@@ -154,7 +154,7 @@ export class App {
       be: this.be,
       queue: this.approvals,
       agents: () => this.agentRows(),
-      savedAgents: () => notRunning(this.savedAgents, [...this.agents.map((a) => ({ kind: a.kind, cwd: a.cwd })), ...[...this.ws.tabs.values()].filter((t) => !t.dead).map((t) => ({ kind: "term", cwd: t.cwd ?? "", server: t.serverId }))]),
+      savedAgents: () => notRunning(this.savedAgents, [...this.agents.map((a) => ({ kind: a.kind, cwd: a.cwd }))]),
       resumeAgent: (s) => void this.resumeAgent(s),
       forgetAgent: (s) => this.forgetAgent(s),
       newAgent: () => this.newAgent(null),
@@ -163,10 +163,15 @@ export class App {
       focusMode: () => this.focusMode,
       isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
       keyText: (a) => this.keyText(a),
+      reveal: () => {
+        if (this.leftSection !== "agents" || this.focusMode) this.toggleSection("agents", true);
+      },
+      markChanged: () => this.updateAgentsBadge(),
     });
-    this.rpanel.attach(this.root);
+    this.rpanel.attach(this.side);
     // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
     this.rpanel.onOpenChange(() => this.syncInline());
+    this.rpanel.setOpen(this.leftSection === "agents");
     this.applyChrome();
     void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
@@ -248,7 +253,7 @@ export class App {
           return `${sel}: x=${Math.round(r.x)} y=${Math.round(r.y)} w=${Math.round(r.width)} h=${Math.round(r.height)} scrollTop=${e.scrollTop}`;
         };
         report.push(`window ${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio} doc.scrollTop=${document.documentElement.scrollTop} body.scrollTop=${document.body.scrollTop} scrollY=${window.scrollY} docH=${document.documentElement.scrollHeight}`);
-        for (const sel of ["#app", "#rail", "#side", "#main", "#topbar", "#stage", "#rpanel", "#rtoggle", ".space-slot", ".tree"]) report.push(box(sel));
+        for (const sel of ["#app", "#rail", "#side", "#main", "#topbar", "#stage", "#rpanel", ".space-slot", ".tree"]) report.push(box(sel));
         await this.be.writeConfig("selftest.out", report.join("\n"));
         return;
       }
@@ -872,12 +877,6 @@ export class App {
     this.opened.delete(sid);
     this.watches.delete(sid);
     this.alerts.delete(sid);
-    const closing = this.ws.tabs.get(sid);
-    if (kill && closing && !this.agents.some((a) => a.sid === sid)) {
-      const server = this.tree.servers.find((x) => x.id === closing.serverId);
-      this.savedAgents = rememberClosed(this.savedAgents, { server: closing.serverId, title: closing.title, cwd: closing.cwd ?? "", folder: closing.cwd ? baseName(closing.cwd) : (server?.name ?? closing.title), space: closing.space ?? null }, Date.now());
-      storeSavedAgents(this.savedAgents);
-    }
     this.ws.closeTab(sid);
     pane?.dispose();
     this.panes.delete(sid);
@@ -990,13 +989,6 @@ export class App {
   /** A remembered agent: a terminal in its folder (and Space) and the agent started again. */
   private async resumeAgent(s: SavedAgent) {
     const sp = s.space != null ? (this.spaces.find((x) => x.id === s.space) ?? null) : null;
-    if (s.kind === "term") {
-      const server = s.server ?? LOCAL;
-      if (server !== LOCAL && !this.tree.servers.some((x) => x.id === server)) return void toast(`“${s.name}” is not in your servers any more`);
-      const t = await this.openIn(sp, server, server === LOCAL ? s.cwd : "");
-      if (t && s.name) this.ws.setTitle(t.sid, s.name);
-      return;
-    }
     const kind = (await this.be.agentKinds().catch(() => [] as AgentKindRow[])).find((k) => k.id === s.kind);
     const info = await this.openIn(sp, LOCAL, s.cwd);
     if (!info) return;
@@ -1006,7 +998,7 @@ export class App {
   }
 
   private forgetAgent(s: SavedAgent) {
-    this.savedAgents = this.savedAgents.filter((x) => !(x.kind === s.kind && x.cwd === s.cwd && x.server === s.server));
+    this.savedAgents = this.savedAgents.filter((x) => !(x.kind === s.kind && x.cwd === s.cwd));
     storeSavedAgents(this.savedAgents);
     this.rpanel.render();
   }
@@ -1233,7 +1225,7 @@ export class App {
         el("span", { class: "num" }, String(i + 1)),
         el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
         agent ? el("b", { class: "tab-proj", style: `color:${agentColor(agent.sid)}`, title: agent.cwd }, agent.folder) : null,
-        el("span", {}, t.title),
+        agent && !t.named ? null : el("span", {}, t.title),
       );
       const dot = tabDot(ids.flatMap((id) => this.agentRows().filter((r) => r.sid === id).map((r) => r.state)));
       if (dot) tab.append(el("span", { class: "adot", "data-state": dot, title: { needs_you: "An agent here needs you", working: "An agent here is working", finished: "An agent here finished", idle: "An agent is running here" }[dot] }));
@@ -1436,16 +1428,17 @@ export class App {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
     this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
-    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth, this.rpanel?.open && !this.focusMode ? this.rpanel.width : 0);
+    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
     this.side.hidden = !open;
     this.rail.hidden = this.focusMode;
   }
 
   /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
-  toggleSection(key: Exclude<Section, "">) {
+  toggleSection(key: Exclude<Section, "">, forceOpen = false) {
     if (this.focusMode) this.setFocusMode(false);
-    this.leftSection = clickSection(this.leftSection, key);
+    this.leftSection = forceOpen ? key : clickSection(this.leftSection, key);
+    this.rpanel?.setOpen(this.leftSection === "agents");
     storeSet("oso.ui.left", this.leftSection);
     this.applyChrome();
     this.renderRail();
@@ -1471,7 +1464,7 @@ export class App {
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("resizing-lpanel");
     const move = (m: PointerEvent) => {
-      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.rpanel.open ? this.rpanel.width : 0);
+      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth);
       this.applyChrome();
     };
     const up = () => {
@@ -1494,6 +1487,7 @@ export class App {
       const on = this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
       b.append(icon(sec.icon, 21));
+      if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
     }
@@ -1512,6 +1506,22 @@ export class App {
       tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog()),
     );
     this.rail.append(top, bottom);
+    this.updateAgentsBadge();
+  }
+
+  /** The number on the AI agents button (how many run) and its mark (a request waits, or news). */
+  private updateAgentsBadge() {
+    const b = this.rail?.querySelector('[data-rail="agents"]') as HTMLElement | null;
+    if (!b || !this.rpanel) return;
+    const n = this.agents.length;
+    const num = b.querySelector(".rail-n") as HTMLElement | null;
+    if (num) {
+      num.textContent = n ? String(n) : "";
+      num.hidden = !n;
+    }
+    b.dataset.mark = this.rpanel.mark();
+    const pending = this.approvals.pending;
+    b.title = `AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
   }
 
   private visibleServers(): Server[] {
@@ -1610,6 +1620,8 @@ export class App {
       ),
     );
     clear(this.treeEl);
+    this.treeEl.hidden = this.leftSection === "agents";
+    this.spaceEl.hidden = this.leftSection === "agents";
     this.searchWrap.hidden = this.leftSection !== "servers";
     switch (this.leftSection) {
       case "servers": {
@@ -1630,6 +1642,9 @@ export class App {
         break;
       case "accounts":
         this.renderAccounts();
+        break;
+      case "agents":
+        this.rpanel.render(true);
         break;
     }
   }
@@ -2392,7 +2407,10 @@ export class App {
     const t = this.ws.tabs.get(sid);
     if (!t) return;
     const name = await promptBox("Rename terminal", t.title);
-    if (name?.trim()) this.ws.setTitle(sid, name.trim());
+    if (name?.trim()) {
+      t.named = true;
+      this.ws.setTitle(sid, name.trim());
+    }
   }
 
   settingsDialog() {
@@ -2602,8 +2620,7 @@ export class App {
       case "sudo.fill":
         return void this.fillSudo();
       case "rpanel.toggle":
-        if (this.focusMode) this.setFocusMode(false);
-        return this.rpanel.toggle();
+        return this.toggleSection("agents");
       case "focus.toggle":
         return this.setFocusMode(!this.focusMode);
       case "attention.next":
@@ -2615,6 +2632,7 @@ export class App {
       case "panel.secrets":
       case "panel.tunnels":
       case "panel.accounts":
+      case "panel.agents":
         return this.toggleSection(arg as Exclude<Section, "">);
       case "sidebar.toggle":
         if (this.focusArea === "terminal") {

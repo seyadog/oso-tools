@@ -17,6 +17,8 @@ export interface Place {
 export interface Tab {
   sid: Id;
   title: string;
+  /** The person gave it this name (an agent's tab then shows it next to the project). */
+  named?: boolean;
   serverId: number;
   screen: number;
   /** The session ended (shows "Enter: reconnect"). */

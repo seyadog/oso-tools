@@ -26,7 +26,7 @@ const GROUPS: { title: string; actions: string[] }[] = [
 const FAMILY: Record<string, { members: string[]; label: string }> = {
   "tab.1": { members: ["tab.1", "tab.2", "tab.3", "tab.4", "tab.5", "tab.6", "tab.7", "tab.8", "tab.9"], label: "Go to tab 1 … 9 (9 is the last one)" },
   "focus.left": { members: ["focus.left", "focus.right", "focus.up", "focus.down"], label: "Move between terminals" },
-  "panel.spaces": { members: ["panel.spaces", "panel.servers", "panel.secrets", "panel.tunnels", "panel.accounts"], label: "Left panel: Spaces, Servers, Secrets, Tunnels, Accounts (again to close)" },
+  "panel.spaces": { members: ["panel.spaces", "panel.servers", "panel.secrets", "panel.tunnels", "panel.accounts", "panel.agents"], label: "Left panel: Spaces, Servers, Secrets, Tunnels, Accounts, AI agents (again to close)" },
   "move.left": { members: ["move.left", "move.right", "move.up", "move.down"], label: "Move this terminal (needs a mosaic)" },
 };
 
