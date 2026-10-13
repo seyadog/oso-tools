@@ -30,7 +30,7 @@ import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, r
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
-import { KIND_LABEL, secretForm, secretsDialog } from "./secrets_ui";
+import { KIND_LABEL, copyForAWhile, secretForm, secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel, tunnelUrl } from "./tunnels";
 import { copyButton, openInBrowser, switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
@@ -2051,13 +2051,43 @@ export class App {
     if (!this.vault.exists) return void this.treeEl.append(this.emptyBox("API keys, passwords and SSH keys are kept in an encrypted vault. Create it to save your first one.", [["Create the vault", () => void this.vaultDialog(), true, "empty-create-vault"]]));
     if (!this.vault.unlocked) return void this.treeEl.append(this.emptyBox("The vault is locked.", [["Unlock the vault", () => void this.vaultDialog(), true, "empty-unlock"]]));
     if (!meta?.length) return void this.treeEl.append(this.emptyBox("You have no secrets yet. Add your first API key.", [["Add an API key", () => void this.newSecret({ kind: "api_key", agent_visible: true }), true, "empty-add-key"], ["Import…", () => void this.vaultDialog(), false, "empty-import"]]));
-    for (const m of meta.slice(0, 6)) {
-      const row = el("div", { class: "row secret-row", "data-secret-row": m.name, title: "Open the Secrets window" }, el("span", { class: "txt" }, el("b", {}, m.name), el("small", {}, `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`)));
+    for (const m of meta) {
+      const value = this.secretShown.get(m.id);
+      const small = el("small", {}, value ?? `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`);
+      if (value != null) small.className = "pw";
+      const row = el("div", { class: "row secret-row", "data-secret-row": m.name, title: "Open the Secrets window" }, el("span", { class: "txt" }, el("b", {}, m.name), small));
+      const btn = (name: string, tip: string, run: () => void | Promise<void>) => {
+        const b = this.ibtn(name, tip, () => {});
+        b.style.cssText = "width:24px;height:24px";
+        b.onclick = (e) => {
+          e.stopPropagation();
+          void run();
+        };
+        return b;
+      };
+      const eye = btn(value != null ? "eye-off" : "eye", value != null ? "Hide" : "Show it for 15 seconds", async () => {
+        if (value != null) this.secretShown.delete(m.id);
+        else {
+          this.secretShown.set(m.id, await this.be.secretReveal(m.id).catch(() => "(could not read it)"));
+          window.setTimeout(() => {
+            this.secretShown.delete(m.id);
+            this.renderSidebar();
+          }, 15000);
+        }
+        this.renderSidebar();
+      });
+      const cp = btn("copy", "Copy for 30 seconds", async () => {
+        const v = await this.be.secretReveal(m.id).catch(() => null);
+        if (v) copyForAWhile(v);
+      });
+      row.append(eye, cp);
       row.onclick = () => void this.vaultDialog();
       this.treeEl.append(row);
     }
-    if (meta.length > 6) this.treeEl.append(el("div", { class: "hint-row" }, `…and ${meta.length - 6} more in the Secrets window.`));
   }
+
+  /** Secrets shown in the left panel for a few seconds (by id). */
+  private secretShown = new Map<number, string>();
 
   private renderAccounts() {
     const v = this.accountsView;

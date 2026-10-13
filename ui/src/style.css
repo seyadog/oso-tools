@@ -557,3 +557,6 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .rp-mode small { display: block; margin-top: 6px; color: var(--amber); font-size: 12px; line-height: 1.35; }
 .vault-btn { display: inline-flex; align-items: center; gap: 6px; }
 .vault-btn.open { color: var(--green); }
+.secret-row small.pw { font-family: var(--mono, monospace); color: var(--fg); user-select: all; }
+.secret-row .ib { flex: none; visibility: hidden; }
+.secret-row:hover .ib, .secret-row .ib:focus-visible { visibility: visible; }
