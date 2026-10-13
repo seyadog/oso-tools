@@ -2233,7 +2233,7 @@ export class App {
   /** The Secrets window: every secret of the vault (asks for the master password first). */
   async vaultDialog() {
     if ((await this.unlockDialog(false)) !== "unlocked") return;
-    secretsDialog(this.secretsCtx(), { space: this.tree.view_all || this.tree.active_space === null ? "" : String(this.tree.active_space) });
+    secretsDialog(this.secretsCtx());
   }
 
   async lockVault() {
