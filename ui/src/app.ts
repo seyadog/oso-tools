@@ -1504,6 +1504,11 @@ export class App {
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
     }
+    // the AI agents: not a section of the left panel, it folds the small column beside it open or shut
+    const ag = el("button", { class: `rail-btn${this.agentsOpen ? " on" : ""}`, type: "button", "data-act": "rail-agents", "aria-label": "AI agents", "aria-pressed": String(this.agentsOpen) });
+    ag.append(icon("agent", 21), el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
+    ag.onclick = () => this.toggleAgents();
+    top.append(ag);
     const bottom = el("div", { class: "rail-bottom" });
     const tool = (iconName: string, title: string, act: string, run: () => void, cls = "") => {
       const b = el("button", { class: `rail-btn small ${cls}`.trim(), type: "button", title, "aria-label": title, "data-act": act });
@@ -1519,7 +1524,21 @@ export class App {
       tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog()),
     );
     this.rail.append(top, bottom);
+    if (this.rpanel) this.updateRailAgents(this.agents.length, this.approvals.pending, this.rpanel.mark());
     this.updateAgentsBadge();
+  }
+
+  /** The same count and mark on the rail button. */
+  private updateRailAgents(n: number, pending: number, mark: string) {
+    const r = this.rail.querySelector('[data-act="rail-agents"]') as HTMLElement | null;
+    if (!r) return;
+    const num = r.querySelector(".rail-n") as HTMLElement;
+    num.textContent = n ? String(n) : "";
+    num.hidden = !n;
+    r.dataset.mark = mark;
+    r.classList.toggle("on", this.agentsOpen);
+    r.setAttribute("aria-pressed", String(this.agentsOpen));
+    r.title = `AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
   }
 
   /** The strip of the AI agents: an arrow, how many run, and the mark (a request waits, or news). */
@@ -1532,6 +1551,7 @@ export class App {
     const sig = `${this.agentsOpen}|${n}|${pending}|${mark}`;
     if (b.dataset.sig === sig) return;
     b.dataset.sig = sig;
+    this.updateRailAgents(n, pending, mark);
     clear(b);
     b.append(icon(this.agentsOpen ? "chevron-left" : "chevron-right", 13), el("span", { class: "rail-n" }, n ? String(n) : ""), el("span", { class: "rp-vert" }, "AI agents"), el("span", { class: "rail-mark" }));
     (b.querySelector(".rail-n") as HTMLElement).hidden = !n;

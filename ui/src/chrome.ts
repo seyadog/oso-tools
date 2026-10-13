@@ -15,9 +15,9 @@ export const SECTIONS: { key: Exclude<Section, "">; label: string; icon: string;
 
 export const RAIL_WIDTH = 48;
 /** The AI agents column, beside the left panel. */
-export const AGENTS_WIDTH = 270;
+export const AGENTS_WIDTH = 230;
 /** …and folded: only its strip. */
-export const STRIP_WIDTH = 26;
+export const STRIP_WIDTH = 20;
 export const LEFT_MIN = 200;
 export const LEFT_MAX = 480;
 export const LEFT_DEFAULT = 264;
