@@ -1473,7 +1473,7 @@ export class App {
     }
     if (!rows.length) m.append(el("div", { class: "mini-empty", title: "No agent running" }, "–"));
     for (const r of rows) {
-      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "adot", "data-state": r.state }), el("span", { class: "mini-name", style: `color:${agentColor(r.sid)}` }, (r.folder || r.name).slice(0, 5)));
+      const row = el("button", { class: "mini-row", type: "button", "data-sid": String(r.sid), title: `${r.folder || r.name} · ${r.name}: ${STATE_WORD[r.state]}` }, el("span", { class: "mini-name", "data-state": r.state }, (r.folder || r.name).slice(0, 5)));
       row.onclick = () => this.focusSession(r.sid);
       m.append(row);
     }

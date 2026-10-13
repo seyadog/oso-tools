@@ -572,7 +572,9 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 #mini .adot[data-state="needs_you"] { background: var(--orange); }
 #mini .mini-row { display: flex; align-items: center; gap: 3px; padding: 2px 4px; text-align: left; min-width: 0; color: var(--dim); }
 #mini .mini-row:hover { background: var(--hover); }
-#mini .mini-name { font-weight: 600; overflow: hidden; white-space: nowrap; }
+#mini .mini-name { font-weight: 700; overflow: hidden; white-space: nowrap; color: var(--muted); }
+#mini .mini-name[data-state="working"] { color: var(--green); }
+#mini .mini-name[data-state="needs_you"] { color: var(--orange); }
 #mini .mini-empty { align-self: center; color: var(--muted); }
 #mini .mini-wait { align-self: center; color: var(--orange); font-weight: 700; }
 #app.focus #mini { display: none; }
