@@ -26,7 +26,7 @@ import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
 import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
-import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
+import { LEFT_DEFAULT, AGENTS_WIDTH, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
@@ -90,6 +90,8 @@ export class App {
   private approvals!: ApprovalQueue;
   /** The panel on the right: open sessions and what agents asked. */
   private rpanel!: RightPanel;
+  /** The AI agents column, beside the left panel, is open. */
+  private agentsOpen = store("oso.ui.agents") === "open";
   /** When the window opened each session (ms), kept in the session's meta so it survives a restart of the window. */
   private opened = new Map<Id, number>();
   /** Who is using this computer, for the label of a local terminal. */
@@ -164,14 +166,14 @@ export class App {
       isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
       keyText: (a) => this.keyText(a),
       reveal: () => {
-        if (this.leftSection !== "agents" || this.focusMode) this.toggleSection("agents", true);
+        if (!this.agentsOpen || this.focusMode) this.toggleSection("agents", true);
       },
       markChanged: () => this.updateAgentsBadge(),
     });
-    this.rpanel.attach(this.side);
+    this.rpanel.attach(this.root);
     // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
     this.rpanel.onOpenChange(() => this.syncInline());
-    this.rpanel.setOpen(this.leftSection === "agents");
+    this.rpanel.setOpen(this.agentsOpen);
     this.applyChrome();
     void this.be.localUser().then((u) => (this.localUser = u)).catch(() => {});
     this.rpanel.refresh().catch(() => {});
@@ -1428,17 +1430,26 @@ export class App {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
     this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
-    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
+    const aw = this.agentsOpen && !this.focusMode ? AGENTS_WIDTH : 0;
+    this.root.style.setProperty("--aw", `${aw}px`);
+    this.leftWidth = clampLeft(this.leftWidth, window.innerWidth, aw);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
     this.side.hidden = !open;
     this.rail.hidden = this.focusMode;
   }
 
-  /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
+  /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. The AI agents button is apart: it opens its own column beside the left panel. */
   toggleSection(key: Exclude<Section, "">, forceOpen = false) {
     if (this.focusMode) this.setFocusMode(false);
-    this.leftSection = forceOpen ? key : clickSection(this.leftSection, key);
-    this.rpanel?.setOpen(this.leftSection === "agents");
+    if (key === "agents") {
+      this.agentsOpen = forceOpen || !this.agentsOpen;
+      storeSet("oso.ui.agents", this.agentsOpen ? "open" : "closed");
+      this.rpanel?.setOpen(this.agentsOpen);
+      this.applyChrome();
+      this.renderRail();
+      return;
+    }
+    this.leftSection = clickSection(this.leftSection, key);
     storeSet("oso.ui.left", this.leftSection);
     this.applyChrome();
     this.renderRail();
@@ -1464,7 +1475,7 @@ export class App {
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("resizing-lpanel");
     const move = (m: PointerEvent) => {
-      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth);
+      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.agentsOpen ? AGENTS_WIDTH : 0);
       this.applyChrome();
     };
     const up = () => {
@@ -1484,7 +1495,7 @@ export class App {
     clear(this.rail);
     const top = el("div", { class: "rail-top" });
     for (const sec of SECTIONS) {
-      const on = this.leftSection === sec.key;
+      const on = sec.key === "agents" ? this.agentsOpen : this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
       b.append(icon(sec.icon, 21));
       if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
@@ -1620,8 +1631,6 @@ export class App {
       ),
     );
     clear(this.treeEl);
-    this.treeEl.hidden = this.leftSection === "agents";
-    this.spaceEl.hidden = this.leftSection === "agents";
     this.searchWrap.hidden = this.leftSection !== "servers";
     switch (this.leftSection) {
       case "servers": {
@@ -1642,9 +1651,6 @@ export class App {
         break;
       case "accounts":
         this.renderAccounts();
-        break;
-      case "agents":
-        this.rpanel.render(true);
         break;
     }
   }

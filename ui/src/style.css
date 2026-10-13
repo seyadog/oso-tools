@@ -26,10 +26,10 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 input, select { font: inherit; color: inherit; }
 svg { flex: none; }
 
-#app { display: grid; grid-template-columns: var(--rail, 48px) var(--lw, 264px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100vh; }
+#app { display: grid; grid-template-columns: var(--rail, 48px) var(--lw, 264px) var(--aw, 0px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100vh; }
 #rail { grid-column: 1; }
 #side { grid-column: 2; position: relative; background: var(--bg); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-#main { grid-column: 3; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#main { grid-column: 4; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 /* buttons */
 .ib { width: 28px; height: 28px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--dim); }
@@ -379,7 +379,7 @@ textarea:focus { outline: none; border-color: var(--accent); }
 
 /* the right panel: open sessions and what AI agents asked. Same colours as the rest; the arrow sits on its border. */
 #app { position: relative; }
-#rpanel { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
+#rpanel { grid-column: 3; background: var(--bg); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
 #rpanel[hidden] { display: none; }
 #rpanel .rp-inner { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .rail-n { position: absolute; top: 1px; right: 0; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--bg); font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; }

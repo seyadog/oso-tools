@@ -1157,8 +1157,8 @@ await page.click('[data-rail="agents"]');
 await settle(250);
 check("the arrow opens it, with two tabs: Agents and Activity (no Sessions)", !(await page.$eval("#rpanel", (e) => e.hidden)) && (await page.$$eval("#rpanel [data-rtab]", (b) => b.map((x) => x.getAttribute("data-rtab")))).join() === "agents,activity" && !(await page.textContent("#rpanel")).includes("Sessions"));
 check("it opens on Agents, which says what it is for when nothing runs", (await page.$('[data-section="agents"]')) !== null && (await page.textContent('[data-section="agents"]')).includes("No agent is running"));
-check("the terminals do not lose room: the panel takes the place of the left one", Math.abs((await stageWidth()) - closedWidth) < 3);
-check("it is inside the left panel", (await page.$eval("#rpanel", (e) => e.parentElement.id)) === "side");
+check("the terminals make room for it, and the left panel stays", closedWidth - (await stageWidth()) >= 300 && !(await page.$eval("#side", (e) => e.hidden)));
+check("it is a column of its own, right of the left panel", (await page.$eval("#rpanel", (e) => e.getBoundingClientRect().left)) >= (await page.$eval("#side", (e) => e.getBoundingClientRect().right)) - 1);
 await page.click('[data-rtab="activity"]');
 await settle(150);
 check("Activity says what it is for when it is empty", (await page.textContent('[data-section="activity"]')).includes("Nothing yet"));
@@ -1266,7 +1266,7 @@ check("closing the panel with a request waiting brings the window (it cannot be 
 await page.keyboard.press("Escape");
 await settle(250);
 check("answering it clears the amber", (await page.evaluate(() => globalThis.__osoMock.approvalAnswers.at(-1))).join() === "24,deny" && (await page.getAttribute('[data-rail="agents"]', "data-mark")) !== "pending");
-check("Alt+J closed it and the terminals got their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && (await stageWidth()) - closedWidth >= -3);
+check("Alt+J closed it and the terminals got their room back", (await page.$eval("#rpanel", (e) => e.hidden)) && Math.abs((await stageWidth()) - closedWidth) < 3);
 await page.evaluate(() => {
   const now = Math.floor(Date.now() / 1000);
   globalThis.__osoMock.activity.push({ id: 5, ts: now, updated: now, pane: 2, agent: "claude-code", action: "run", host: "web-1", command: "free -m", decision: "allowed_without_asking", policy: "read_only_auto", reason: "", state: "finished", exit_code: 0, bytes_out: 10, preview: "", note: "" });
