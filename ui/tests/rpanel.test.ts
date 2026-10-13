@@ -102,7 +102,7 @@ describe("the rail and the left panel", () => {
 });
 
 describe("the Agents tab", () => {
-  const row = (over: Partial<AgentRow>): AgentRow => ({ sid: 1, name: "Claude", where: "tab 1", folder: "", branch: "", state: "idle", since: 1000, space: "", source: "process", ...over });
+  const row = (over: Partial<AgentRow>): AgentRow => ({ sid: 1, name: "Claude", where: "tab 1", folder: "", branch: "", state: "idle", since: 1000, space: "", source: "process", kind: "claude", cwd: "", spaceId: null, ...over });
   it("puts who needs you first, then who is working, then finished, then idle; the longest wait first", () => {
     const sorted = sortAgents([row({ sid: 1, state: "idle" }), row({ sid: 2, state: "needs_you", since: 5000 }), row({ sid: 3, state: "working" }), row({ sid: 4, state: "needs_you", since: 2000 }), row({ sid: 5, state: "finished" })]);
     expect(sorted.map((r) => r.sid)).toEqual([4, 2, 3, 5, 1]);
@@ -181,5 +181,16 @@ describe("agentColor", () => {
     const colours = Array.from({ length: 10 }, (_, i) => agentColor(i + 1));
     expect(new Set(colours).size).toBe(10);
     expect(agentColor(3)).toBe(agentColor(3));
+  });
+});
+
+describe("remembered agents", () => {
+  const live = (cwd: string) => ({ kind: "claude", name: "Claude", cwd, folder: "x", branch: "", space: null });
+  it("remembers what runs, keeps it when it stops, and lists only what is not running", async () => {
+    const { rememberAgents, notRunning } = await import("../src/agents");
+    const a = rememberAgents([], [live("/a"), live("/b")], 1000);
+    expect(a.map((s) => s.cwd).sort()).toEqual(["/a", "/b"]);
+    expect(rememberAgents(a, [live("/a")], 1500)).toBe(a);
+    expect(notRunning(a, [{ kind: "claude", cwd: "/a" }]).map((s) => s.cwd)).toEqual(["/b"]);
   });
 });

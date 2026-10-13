@@ -4,7 +4,7 @@
 // before it is written.
 
 import { Activity, ActivityDetail, ApprovalDecision, ApprovalRequest, Backend } from "./api";
-import { AgentState } from "./agents";
+import { AgentState, SavedAgent } from "./agents";
 import { hasSudo, writeCommand } from "./sudo";
 import { ApprovalQueue, actionTitle } from "./agents_ui";
 import { clear, el } from "./dom";
@@ -143,6 +143,10 @@ export interface AgentRow {
   space: string;
   /** How the state was learned: `approval`, `hook`, `process`, or `screen` (guessed). */
   source: string;
+  /** What kind of agent (its id in Settings → Agents) and the full folder: what is remembered of it. */
+  kind: string;
+  cwd: string;
+  spaceId: number | null;
 }
 
 /** Each agent has its own colour, so that two of them are told apart at a glance: neighbours in the list are far apart on the colour wheel. */
@@ -166,6 +170,12 @@ export interface PanelCtx {
   queue: ApprovalQueue;
   /** The agents to list (what the engine knows, with the screen's say where it knows nothing else). */
   agents(): AgentRow[];
+  /** The agents remembered from other runs that are not running now. */
+  savedAgents(): SavedAgent[];
+  /** Opens a terminal in the folder of a remembered agent and starts it again. */
+  resumeAgent(s: SavedAgent): void;
+  /** Takes a remembered agent off the list. */
+  forgetAgent(s: SavedAgent): void;
   /** "+ New agent". */
   newAgent(): void;
   /** Goes to the tab of this terminal. */
@@ -370,7 +380,7 @@ export class RightPanel {
     const nowS = Math.floor(now / 1000);
     const pending = this.ctx.queue.list();
     this.agentRows = sortAgents(this.ctx.agents());
-    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
+    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), this.ctx.savedAgents().map((s) => [s.cwd, s.kind, openFor(s.last, now)]), pending.map((r) => r.id), this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
     if (!force && sig === this.sig) return;
     this.sig = sig;
     const cur = this.body.querySelector(".rp-scroll") as HTMLElement | null;
@@ -398,15 +408,43 @@ export class RightPanel {
     // two groups: the ones doing something (or asking for you) and the ones standing there
     const busy = (r: AgentRow) => r.state === "needs_you" || r.state === "working";
     const groups: [string, string, AgentRow[]][] = [
-      ["busy", "Working", this.agentRows.filter(busy)],
       ["parked", "Standing by", this.agentRows.filter((r) => !busy(r))],
+      ["busy", "Working", this.agentRows.filter(busy)],
     ];
     for (const [id, title, rows] of groups) {
       if (!rows.length) continue;
       list.append(el("h4", { class: "rp-space", "data-group": id }, title, el("span", { class: "n" }, String(rows.length))));
       for (const r of rows) list.append(this.agentRow(r, now));
     }
+    const saved = this.ctx.savedAgents();
+    if (saved.length) {
+      list.append(el("h4", { class: "rp-space", "data-group": "saved", title: "Agents from before: click to open their folder and start them again" }, "Not running", el("span", { class: "n" }, String(saved.length))));
+      for (const s of saved) list.append(this.savedRow(s, now));
+    }
     return el("section", { class: "rp-sec rp-agents", "data-section": "agents" }, list);
+  }
+
+  private savedRow(s: SavedAgent, now: number): HTMLElement {
+    const forget = el("button", { class: "rp-forget", type: "button", title: "Take it off the list", "aria-label": "Forget this agent", "data-act": "agent-forget" }, "×");
+    const row = el(
+      "div",
+      { class: "rp-agent saved", style: `--ag: ${agentColor(s.cwd.length)}`, "data-saved": s.cwd, role: "button", tabindex: "0", title: `${s.cwd} · click to open it and start ${s.name}` },
+      el("span", { class: "sdot" }),
+      el("div", { class: "txt" }, el("b", { class: "repo" }, s.folder || s.cwd), el("small", { class: "who" }, s.name), s.branch ? el("small", {}, `⎇ ${s.branch}`) : null, el("small", {}, `last seen ${openFor(s.last, now) === "just opened" ? "just now" : `${openFor(s.last, now)} ago`}`)),
+      forget,
+    );
+    forget.onclick = (e) => {
+      e.stopPropagation();
+      this.ctx.forgetAgent(s);
+    };
+    row.onclick = () => this.ctx.resumeAgent(s);
+    row.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        this.ctx.resumeAgent(s);
+      }
+    };
+    return row;
   }
 
   private agentRow(r: AgentRow, now: number): HTMLElement {

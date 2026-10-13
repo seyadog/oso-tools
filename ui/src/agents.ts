@@ -118,3 +118,57 @@ export function baseName(path: string): string {
   const t = path.replace(/\/+$/, "");
   return t.slice(t.lastIndexOf("/") + 1) || t;
 }
+
+/** An agent remembered between runs: after a reboot it stays in the list as a way back into its folder. */
+export interface SavedAgent {
+  kind: string;
+  name: string;
+  cwd: string;
+  folder: string;
+  branch: string;
+  /** The Space it was in (null: General). */
+  space: number | null;
+  /** The last time it was seen running (ms). */
+  last: number;
+}
+
+const savedKey = (s: { kind: string; cwd: string }) => `${s.kind}\n${s.cwd}`;
+
+/** The remembered agents with what runs now written in (newest first). Returns the same list when nothing changed. */
+export function rememberAgents(saved: SavedAgent[], live: Omit<SavedAgent, "last">[], now: number): SavedAgent[] {
+  const map = new Map(saved.map((s) => [savedKey(s), s]));
+  let changed = false;
+  for (const l of live) {
+    if (!l.cwd) continue;
+    const old = map.get(savedKey(l));
+    if (old && old.name === l.name && old.branch === l.branch && old.space === l.space && now - old.last < 60_000) continue;
+    map.set(savedKey(l), { ...l, last: now });
+    changed = true;
+  }
+  return changed ? [...map.values()].sort((a, b) => b.last - a.last).slice(0, 40) : saved;
+}
+
+/** The remembered agents that do not run right now. */
+export function notRunning(saved: SavedAgent[], live: { kind: string; cwd: string }[]): SavedAgent[] {
+  const on = new Set(live.map(savedKey));
+  return saved.filter((s) => !on.has(savedKey(s)));
+}
+
+const SAVED_KEY = "oso.agents.saved";
+
+export function loadSavedAgents(): SavedAgent[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((s) => s && typeof s.cwd === "string" && typeof s.kind === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function storeSavedAgents(list: SavedAgent[]) {
+  try {
+    localStorage.setItem(SAVED_KEY, JSON.stringify(list));
+  } catch {
+    /* it just will not be remembered */
+  }
+}

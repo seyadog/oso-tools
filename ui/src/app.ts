@@ -1,6 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, Backend, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, AgentKindRow, Backend, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { MenuItem, clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
 import { SpacesCtx, editSpace, newSpace, renderSpaces } from "./spaces_ui";
@@ -18,8 +18,8 @@ import { shortcutsSheet } from "./shortcuts_ui";
 import { State as StartState, StepId, startCard } from "./start_ui";
 import { versionLabel } from "./version";
 import { ApprovalQueue, auditDialog } from "./agents_ui";
-import { AgentRow, RightPanel } from "./rpanel";
-import { AgentState, AgentStatus, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
+import { AgentRow, RightPanel, agentColor } from "./rpanel";
+import { AgentState, AgentStatus, SavedAgent, loadSavedAgents, storeSavedAgents, notRunning, rememberAgents, doneByQuiet, workStart, effectiveState, guessFromScreen, nextAttention, noticesFor, tabDot } from "./agents";
 import { LaunchCtx, agentKindsDialog, newAgentDialog } from "./launch_ui";
 import { ActionCtx, actionDef, applicable } from "./actions";
 import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
@@ -154,6 +154,9 @@ export class App {
       be: this.be,
       queue: this.approvals,
       agents: () => this.agentRows(),
+      savedAgents: () => notRunning(this.savedAgents, this.agents),
+      resumeAgent: (s) => void this.resumeAgent(s),
+      forgetAgent: (s) => this.forgetAgent(s),
       newAgent: () => this.newAgent(null),
       focus: (sid) => this.focusSession(sid),
       tabLabel: (pane) => this.tabLabel(pane),
@@ -946,6 +949,7 @@ export class App {
     const list = await this.be.agentStatus(pending).catch(() => null);
     if (!list) return;
     this.agents = list;
+    this.rememberRunning();
     const rows = this.agentRows();
     // an agent without hooks that worked and went quiet was working a moment ago, as far as news go
     const before = new Map(this.agentSeen);
@@ -966,6 +970,34 @@ export class App {
     this.rpanel.render();
   }
 
+  /** Agents seen in earlier runs (kept in this window's storage, so they are still there after a reboot). */
+  private savedAgents: SavedAgent[] = loadSavedAgents();
+
+  private rememberRunning() {
+    const live = this.agents.map((a) => ({ kind: a.kind, name: a.name, cwd: a.cwd, folder: a.folder, branch: a.branch, space: this.ws.tabs.get(a.sid)?.space ?? null }));
+    const next = rememberAgents(this.savedAgents, live, Date.now());
+    if (next === this.savedAgents) return;
+    this.savedAgents = next;
+    storeSavedAgents(next);
+  }
+
+  /** A remembered agent: a terminal in its folder (and Space) and the agent started again. */
+  private async resumeAgent(s: SavedAgent) {
+    const sp = s.space != null ? (this.spaces.find((x) => x.id === s.space) ?? null) : null;
+    const kind = (await this.be.agentKinds().catch(() => [] as AgentKindRow[])).find((k) => k.id === s.kind);
+    const info = await this.openIn(sp, LOCAL, s.cwd);
+    if (!info) return;
+    this.ws.setTitle(info.sid, [s.name, s.folder].filter(Boolean).join(" · "));
+    if (kind) void this.typeWhenReady(info.sid, kind.command);
+    else toast(`“${s.name}” is not in Settings → Agents any more: the terminal is open in its folder`);
+  }
+
+  private forgetAgent(s: SavedAgent) {
+    this.savedAgents = this.savedAgents.filter((x) => !(x.kind === s.kind && x.cwd === s.cwd));
+    storeSavedAgents(this.savedAgents);
+    this.rpanel.render();
+  }
+
   /** The rows of the Agents tab: the engine's states, and the screen's guess only where nothing exact is known. */
   private agentRows(): AgentRow[] {
     return this.agents.map((a) => {
@@ -982,7 +1014,7 @@ export class App {
         else if (e.state === "needs_you") this.workedAt.delete(a.sid);
       }
       const space = this.ws.tabs.get(a.sid)?.space;
-      return { sid: a.sid, name: a.name, where: this.tabLabel(a.sid) ?? "terminal closed", folder: a.folder, branch: a.branch, state: e.state, since: a.since, space: space != null ? (this.spaces.find((x) => x.id === space)?.name ?? "") : "", source: e.guessed ? "screen" : a.source };
+      return { kind: a.kind, cwd: a.cwd, spaceId: space ?? null, sid: a.sid, name: a.name, where: this.tabLabel(a.sid) ?? "terminal closed", folder: a.folder, branch: a.branch, state: e.state, since: a.since, space: space != null ? (this.spaces.find((x) => x.id === space)?.name ?? "") : "", source: e.guessed ? "screen" : a.source };
     });
   }
 
@@ -1180,11 +1212,14 @@ export class App {
       x.append(icon("close", 13));
       const count = el("span", { class: "count", title: `${ids.length} terminals together` });
       count.append(icon("grid", 12), String(ids.length));
+      // which project: the folder of the agent that runs here, in its own colour (the same as in the Agents list)
+      const agent = this.agentRows().find((r) => ids.includes(r.sid) && r.folder);
       const tab = el(
         "div",
         { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}${t.dead && this.retry.has(g.active) ? " retrying" : ""}${this.isProd(t.serverId) ? " prod" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
         el("span", { class: "num" }, String(i + 1)),
         el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
+        agent ? el("b", { class: "tab-proj", style: `color:${agentColor(agent.sid)}`, title: agent.cwd }, agent.folder) : null,
         el("span", {}, t.title),
       );
       const dot = tabDot(ids.flatMap((id) => this.agentRows().filter((r) => r.sid === id).map((r) => r.state)));
