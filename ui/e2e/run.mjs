@@ -1211,7 +1211,7 @@ await page.click('[data-rtab="agents"]');
 await page.click('[data-rtab="activity"]');
 const localSid = await page.evaluate(async () => { await window.oso.openServer(0); return window.oso.ws.screen.active; });
 await settle(300);
-check("a local terminal reads \"tab N · Local · user\"", (await page.evaluate((x) => window.oso.tabLabel(x), localSid)) === "tab 2 · Local · seya", await page.evaluate((x) => window.oso.tabLabel(x), localSid));
+check("a local terminal reads \"tab N · Local · user\"", (await page.evaluate((x) => window.oso.tabLabel(x), localSid)) === "tab 2 · Local · me", await page.evaluate((x) => window.oso.tabLabel(x), localSid));
 await page.evaluate(async (x) => { await window.oso.closeSession(x); }, localSid);
 await settle(200);
 check("sudo, also inside another command, is highlighted in amber", (await page.$$eval(`${mine} mark.sudo`, (m) => m.length)) === 1 && (await page.$(`${mine} .sudo-tag`)) !== null);

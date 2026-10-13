@@ -132,7 +132,7 @@ export interface AgentRow {
   sid: number;
   /** "Claude", "Opencode"… */
   name: string;
-  /** The tab as the person sees it: "tab 1 · Local · seya". */
+  /** The tab as the person sees it: "tab 1 · Local · me". */
   where: string;
   folder: string;
   branch: string;
@@ -180,7 +180,7 @@ export interface PanelCtx {
   newAgent(): void;
   /** Goes to the tab of this terminal. */
   focus(sid: number): void;
-  /** The tab as the person sees it ("tab 1 · Local · seya"), or `undefined` when that terminal is closed. */
+  /** The tab as the person sees it ("tab 1 · Local · me"), or `undefined` when that terminal is closed. */
   tabLabel(pane: number): string | undefined;
   /** In focus mode no panel is shown and nothing opens one by itself. */
   focusMode(): boolean;

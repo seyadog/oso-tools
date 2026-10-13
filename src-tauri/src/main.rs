@@ -235,7 +235,7 @@ fn agent_activity_detail(state: State<AppState>, id: u64) -> Res<Option<oso_core
     Ok(oso_core::audit::find_detail(&path, id))
 }
 
-/// Who is using this computer, for the label of a terminal ("tab 1 · Local · seya").
+/// Who is using this computer, for the label of a terminal ("tab 1 · Local · me").
 #[tauri::command]
 fn local_user() -> String {
     std::env::var("USER")

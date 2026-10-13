@@ -337,7 +337,7 @@ export function mockBackend(): Backend {
       const a = activity.find((x) => x.id === id) as (Activity & { output?: string }) | undefined;
       return a ? { command: a.command, output: a.output ?? a.preview, cut: false } : null;
     },
-    localUser: async () => "seya",
+    localUser: async () => "me",
     agentStatus: async (pending) => {
       // as the engine does: a request waiting makes its terminal "needs you", also when nothing else is known about the agent there
       const rows: AgentStatusRow[] = agents.map((a) => ({ ...a, ...(pending.includes(a.sid) ? { state: "needs_you" as const, source: "approval" as const } : {}) }));

@@ -899,7 +899,7 @@ export class App {
 
   // ------------------------------------------------------------ rendering
 
-  /** The tab of a terminal as the person sees it: "tab 1 · Local · seya". `undefined` when it is closed. */
+  /** The tab of a terminal as the person sees it: "tab 1 · Local · me". `undefined` when it is closed. */
   private tabLabel(sid: number): string | undefined {
     const t = this.ws.tabs.get(sid);
     if (!t) return undefined;

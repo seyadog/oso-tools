@@ -413,7 +413,7 @@ export interface Backend {
   auditRecent(limit: number): Promise<AuditEntry[]>;
   /** The whole command and output of one request (what Details shows); `null` for an old log line. */
   activityDetail(id: number): Promise<ActivityDetail | null>;
-  /** The name of the person using this computer ("seya"). */
+  /** The name of the person using this computer ("me"). */
   localUser(): Promise<string>;
   /** The agents that run in the terminals, and what each is doing. `pending`: terminals with a request waiting. */
   agentStatus(pending: number[]): Promise<AgentStatusRow[]>;
