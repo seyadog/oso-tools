@@ -70,9 +70,9 @@ describe("the width", () => {
 });
 
 describe("the rail and the left panel", () => {
-  it("has the six sections in the order asked for, each with its own shortcut", () => {
-    expect(SECTIONS.map((x) => x.key)).toEqual(["spaces", "servers", "secrets", "tunnels", "accounts", "agents"]);
-    for (const sec of SECTIONS) expect(DEFAULTS[sec.action], sec.key).toMatch(/^Mod\+Shift\+[1-6]$/);
+  it("has the five sections in the order asked for, each with its own shortcut", () => {
+    expect(SECTIONS.map((x) => x.key)).toEqual(["spaces", "servers", "secrets", "tunnels", "accounts"]);
+    for (const sec of SECTIONS) expect(DEFAULTS[sec.action], sec.key).toMatch(/^Mod\+Shift\+[1-5]$/);
   });
   it("a click opens only that section, a second click closes it, another one swaps it", () => {
     expect(clickSection("", "secrets")).toBe("secrets");

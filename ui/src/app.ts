@@ -26,7 +26,7 @@ import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
 import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
-import { LEFT_DEFAULT, AGENTS_WIDTH, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
+import { LEFT_DEFAULT, AGENTS_WIDTH, STRIP_WIDTH, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
@@ -166,9 +166,10 @@ export class App {
       isProdHost: (name) => this.tree.servers.some((s) => s.name === name && this.isProd(s.id)),
       keyText: (a) => this.keyText(a),
       reveal: () => {
-        if (!this.agentsOpen || this.focusMode) this.toggleSection("agents", true);
+        if (!this.agentsOpen || this.focusMode) this.toggleAgents(true);
       },
       markChanged: () => this.updateAgentsBadge(),
+      toggle: () => this.toggleAgents(),
     });
     this.rpanel.attach(this.root);
     // with the panel open the requests are answered there; closed (or in focus mode) they come in a window
@@ -1430,7 +1431,7 @@ export class App {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
     this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
-    const aw = this.agentsOpen && !this.focusMode ? AGENTS_WIDTH : 0;
+    const aw = this.focusMode ? 0 : this.agentsOpen ? AGENTS_WIDTH : STRIP_WIDTH;
     this.root.style.setProperty("--aw", `${aw}px`);
     this.leftWidth = clampLeft(this.leftWidth, window.innerWidth, aw);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
@@ -1438,17 +1439,19 @@ export class App {
     this.rail.hidden = this.focusMode;
   }
 
-  /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. The AI agents button is apart: it opens its own column beside the left panel. */
-  toggleSection(key: Exclude<Section, "">, forceOpen = false) {
+  /** The AI agents column, beside the left panel: open (small) or folded to its strip. */
+  toggleAgents(forceOpen = false) {
     if (this.focusMode) this.setFocusMode(false);
-    if (key === "agents") {
-      this.agentsOpen = forceOpen || !this.agentsOpen;
-      storeSet("oso.ui.agents", this.agentsOpen ? "open" : "closed");
-      this.rpanel?.setOpen(this.agentsOpen);
-      this.applyChrome();
-      this.renderRail();
-      return;
-    }
+    this.agentsOpen = forceOpen || !this.agentsOpen;
+    storeSet("oso.ui.agents", this.agentsOpen ? "open" : "closed");
+    this.rpanel?.setOpen(this.agentsOpen);
+    this.applyChrome();
+    this.updateAgentsBadge();
+  }
+
+  /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
+  toggleSection(key: Exclude<Section, "">) {
+    if (this.focusMode) this.setFocusMode(false);
     this.leftSection = clickSection(this.leftSection, key);
     storeSet("oso.ui.left", this.leftSection);
     this.applyChrome();
@@ -1475,7 +1478,7 @@ export class App {
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("resizing-lpanel");
     const move = (m: PointerEvent) => {
-      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.agentsOpen ? AGENTS_WIDTH : 0);
+      this.leftWidth = clampLeft(m.clientX - RAIL_WIDTH, window.innerWidth, this.agentsOpen ? AGENTS_WIDTH : STRIP_WIDTH);
       this.applyChrome();
     };
     const up = () => {
@@ -1495,10 +1498,9 @@ export class App {
     clear(this.rail);
     const top = el("div", { class: "rail-top" });
     for (const sec of SECTIONS) {
-      const on = sec.key === "agents" ? this.agentsOpen : this.leftSection === sec.key;
+      const on = this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
       b.append(icon(sec.icon, 21));
-      if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
     }
@@ -1520,19 +1522,22 @@ export class App {
     this.updateAgentsBadge();
   }
 
-  /** The number on the AI agents button (how many run) and its mark (a request waits, or news). */
+  /** The strip of the AI agents: an arrow, how many run, and the mark (a request waits, or news). */
   private updateAgentsBadge() {
-    const b = this.rail?.querySelector('[data-rail="agents"]') as HTMLElement | null;
-    if (!b || !this.rpanel) return;
+    if (!this.rpanel) return;
+    const b = this.rpanel.arrow;
     const n = this.agents.length;
-    const num = b.querySelector(".rail-n") as HTMLElement | null;
-    if (num) {
-      num.textContent = n ? String(n) : "";
-      num.hidden = !n;
-    }
-    b.dataset.mark = this.rpanel.mark();
     const pending = this.approvals.pending;
-    b.title = `AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
+    const mark = this.rpanel.mark();
+    const sig = `${this.agentsOpen}|${n}|${pending}|${mark}`;
+    if (b.dataset.sig === sig) return;
+    b.dataset.sig = sig;
+    clear(b);
+    b.append(icon(this.agentsOpen ? "chevron-left" : "chevron-right", 13), el("span", { class: "rail-n" }, n ? String(n) : ""), el("span", { class: "rp-vert" }, "AI agents"), el("span", { class: "rail-mark" }));
+    (b.querySelector(".rail-n") as HTMLElement).hidden = !n;
+    b.dataset.mark = mark;
+    b.setAttribute("aria-expanded", String(this.agentsOpen));
+    b.title = `${this.agentsOpen ? "Close" : "Open"} the AI agents${n ? `: ${n} running` : ""}${pending ? `, ${pending} waiting for you` : ""}  (${this.keyText("panel.agents")})`;
   }
 
   private visibleServers(): Server[] {
@@ -2626,7 +2631,8 @@ export class App {
       case "sudo.fill":
         return void this.fillSudo();
       case "rpanel.toggle":
-        return this.toggleSection("agents");
+      case "panel.agents":
+        return this.toggleAgents();
       case "focus.toggle":
         return this.setFocusMode(!this.focusMode);
       case "attention.next":
@@ -2638,7 +2644,6 @@ export class App {
       case "panel.secrets":
       case "panel.tunnels":
       case "panel.accounts":
-      case "panel.agents":
         return this.toggleSection(arg as Exclude<Section, "">);
       case "sidebar.toggle":
         if (this.focusArea === "terminal") {

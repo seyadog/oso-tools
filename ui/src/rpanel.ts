@@ -176,6 +176,8 @@ export interface PanelCtx {
   resumeAgent(s: SavedAgent): void;
   /** Takes a remembered agent off the list. */
   forgetAgent(s: SavedAgent): void;
+  /** The strip was clicked. */
+  toggle(): void;
   /** Brings the Agents section of the left panel forward (a request came in). */
   reveal(): void;
   /** The mark of the rail button may have changed. */
@@ -212,7 +214,9 @@ const store = {
 
 export class RightPanel {
   /** The panel itself, and the arrow on its edge (both go inside `#app`). */
-  readonly el = el("aside", { id: "rpanel", "aria-label": "Agents and AI activity", hidden: true });
+  readonly el = el("aside", { id: "rpanel", "aria-label": "Agents and AI activity" });
+  /** The thin strip that is always there: an arrow, the number of agents, and the mark. */
+  readonly arrow = el("button", { id: "rtoggle", type: "button", "data-act": "rpanel-toggle" });
   private body = el("div", { class: "rp-inner" });
   /** Whether the Agents section of the left panel is the one on show (the app sets it). */
   open = false;
@@ -231,7 +235,9 @@ export class RightPanel {
   private openListeners: ((open: boolean) => void)[] = [];
 
   constructor(private ctx: PanelCtx) {
-    this.el.append(this.body);
+    this.body.hidden = true;
+    this.el.append(this.arrow, this.body);
+    this.arrow.onclick = () => ctx.toggle();
     ctx.queue.onChange(() => {
       this.render();
       void this.refresh();
@@ -260,7 +266,8 @@ export class RightPanel {
   setOpen(on: boolean) {
     if (on === this.open) return;
     this.open = on;
-    this.el.hidden = !on;
+    this.body.hidden = !on;
+    this.el.classList.toggle("open", on);
     if (on) this.markSeen();
     this.openListeners.forEach((f) => f(on));
     this.render(true);
