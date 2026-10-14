@@ -1,7 +1,7 @@
 // A stand-in for the engine, for development and tests in a plain browser: a few servers, a vault whose master
 // password is "master", and sessions that behave like a tiny shell ("echo", "exit", "date").
 
-import { AccountChange, AccountsView, Activity, AgentStatusRow, ProfileMigration, Space, SpaceMigration, SpaceSettings, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
+import { Cluster, AccountChange, AccountsView, Activity, AgentStatusRow, ProfileMigration, Space, SpaceMigration, SpaceSettings, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
 export function mockBackend(): Backend {
   let next = 10;
@@ -72,6 +72,9 @@ export function mockBackend(): Backend {
   const focusSent: { selected: number | null; open: number[]; active: number | null }[] = [];
   let notifyClick: (sid: number) => void = () => {};
   const spaces: Space[] = [];
+const projectColorStore: Record<string, number> = {};
+const clusters: Cluster[] = [];
+  let nextCluster = 1;
   let nextSpace = 1;
   const migrationOfProfiles: { value: ProfileMigration | null } = { value: null };
   /** What a test says the migration of the old groups did, to be told once. */
@@ -434,6 +437,61 @@ export function mockBackend(): Backend {
       const title = serverId === 0 && space ? `${local} · ${space.name}` : (s?.name ?? local);
       return make(title, serverId, { ...(space ? { space: space.id } : {}), ...(opts?.cwd ? { cwd: opts.cwd } : {}) });
     },
+    clusterList: async () => JSON.parse(JSON.stringify(clusters)),
+    clusterSave: async (c) => {
+      const name = c.name.trim();
+      if (!name) throw new Error("The cluster needs a name.");
+      if (clusters.some((o) => o.id !== c.id && o.name.toLowerCase() === name.toLowerCase())) throw new Error(`There is already a cluster called "${name}".`);
+      const clean: Cluster = { ...JSON.parse(JSON.stringify(c)), name };
+      if (clean.via_server !== null) clean.kubeconfig = "";
+      if (!c.id) {
+        clean.id = nextCluster++;
+        clusters.push(clean);
+      } else {
+        const i = clusters.findIndex((o) => o.id === c.id);
+        if (i < 0) throw new Error("That cluster no longer exists.");
+        clusters[i] = clean;
+      }
+      return clean.id;
+    },
+    clusterDelete: async (id) => void clusters.splice(0, clusters.length, ...clusters.filter((c) => c.id !== id)),
+    projectColors: async () => ({ ...projectColorStore }),
+    projectColorsSave: async (c) => void Object.assign(projectColorStore, c),
+    clusterTunnelStart: async (id, useVault = true) => {
+      const c = clusters.find((x) => x.id === id);
+      if (!c || c.via_server === null) throw new Error("This cluster is reached from this computer: it needs no tunnel.");
+      const s = servers.find((x) => x.id === c.via_server);
+      if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();
+      const fid = 2 ** 40 + id;
+      const key = `${c.via_server}:${fid}`;
+      started.push({ clusterTunnel: id });
+      tunnelState.set(key, { server_id: c.via_server, forward_id: fid, state: "starting", message: "" });
+      setTimeout(() => {
+        const cur = tunnelState.get(key);
+        if (cur) cur.state = "up";
+      }, 300);
+    },
+    clusterTunnelStop: async (id) => {
+      for (const k of [...tunnelState.keys()]) if (k.endsWith(`:${2 ** 40 + id}`)) tunnelState.delete(k);
+    },
+    clusterRead: async (id, args) => {
+      if (!clusters.some((c) => c.id === id)) throw new Error("That cluster no longer exists.");
+      const line = args.join(" ");
+      if (/\bget namespaces\b/.test(line)) return "default\nkube-system\nweb\n";
+      if (/\bget pods\b/.test(line)) {
+        const all = args.includes("-A");
+        const row = (ns: string, n: string, ready: string, st: string, r: string, age: string) => (all ? `${ns} ` : "") + `${n} ${ready} ${st} ${r} ${age}\n`;
+        const ns = args.includes("-n") ? args[args.indexOf("-n") + 1] : clusters.find((c) => c.id === id)?.namespace;
+        const rows = [row("web", "web-7d9f-abc12", "1/1", "Running", "0", "3d"), row("web", "web-7d9f-def34", "0/1", "CrashLoopBackOff", "5 (2m ago)", "3d"), row("kube-system", "coredns-5d78-x9z", "1/1", "Running", "0", "12d")];
+        return rows.filter((_, i) => all || (ns ? ns === ["web", "web", "kube-system"][i] : true)).join("");
+      }
+      return `fake output of: kubectl ${line}\n`;
+    },
+    clusterLine: async (id, rest) => {
+      const c = clusters.find((o) => o.id === id);
+      if (!c) throw new Error("That cluster no longer exists.");
+      return [c.kubectl.trim() || "kubectl", c.kubeconfig ? `--kubeconfig ${c.kubeconfig}` : "", c.context ? `--context ${c.context}` : "", c.namespace && !/(^|\s)(-n|-A|--namespace)\b/.test(rest) ? `-n ${c.namespace}` : "", rest].filter(Boolean).join(" ");
+    },
     spaceList: async () => JSON.parse(JSON.stringify(spaces)),
     spaceSave: async (space) => {
       const clean = { tailscale_account: null, gh_user: null, proxy: null, aws_profile: null, kubeconfig: null, production: false, ...JSON.parse(JSON.stringify(space)), name: space.name.trim() } as Space;
@@ -531,7 +589,7 @@ export function mockBackend(): Backend {
       }, 400);
     },
     tunnelStop: async (serverId, forwardId) => void tunnelState.delete(`${serverId}:${forwardId}`),
-    tunnels: async () => [...tunnelState.values()],
+    tunnels: async () => [...tunnelState.values()].map((t) => ({ ...t })),
     transferStart: async (serverId, upload, local, remote, useVault = true) => {
       const s = servers.find((x) => x.id === serverId);
       if (useVault && s?.has_secret && !vault.unlocked) throw new VaultLockedError();

@@ -1026,3 +1026,94 @@ fn a_folder_comes_down_with_everything_in_it() {
     assert_eq!(std::fs::read_to_string(work.join("logs-copy/old/b.log")).unwrap(), "22");
     assert!(leftovers(&work).is_empty());
 }
+
+/// A kubectl that only prints what it was given, so the tests see exactly which words and flags arrived.
+fn fake_kubectl(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fakekubectl");
+    std::fs::write(&p, "#!/bin/sh\nprintf 'ARGS:'\nfor a in \"$@\"; do printf ' [%s]' \"$a\"; done\nprintf '\\n'\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+fn kubectl_on_a_cluster_of_this_computer_follows_the_clusters_rule() {
+    use oso_core::k8s::Cluster;
+    let r = rig("kube-local");
+    let k = fake_kubectl(&r.dir);
+    let cluster = |name: &str, policy: AiPolicy, env: Option<EnvKind>| {
+        r.engine.lock().unwrap().clusters.save(Cluster { name: name.into(), kubectl: k.clone(), context: "ctx1".into(), namespace: "web".into(), ai_policy: policy, env_kind: env, ..Default::default() }).unwrap();
+    };
+    cluster("lab", AiPolicy::ReadOnlyAuto, None);
+    cluster("prod", AiPolicy::ReadOnlyAuto, Some(EnvKind::Production));
+    cluster("shut", AiPolicy::Blocked, None);
+    let seen = person(&r.approvals, |req| if req.command.contains("delete") { Decision::Deny } else { Decision::Once });
+
+    // a read on a read-only-auto cluster goes through without asking, with the cluster's flags
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "lab", "args": ["get", "pods"] }));
+    assert_eq!(a["ok"], true, "{a}");
+    assert_eq!(stdout_of(&a).trim(), "ARGS: [--context] [ctx1] [-n] [web] [get] [pods]");
+    assert!(seen.lock().unwrap().is_empty(), "nobody was asked");
+
+    // a change asks, and a no stops it
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "lab", "args": ["delete", "pod", "x"] }));
+    assert_eq!(a["ok"], false, "{a}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(seen.lock().unwrap()[0].action, "kubectl");
+
+    // an allowed change runs
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "lab", "args": ["scale", "deploy", "web", "--replicas=2"] }));
+    assert_eq!(a["ok"], true, "{a}");
+    assert!(stdout_of(&a).contains("[--replicas=2]"));
+
+    // production asks even for a read; a blocked cluster refuses without asking
+    let before = seen.lock().unwrap().len();
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "prod", "args": ["get", "pods"] }));
+    assert_eq!(a["ok"], true, "{a}");
+    assert_eq!(seen.lock().unwrap().len(), before + 1);
+    assert!(seen.lock().unwrap().last().unwrap().production);
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "shut", "args": ["get", "pods"] }));
+    assert_eq!(a["ok"], false);
+    assert_eq!(seen.lock().unwrap().len(), before + 1);
+
+    // the agent cannot choose the cluster's login, nor name a cluster that does not exist, nor chain a command
+    for bad in [json!({ "cluster": "lab", "args": ["get", "pods", "--kubeconfig", "/etc/x"] }), json!({ "cluster": "lab", "args": ["get", "pods", "--server=https://evil"] }), json!({ "cluster": "nope", "args": ["get", "pods"] }), json!({ "cluster": "lab" })] {
+        assert_eq!(call(&r, "oso_kubectl", bad.clone())["ok"], false, "{bad}");
+    }
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "lab", "args": ["get", "pods", ";", "touch", "/tmp/oso-pwned"] }));
+    assert!(!Path::new("/tmp/oso-pwned").exists(), "`;` is only a word for kubectl");
+    assert!(stdout_of(&a).contains("[;]"), "{a}");
+
+    // the context lists the clusters (names, never a kubeconfig), and the record says what happened
+    let c = call(&r, "oso_context", json!({}));
+    let names: Vec<&str> = c["result"]["kubernetes_clusters"].as_array().unwrap().iter().filter_map(|x| x["name"].as_str()).collect();
+    assert_eq!(names, vec!["lab", "prod", "shut"]);
+    assert!(audit(&r).iter().any(|e| e["action"] == "kubectl" && e["decision"] == "allowed_without_asking"));
+    // the window's lists: reads only
+    let id = r.engine.lock().unwrap().clusters.find("lab").unwrap().id;
+    assert!(r.handler.cluster_read(id, &["get".into(), "pods".into()]).unwrap().contains("[get] [pods]"));
+    assert!(r.handler.cluster_read(id, &["delete".into(), "pod".into(), "x".into()]).is_err());
+}
+
+#[test]
+fn kubectl_on_a_cluster_behind_a_server_is_a_command_on_that_server_with_its_rule() {
+    use oso_core::k8s::Cluster;
+    let sshd = need_sshd!("kube-ssh");
+    let r = rig("kube-ssh");
+    let k = fake_kubectl(&r.dir);
+    let auto = add_server(&r, &sshd, "node-auto", None, AiPolicy::ReadOnlyAuto, "");
+    let ask = add_server(&r, &sshd, "node-ask", None, AiPolicy::Ask, "");
+    {
+        let mut e = r.engine.lock().unwrap();
+        e.clusters.save(Cluster { name: "k3s-auto".into(), via_server: Some(auto), kubectl: k.clone(), ..Default::default() }).unwrap();
+        e.clusters.save(Cluster { name: "k3s-ask".into(), via_server: Some(ask), kubectl: k.clone(), ..Default::default() }).unwrap();
+    }
+    let seen = person(&r.approvals, |_| Decision::Once);
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "k3s-auto", "args": ["get", "nodes"] }));
+    assert_eq!(a["ok"], true, "{a}");
+    assert!(stdout_of(&a).contains("[get] [nodes]"), "{a}");
+    assert!(seen.lock().unwrap().is_empty(), "the server's read-only rule let it through");
+    let a = call(&r, "oso_kubectl", json!({ "cluster": "k3s-ask", "args": ["get", "nodes"] }));
+    assert_eq!(a["ok"], true, "{a}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "that server asks about everything");
+}

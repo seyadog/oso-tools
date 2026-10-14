@@ -73,6 +73,9 @@ pub struct Forward {
     pub port: u16,
 }
 
+/// How many colours the window has for servers (and for projects).
+pub const COLORS: u8 = 12;
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Server {
     pub id: u64,
@@ -105,6 +108,10 @@ pub struct Server {
     pub notes: String,
     #[serde(default)]
     pub env_kind: Option<EnvKind>,
+    /// Which of the window's colours the server wears (an index of its palette). Given once, when the server is
+    /// added, and kept: so a server is always the same colour and two servers rarely share one.
+    #[serde(default)]
+    pub color: Option<u8>,
     /// The saved proxy this server (or, if it is the first hop, everything behind it) is reached through.
     #[serde(default)]
     pub proxy: Option<u64>,
@@ -322,8 +329,29 @@ impl Store {
         id
     }
 
+    /// The colour that fewest servers have (the first one on a tie).
+    fn free_color(&self) -> u8 {
+        (0..COLORS).min_by_key(|c| self.servers.iter().filter(|s| s.color == Some(*c)).count()).unwrap_or(0)
+    }
+
+    /// Gives a colour to every server that has none (older files). Says whether it changed anything.
+    pub fn assign_colors(&mut self) -> bool {
+        let mut changed = false;
+        for i in 0..self.servers.len() {
+            if self.servers[i].color.is_none() {
+                let c = self.free_color();
+                self.servers[i].color = Some(c);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn add_server(&mut self, mut s: Server) -> u64 {
         s.id = self.new_id();
+        if s.color.is_none() {
+            s.color = Some(self.free_color());
+        }
         let id = s.id;
         self.servers.push(s);
         id
@@ -472,6 +500,28 @@ impl Store {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_server_keeps_its_own_colour_until_the_palette_runs_out() {
+        let mut st = Store::default();
+        let ids: Vec<u64> = (0..COLORS + 2).map(|i| st.add_server(Server { name: format!("s{i}"), ..Default::default() })).collect();
+        let first: Vec<u8> = ids.iter().take(COLORS as usize).map(|id| st.server(*id).unwrap().color.unwrap()).collect();
+        let mut sorted = first.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), COLORS as usize, "the first servers all differ: {first:?}");
+        // an older file has no colours: they are given once, and then they stay
+        for s in st.servers.iter_mut() {
+            s.color = None;
+        }
+        assert!(st.assign_colors());
+        let before: Vec<_> = st.servers.iter().map(|s| s.color).collect();
+        assert!(!st.assign_colors());
+        assert_eq!(before, st.servers.iter().map(|s| s.color).collect::<Vec<_>>());
+        // removing one does not repaint the others
+        st.servers.remove(0);
+        assert_eq!(before[1..], st.servers.iter().map(|s| s.color).collect::<Vec<_>>()[..]);
+    }
+
     fn srv(name: &str, parent: Option<u64>) -> Server {
         Server {
             id: 0,
@@ -489,6 +539,7 @@ mod tests {
             forwards: vec![],
             notes: String::new(),
             env_kind: None,
+            color: None,
             proxy: None,
             network: None,
             ai_policy: Default::default(),

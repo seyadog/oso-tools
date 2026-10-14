@@ -16,6 +16,7 @@ pub mod daemon;
 pub mod engine;
 pub mod envscan;
 pub mod jobs;
+pub mod k8s;
 pub mod integration;
 pub mod known_hosts;
 pub mod lockwatch;

@@ -20,6 +20,9 @@ struct AppState {
     engine: Arc<Mutex<Engine>>,
 }
 
+/// The agents' handler, which the window also uses to read a cluster for its lists.
+struct HandlerHolder(Arc<oso_core::agent_api::Handler>);
+
 /// Keeps the command line's socket open as long as the app runs.
 struct ControlHolder(#[allow(dead_code)] Option<oso_core::control::Control>);
 
@@ -75,6 +78,23 @@ macro_rules! engine {
     ($state:expr) => {
         $state.engine.lock().map_err(|_| "internal error: the engine is stuck".to_string())?
     };
+}
+
+/// Which colour each project (a folder an agent works in) wears: its index in the window's palette.
+#[tauri::command]
+fn project_colors() -> Res<Value> {
+    let path = oso_core::store::Store::config_dir().join("settings.json");
+    let file = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    Ok(file.and_then(|f| f.get("project_colors").cloned()).filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({})))
+}
+
+#[tauri::command]
+fn project_colors_save(colors: Value) -> Res<()> {
+    if !colors.is_object() {
+        return Err("colors must be a map".into());
+    }
+    oso_core::settings::save_key_in(&oso_core::store::Store::config_dir(), "project_colors", colors);
+    Ok(())
 }
 
 #[tauri::command]
@@ -398,6 +418,56 @@ fn move_into(state: State<AppState>, kind: String, id: u64, dest: Option<u64>) -
 #[tauri::command]
 fn open_session(state: State<AppState>, server_id: u64, rows: u16, cols: u16, use_vault: bool, space: Option<u64>, cwd: Option<String>) -> Res<SessionInfo> {
     engine!(state).open_in(server_id, rows, cols, use_vault, oso_core::engine::OpenCtx { space, cwd }).map_err(open_err)
+}
+
+/// The saved Kubernetes clusters.
+#[tauri::command]
+fn cluster_list(state: State<AppState>) -> Res<Vec<oso_core::k8s::Cluster>> {
+    Ok(engine!(state).clusters.list().to_vec())
+}
+
+/// Saves a cluster (id 0: a new one) and returns its id.
+#[tauri::command]
+fn cluster_save(state: State<AppState>, cluster: oso_core::k8s::Cluster) -> Res<u64> {
+    let mut e = engine!(state);
+    let id = e.clusters.save(cluster).map_err(err)?;
+    // its address or ports may have changed: the tunnel is switched on again by the person
+    e.cluster_tunnel_stop(id);
+    Ok(id)
+}
+
+/// Switches on the tunnel of a cluster reached through a server (its API on a port of this computer).
+#[tauri::command]
+fn cluster_tunnel_start(state: State<AppState>, id: u64, use_vault: bool) -> Res<()> {
+    engine!(state).cluster_tunnel_start(id, use_vault).map_err(open_err)
+}
+
+#[tauri::command]
+fn cluster_tunnel_stop(state: State<AppState>, id: u64) -> Res<()> {
+    engine!(state).cluster_tunnel_stop(id);
+    Ok(())
+}
+
+#[tauri::command]
+fn cluster_delete(state: State<AppState>, id: u64) -> Res<()> {
+    let mut e = engine!(state);
+    e.cluster_tunnel_stop(id);
+    e.clusters.delete(id).map_err(err)
+}
+
+/// The kubectl command line of a cluster (its flags included), to type in a terminal.
+#[tauri::command]
+fn cluster_line(state: State<AppState>, id: u64, rest: String) -> Res<String> {
+    let e = engine!(state);
+    let c = e.clusters.get(id).ok_or_else(|| "That cluster no longer exists.".to_string())?;
+    Ok(oso_core::k8s::full_line(c, &rest))
+}
+
+/// What a kubectl command that only reads prints on a cluster (for the lists in the panel).
+#[tauri::command]
+async fn cluster_read(state: State<'_, HandlerHolder>, id: u64, args: Vec<String>) -> Res<String> {
+    let handler = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || handler.cluster_read(id, &args)).await.map_err(|e| e.to_string())?
 }
 
 /// The saved Spaces.
@@ -739,6 +809,7 @@ fn main() {
                 let _ = shown.emit("approval", &r);
             }));
             let handler = Arc::new(oso_core::agent_api::Handler::new(Arc::clone(&engine), Arc::clone(&approvals)));
+            app.manage(HandlerHolder(Arc::clone(&handler)));
             if let Ok(e) = engine.lock() {
                 e.set_agent_handler(Arc::new(move |call| handler.handle(call)));
             }
@@ -843,6 +914,15 @@ fn main() {
             move_into,
             open_session,
             space_list,
+            cluster_list,
+            cluster_save,
+            cluster_delete,
+            project_colors,
+            project_colors_save,
+            cluster_tunnel_start,
+            cluster_tunnel_stop,
+            cluster_read,
+            cluster_line,
             space_save,
             space_delete,
             space_migration,

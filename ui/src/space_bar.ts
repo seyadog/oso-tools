@@ -4,7 +4,7 @@
 // General is what is in no Space: it is available in every Space. A Space may fix a Tailscale account, a GitHub account,
 // a proxy for its local terminals and cloud settings; oso asks before switching an account.
 
-import { AccountChange, AccountsView, Backend, CloudOptions, Proxy, Space, SpaceSettings } from "./api";
+import { AccountsView, Backend, CloudOptions, Proxy, SpaceSettings } from "./api";
 import { clear, confirmBox, el, field, makeSelect, openModal, toast } from "./dom";
 import { icon } from "./icons";
 import { accountChoices } from "./accounts_ui";
@@ -154,77 +154,4 @@ function proxyForm(be: Backend, existing: Proxy | null, onChange: () => Promise<
     };
     return form;
   }, again);
-}
-
-/** "Switch to it?": the accounts a Space asks for that are not the ones in use. `switch` uses them, `keep` goes in without. */
-export function accountsAsk(spaceName: string, changes: AccountChange[]): Promise<"switch" | "keep" | "cancel"> {
-  return new Promise((resolve) => {
-    let answered = false;
-    const finish = (v: "switch" | "keep" | "cancel", close: () => void) => {
-      answered = true;
-      resolve(v);
-      close();
-    };
-    openModal(
-      (close) => {
-        const tool = { github: "GitHub", tailscale: "Tailscale" } as const;
-        const lines = changes.map((c) => el("li", {}, `${tool[c.tool]}: ${c.wanted}`, el("small", { class: "dim" }, ` (now ${c.current})`)));
-        const sw = el("button", { class: "btn primary", type: "button", "data-act": "accounts-switch" }, `Switch ${changes.length > 1 ? "them" : "it"}`);
-        const keep = el("button", { class: "btn", type: "button", "data-act": "accounts-keep" }, "Go in without switching");
-        const no = el("button", { class: "btn", type: "button", "data-act": "accounts-cancel" }, "Cancel");
-        sw.onclick = () => finish("switch", close);
-        keep.onclick = () => finish("keep", close);
-        no.onclick = () => finish("cancel", close);
-        return el("div", { class: "accounts-ask", "data-sheet": "accounts-ask" }, el("h2", {}, `${spaceName} uses other accounts`), el("div", { class: "hint", style: "margin:0 0 8px" }, "Nothing is switched unless you say so:"), el("ul", {}, ...lines), el("div", { class: "actions" }, no, keep, sw));
-      },
-      () => {
-        if (!answered) resolve("cancel");
-      },
-    );
-  });
-}
-
-/** What the selector at the top says about where you are, and what it offers. */
-export interface BarState {
-  spaces: Space[];
-  /** The Space in use (null: General). */
-  active: number | null;
-  /** The sidebar shows what is in every Space. */
-  all: boolean;
-  /** What the Space in use (or General) fixes: shown in red when it is a production one. */
-  production: boolean;
-}
-
-export interface BarHooks {
-  /** Work in this Space (null: General): the window asks about the accounts first. */
-  select(id: number | null): Promise<void>;
-  newSpace(): void;
-  /** "Manage": the form of the Space in use, or General's. */
-  manage(): void;
-  setAll(all: boolean): Promise<void>;
-}
-
-/**
- * The top of the left panel: which Space you work in (large, always there), "+ New Space" inside its list, a switch to see
- * what is in every Space, and the manager.
- */
-export function spaceBar(state: BarState, hooks: BarHooks): HTMLElement {
-  const { spaces, active, all, production } = state;
-  const bar = el("div", { class: `space-bar${production ? " prod" : ""}` });
-  const label = el("div", { class: "pb-label" }, "Space");
-  const sel = makeSelect([["", "General"], ...spaces.map((s): [string, string] => [String(s.id), s.name]), ["__new", "+ New Space"]], active === null ? "" : String(active), { "data-name": "active-space", title: "The Space you work in: its servers, secrets and tabs, and General's, which is in every Space" });
-  sel.onchange = async () => {
-    if (sel.value === "__new") {
-      sel.value = active === null ? "" : String(active);
-      return hooks.newSpace();
-    }
-    await hooks.select(sel.value === "" ? null : Number(sel.value));
-  };
-  const eye = el("button", { class: `ib${all ? " on" : ""}`, type: "button", title: all ? "Showing what is in every Space (click to show only this one and General)" : "Show what is in every Space", "aria-pressed": String(all), "data-act": "view-all" });
-  eye.append(icon("eye", 15));
-  eye.onclick = () => void hooks.setAll(!all);
-  const more = el("button", { class: "sec-btn", type: "button", title: active === null ? "What General fixes: accounts, proxy, cloud settings" : "Edit this Space", "data-act": "space-manage" }, "Manage");
-  more.onclick = () => hooks.manage();
-  bar.append(label, el("div", { class: "pb-row" }, sel, eye, more));
-  return bar;
 }

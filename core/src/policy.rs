@@ -93,11 +93,25 @@ fn stage_is_read_only(w: &[String]) -> bool {
         "dmesg" => !flag("-c") && !flag("-C") && !flag("--clear") && !flag("-D") && !flag("-E"),
         "systemctl" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "is-active" | "is-enabled" | "is-failed" | "list-units" | "list-unit-files" | "list-timers" | "list-sockets" | "show" | "cat")),
         "docker" | "podman" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "ps" | "images" | "logs" | "inspect" | "version" | "info" | "stats" | "top" | "port" | "diff")),
-        "kubectl" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "get" | "describe" | "logs" | "version" | "top" | "api-resources")),
+        "kubectl" => kubectl_verb(args).is_some_and(|a| matches!(a, "get" | "describe" | "logs" | "version" | "top" | "api-resources" | "api-versions" | "cluster-info" | "explain")) && !flag("--raw") && !flag("--as") && !flag("--token"),
+        "k3s" | "microk8s" if args.first().is_some_and(|a| a == "kubectl") => stage_is_read_only(&w[1..]),
         "git" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "log" | "diff" | "show" | "rev-parse" | "describe" | "ls-files" | "blame" | "shortlog" | "remote" | "branch" | "tag")) && !args.iter().any(|a| matches!(a.as_str(), "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "--delete" | "--move" | "add" | "set-url" | "remove" | "rm" | "rename" | "prune")),
         "find" => !args.iter().any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")),
         _ => false,
     }
+}
+
+/// The verb of a kubectl command (`get`, `logs`...): the first word that is not a flag or the value of one that takes a value.
+fn kubectl_verb(args: &[String]) -> Option<&str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if matches!(a.as_str(), "-n" | "--namespace" | "--context" | "--cluster" | "--user" | "--kubeconfig" | "-s" | "--server") {
+            it.next();
+        } else if !a.starts_with('-') {
+            return Some(a);
+        }
+    }
+    None
 }
 
 /// Does the command line run `sudo` as a command (not just mention the word, as `grep sudo /etc/group` does)?
@@ -189,6 +203,16 @@ mod tests {
     fn reading_what_holds_secrets_is_not_let_through_unasked() {
         for c in ["cat ~/.ssh/id_rsa", "cat /home/u/.ssh/id_ed25519", "cat .env", "cat /etc/shadow", "cat /proc/1/environ", "cat ~/.aws/credentials", "grep -r password /etc", "kubectl get secrets", "ls ~/.ssh", "head /var/app/token.txt", "cat /root/.kube/config"] {
             assert!(!is_read_only(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn kubectl_reads_pass_and_changes_ask() {
+        for c in ["kubectl get pods", "kubectl get pods -A -o wide", "kubectl -n web get pods", "kubectl --context prod -n web logs web-1 --tail 50", "kubectl describe node n1", "kubectl top pods", "k3s kubectl get nodes", "microk8s kubectl get pods", "kubectl get pods -l app=web"] {
+            assert!(is_read_only(c), "{c}");
+        }
+        for c in ["kubectl delete pod x", "kubectl -n web delete pod x", "kubectl apply -f x.yaml", "kubectl exec -it web -- sh", "kubectl scale deploy web --replicas=0", "kubectl get secrets", "kubectl get pods --raw /x", "kubectl --as admin get pods", "kubectl rollout restart deploy web", "kubectl config view", "k3s server", "k3s kubectl delete pod x", "kubectl -n"] {
+            assert!(!is_read_only(c), "{c}");
         }
     }
 

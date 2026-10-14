@@ -3,6 +3,7 @@
 // is waiting, the same answer the window gives. Nothing secret reaches it: the log is blanked of the vault's values
 // before it is written.
 
+import { projectColor } from "./colors";
 import { Activity, ActivityDetail, ApprovalDecision, ApprovalRequest, Backend } from "./api";
 import { AgentState, SavedAgent } from "./agents";
 import { hasSudo, writeCommand } from "./sudo";
@@ -153,10 +154,9 @@ export interface AgentRow {
   spaceId: number | null;
 }
 
-/** Each agent has its own colour, so that two of them are told apart at a glance: neighbours in the list are far apart on the colour wheel. */
-export function agentColor(sid: number): string {
-  const hues = [210, 30, 150, 330, 55, 270, 180, 0, 100, 300];
-  return `hsl(${hues[Math.abs(sid) % hues.length]} 70% 62%)`;
+/** An agent wears the colour of its project (its folder), which never changes: see `colors.ts`. */
+export function agentColor(project: string | number): string {
+  return projectColor(String(project));
 }
 
 export const STATE_WORD: Record<AgentState, string> = { needs_you: "needs you", working: "working", finished: "finished", idle: "idle" };
@@ -388,7 +388,7 @@ export class RightPanel {
     const forget = el("button", { class: "rp-forget", type: "button", title: "Take it off the list", "aria-label": "Forget this agent", "data-act": "agent-forget" }, "×");
     const row = el(
       "div",
-      { class: "rp-agent saved", style: `--ag: ${agentColor(s.cwd.length)}`, "data-saved": s.cwd, role: "button", tabindex: "0", title: `${s.cwd} · click to open it and start ${s.name}` },
+      { class: "rp-agent saved", style: `--ag: ${agentColor(s.cwd)}`, "data-saved": s.cwd, role: "button", tabindex: "0", title: `${s.cwd} · click to open it and start ${s.name}` },
       el("span", { class: "sdot" }),
       el("div", { class: "txt" }, el("b", { class: "repo" }, s.folder || s.cwd), el("small", { class: "who" }, s.name), s.branch ? el("small", {}, `⎇ ${s.branch}`) : null, el("small", {}, `last seen ${openFor(s.last, now) === "just opened" ? "just now" : `${openFor(s.last, now)} ago`}`)),
       forget,
@@ -412,7 +412,7 @@ export class RightPanel {
     const meta = [r.branch ? `⎇ ${r.branch}` : "", openFor(r.since, now)].filter(Boolean).join(" · ");
     const row = el(
       "div",
-      { class: `rp-agent ${r.state}`, style: `--ag: ${agentColor(r.sid)}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
+      { class: `rp-agent ${r.state}`, style: `--ag: ${agentColor(r.cwd || r.sid)}`, "data-agent-row": String(r.sid), "data-state": r.state, role: "button", tabindex: "0", title: `${r.where}${r.source === "screen" ? " · guessed from the screen" : r.source === "process" ? " · only known to be running" : ""}` },
       el("span", { class: "sdot" }),
       el(
         "div",

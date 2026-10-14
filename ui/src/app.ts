@@ -1,12 +1,14 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
-import { AccountsView, AgentKindRow, Backend, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
+import { AccountsView, AgentKindRow, Backend, Cluster, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { MenuItem, clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
-import { SpacesCtx, editSpace, newSpace, renderSpaces } from "./spaces_ui";
-import { emptySpace, openSpaces, tabFor, withTab } from "./spaces";
+import { quote as shellWord } from "./k8s";
+import { K8sCtx, clusterForm, consoleView, dropConsole, redrawConsole, renderClusters } from "./k8s_ui";
+import { tabFor } from "./spaces";
 import { DEFAULTS, LABELS, MODIFIERS, buildBindings, comboText, matchAction, modifierOf, parseCombo, resolveMod } from "./hotkeys";
 import { icon, logoMark, serverColor } from "./icons";
+import { setProjectColors, setServerColors } from "./colors";
 import { Transfers, filesDialog } from "./files_ui";
 import { parseHostKeyWarning } from "./hostkey";
 import { Pane } from "./pane";
@@ -29,10 +31,10 @@ import { soundsDialog } from "./sounds_ui";
 import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
-import { accountsAsk, generalDialog, spaceBar } from "./space_bar";
+import { generalDialog } from "./space_bar";
 import { KIND_LABEL, copyForAWhile, secretForm, secretsDialog } from "./secrets_ui";
 import { describe as describeTunnel, tunnelUrl } from "./tunnels";
-import { copyButton, openInBrowser, switchOn, tunnelForm, tunnelsDialog } from "./tunnels_ui";
+import { copyButton, openInBrowser, switchOn, switchOnWith, tunnelForm, tunnelsDialog } from "./tunnels_ui";
 import { Watch, noteInput, noteOutput, startWatch, verdict } from "./watch";
 import { Place, Workspace } from "./workspace";
 
@@ -46,6 +48,8 @@ interface Drag {
   active: boolean;
   target: { sid: Id | null; side: Side | null } | null;
   toBar: boolean;
+  /** A tab of the bar being dragged along the bar: where it would land (the place it will have), and which tab shows the mark. */
+  slot: { to: number; at: Element; after: boolean } | null;
 }
 
 export class App {
@@ -82,7 +86,6 @@ export class App {
   /** The secrets (names and types only) while the vault is unlocked: the left panel lists them. */
   private secretsMeta: SecretMeta[] | null = null;
   /** The secret that is this computer's sudo password (null: none, or the vault is locked). */
-  private localSudoId: number | null = null;
   /** How many tunnels are on (the mark on the Tunnels button). */
   private tunnelsUp = 0;
   private fileOver: Pane | null = null;
@@ -113,7 +116,7 @@ export class App {
   private tabsEl = el("div", { class: "tabs" });
   private toolsEl = el("div", { class: "tools" });
   private treeEl = el("div", { class: "tree", tabindex: "0" });
-  private spaceEl = el("div", { class: "space-slot" });
+  clusters: Cluster[] = [];
   private search = el("input", { type: "search", placeholder: "Search servers", autocomplete: "off", spellcheck: "false" });
   private dividers: HTMLElement[] = [];
 
@@ -191,15 +194,13 @@ export class App {
     window.setInterval(() => void this.pollTunnels(), 3000);
     await this.loadKeys();
     this.snippets = (await this.readJson<{ name: string; command: string }[]>("snippets.json")) ?? [];
+    setProjectColors(await this.be.projectColors().catch(() => ({})), (m) => void this.be.projectColorsSave(m).catch(() => {}));
     await this.refreshSpaces();
-    // the saved groups of an older version became Spaces when the engine started: say so once
-    const migrated = await this.be.spaceMigration().catch(() => null);
-    if (migrated && (migrated.imported.length || migrated.skipped.length)) {
-      const n = migrated.imported.length;
-      toast(`Your saved groups are Spaces now (${n} moved${migrated.skipped.length ? `, ${migrated.skipped.length} could not be read: ${migrated.skipped.join(", ")}` : ""}). Find them under Spaces on the left.`, 9000);
-    }
-    const pm = await this.be.spaceProfileMigration().catch(() => null);
-    if (pm) toast(`Your profiles are Spaces now (${pm.spaces.join(", ") || "none"}). What was in no profile is General. A copy of the old files is in ${pm.backup}.`, 12000);
+    await this.refreshClusters();
+    // Spaces are not offered any more: the window always works in General and shows everything
+    const t0 = await this.be.tree();
+    if (t0.active_space !== null) await this.be.setActiveSpace(null);
+    if (!t0.view_all) await this.be.setViewAll(true);
     await this.refreshTree();
     this.vault = await this.be.vaultStatus();
     void this.refreshAccounts();
@@ -257,13 +258,15 @@ export class App {
         await this.be.writeConfig("selftest.out", report.join("\n"));
         return;
       }
-      if (want.startsWith("open:")) {
-        // opens the Space of that name and leaves the window as it is: for looking at it (or taking a picture of it)
+      if (want === "k8s") {
+        // opens the Kubernetes panel on the first cluster, for looking at it (or taking a picture of it)
         await wait(1500);
-        const sp = this.spaces.find((x) => x.name === want.slice(5));
-        if (sp) await this.openSpace(sp);
-        await wait(4000);
-        await this.be.writeConfig("selftest.out", sp ? `opened ${sp.name}` : `no Space called ${want.slice(5)}`);
+        this.toggleSection("kubernetes", true);
+        await wait(500);
+        (document.querySelector(".row.cluster") as HTMLElement | null)?.click();
+        await wait(3500);
+        const rows = [...document.querySelectorAll(".row.pod")].map((r) => r.textContent ?? "");
+        await this.be.writeConfig("selftest.out", `clusters: ${this.clusters.length}\npods: ${rows.length}\n${rows.join("\n")}\nerror: ${document.querySelector("[data-k8s-error]")?.textContent ?? "-"}`);
         return;
       }
       if (want === "sound") {
@@ -316,10 +319,8 @@ export class App {
         const sh = this.ws.shape()!;
         const tab = tabFor("selftest", sh.shape, false, [{ server: LOCAL, name: "Local", cwd: "" }, { server: LOCAL, name: "Local", cwd: "" }]);
         tab.panes[0].command = "echo group-ok-$((6*7))";
-        const spaceId = await this.be.spaceSave({ ...emptySpace(), name: "selftest", tabs: [tab] });
-        await this.refreshSpaces();
         for (const id of [...this.ws.tabs.keys()]) await this.closeSession(id);
-        await this.openSpace(this.spaces.find((x) => x.id === spaceId)!);
+        await this.openLayout(tab);
         await wait(4000);
         const sids = this.ws.tabsHere().map((t) => t.sid);
         report.push(`group: ${this.ws.screen.groups.length} tab, ${sids.length} terminals, mosaic ${this.ws.screen.mode}`);
@@ -422,6 +423,7 @@ export class App {
     this.saveTimer = window.setTimeout(() => {
       void this.be.writeConfig("workspace.json", JSON.stringify(this.ws.save()));
       this.ws.tabs.forEach((t) => {
+        if (t.view) return;
         const order = this.ws.screens[t.screen].order.indexOf(t.sid);
         void this.be.setMeta(t.sid, { title: t.title, server_id: t.serverId, screen: t.screen, order: t.screen * 100 + order, opened: this.opened.get(t.sid), ...(t.space != null ? { space: t.space } : {}), ...(t.cwd ? { cwd: t.cwd } : {}) });
       });
@@ -431,8 +433,21 @@ export class App {
   async refreshTree() {
     this.tree = await this.be.tree();
     for (const s of this.tree.servers) this.prod.set(s.id, s.env_kind === "production");
+    setServerColors(this.tree.servers);
     this.renderSidebar();
     this.render();
+  }
+
+  private clusterColor(id: number): string {
+    return this.clusters.find((c) => c.id === id)?.env_kind === "production" ? "var(--red)" : serverColor(100000 + id);
+  }
+
+  /** The colour of a terminal: its project's when an agent works in it, else its server's. */
+  private tabColor(sid: Id, serverId: number): string {
+    const view = this.ws.tabs.get(sid)?.view;
+    if (view) return this.clusterColor(view.cluster);
+    const agent = this.agentRows().find((r) => r.sid === sid && r.folder);
+    return agent ? agentColor(agent.cwd || agent.sid) : serverColor(serverId);
   }
 
   private async refreshVaultMark() {
@@ -564,6 +579,7 @@ export class App {
         onWatch: (s) => this.toggleWatch(s),
         onContextMenu: (e, s) => this.paneMenu(e, s),
       });
+      if (tab.view) p.setView(consoleView(this.k8sCtx(), tab.view.cluster));
       p.attach(this.stage);
       this.panes.set(sid, p);
     }
@@ -815,7 +831,7 @@ export class App {
     if (w) noteInput(w, Date.now());
     const team = this.ws.broadcastTeam(sid);
     if (team) {
-      for (const id of team) if (!this.ws.tabs.get(id)?.dead) void this.be.write(id, data);
+      for (const id of team) if (!this.ws.tabs.get(id)?.dead && !this.ws.tabs.get(id)?.view) void this.be.write(id, data);
       return;
     }
     void this.be.write(sid, data);
@@ -877,10 +893,14 @@ export class App {
     this.opened.delete(sid);
     this.watches.delete(sid);
     this.alerts.delete(sid);
+    const view = this.ws.tabs.get(sid)?.view;
     this.ws.closeTab(sid);
     pane?.dispose();
     this.panes.delete(sid);
-    if (kill) await this.be.close(sid).catch(() => {});
+    if (view) {
+      dropConsole(view.cluster);
+      this.renderSidebar();
+    } else if (kill) await this.be.close(sid).catch(() => {});
     this.focusActive();
   }
 
@@ -1099,7 +1119,7 @@ export class App {
       pane.setTitle(tab.title);
       pane.setNumber(here.indexOf(tab.sid) + 1);
       pane.setWatching(this.watches.has(tab.sid));
-      pane.setColor(serverColor(tab.serverId));
+      pane.setColor(this.tabColor(tab.sid, tab.serverId));
       Object.assign(pane.root.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px` });
       pane.forceRefit();
     }
@@ -1135,12 +1155,12 @@ export class App {
     }));
     const help = el("button", { class: "btn small", type: "button", "data-act": "home-shortcuts" }, `All shortcuts  (${this.keyText("help.open")} or ?)`);
     help.onclick = () => this.shortcutsSheet();
-    home.append(el("div", { class: "tip" }, `Secrets live in the encrypted vault (Secrets, left). Everything has a tooltip with its shortcut. Press ${this.keyText("palette.open")} to find any command, server, Space or tab. `, help));
+    home.append(el("div", { class: "tip" }, `Secrets live in the encrypted vault (Secrets, left). Everything has a tooltip with its shortcut. Press ${this.keyText("palette.open")} to find any command, server or tab. `, help));
     return home;
   }
 
   private startState(): StartState {
-    return { spaces: this.spaces.length, apiKeys: this.secretsMeta ? this.secretsMeta.filter((m) => m.kind === "api_key").length : null, openedLocal: localStorage.getItem("oso.openedLocal") === "1", aiConnected: this.aiConnected };
+    return { apiKeys: this.secretsMeta ? this.secretsMeta.filter((m) => m.kind === "api_key").length : null, openedLocal: localStorage.getItem("oso.openedLocal") === "1", aiConnected: this.aiConnected };
   }
 
   private aiConnected = false;
@@ -1156,7 +1176,6 @@ export class App {
 
   /** The button of a step of "Getting started". */
   private async startStep(id: StepId) {
-    if (id === "space") return void newSpace(this.spacesCtx());
     if (id === "key") return void this.newSecret({ kind: "api_key", agent_visible: true });
     if (id === "terminal") return void this.openServer(LOCAL);
     return void connectAiDialog(this.be, () => void this.refreshAi());
@@ -1181,7 +1200,7 @@ export class App {
       done.onclick = close;
       return el("div", {}, el("h2", {}, "Help"), el("div", { class: "ways" },
         item("help-shortcuts", `Shortcuts  (${this.keyText("help.open")} or ?)`, "Every shortcut, as they are set right now", () => this.shortcutsSheet()),
-        item("help-start", "Getting started", "Space, API key, local terminal, connect your AI", () => {
+        item("help-start", "Getting started", "API key, local terminal, connect your AI", () => {
           localStorage.removeItem("oso.start");
           this.render();
           openModal((closeStart) => {
@@ -1223,8 +1242,8 @@ export class App {
         "div",
         { class: `tab${i === ws.screen.cur ? " on" : ""}${t.dead ? " dead" : ""}${t.dead && this.retry.has(g.active) ? " retrying" : ""}${this.isProd(t.serverId) ? " prod" : ""}`, "data-sid": String(g.active), title: `Tab ${i + 1}${i < 9 ? `  (${this.keyText(`tab.${i + 1}`)})` : ""}` },
         el("span", { class: "num" }, String(i + 1)),
-        el("span", { class: "dot", style: `background:${serverColor(t.serverId)}` }),
-        agent ? el("b", { class: "tab-proj", style: `color:${agentColor(agent.sid)}`, title: agent.cwd }, agent.folder) : null,
+        el("span", { class: "dot", style: `background:${t.view ? this.clusterColor(t.view.cluster) : agent ? agentColor(agent.cwd || agent.sid) : serverColor(t.serverId)}` }),
+        agent ? el("b", { class: "tab-proj", style: `color:${agentColor(agent.cwd || agent.sid)}`, title: agent.cwd }, agent.folder) : null,
         agent && !t.named ? null : el("span", {}, t.title),
       );
       const dot = tabDot(ids.flatMap((id) => this.agentRows().filter((r) => r.sid === id).map((r) => r.state)));
@@ -1248,7 +1267,6 @@ export class App {
         ws.focus(g.active);
         contextMenu(e.clientX, e.clientY, [
           { label: "Rename", run: () => void this.renameTab(g.active), hint: this.keyText("tab.rename") },
-          { label: "Save in a Space…", run: () => void this.saveTabToSpace(), hint: this.keyText("group.save") },
           { label: ids.length > 1 ? `Close tab (${ids.length} terminals)` : "Close", run: () => void this.closeTab(ids), danger: true, hint: this.keyText("tab.close") },
         ]);
       });
@@ -1338,13 +1356,31 @@ export class App {
   /** The menu of a terminal: what can be done with it, here. */
   private paneMenu(e: MouseEvent, sid: Id) {
     this.focusSession(sid);
-    const items = this.menuOf(["split.right", "split.down", "broadcast.toggle", "watch.toggle", "files.open", "tab.close"]);
+    const pane = this.panes.get(sid);
+    const clip: MenuItem[] = [];
+    const picked = pane?.selection() ?? "";
+    if (picked) clip.push({ label: "Copy", hint: "Ctrl+Shift+C", act: "pane-copy", run: () => void navigator.clipboard?.writeText(picked).catch(() => toast("Could not copy")) });
+    clip.push({
+      label: "Paste",
+      hint: "Ctrl+Shift+V",
+      act: "pane-paste",
+      run: () => {
+        navigator.clipboard
+          .readText()
+          .then((t) => {
+            if (t) pane?.paste(t);
+            pane?.focus();
+          })
+          .catch(() => toast("The window cannot read the clipboard: press Ctrl+Shift+V"));
+      },
+    });
+    const items = [...clip, ...this.menuOf(["split.right", "split.down", "broadcast.toggle", "watch.toggle", "files.open", "tab.close"])];
     if (items.length) contextMenu(e.clientX, e.clientY, items);
   }
 
   // ------------------------------------------------------------ the command palette
 
-  /** Everything the palette can find: the actions that apply, servers, Spaces, secrets (names only) and the open tabs. */
+  /** Everything the palette can find: the actions that apply, servers, clusters, secrets (names only) and the open tabs. */
   private paletteItems(): Item[] {
     const pending = this.ws.pending;
     const items: Item[] = applicable(this.actionCtx()).map((a) => ({ id: a.id, kind: "action", label: a.label, icon: a.icon, hotkey: this.keyText(a.id) || undefined, keywords: a.keywords, run: () => this.run(a.id) }));
@@ -1354,7 +1390,7 @@ export class App {
     };
     items.push({ id: String(LOCAL), kind: "server", label: "Local terminal", sub: "this computer", icon: "terminal", run: open(LOCAL) });
     for (const s of this.tree.servers) items.push({ id: String(s.id), kind: "server", label: s.name, sub: `${s.user ? s.user + "@" : ""}${s.host}`, icon: "server", run: open(s.id) });
-    for (const sp of this.spaces) items.push({ id: String(sp.id), kind: "space", label: sp.name, sub: "Space", icon: "layers", keywords: sp.notes.slice(0, 80), run: () => void this.openSpace(sp) });
+    for (const c of this.clusters) items.push({ id: `cluster${c.id}`, kind: "action", label: `Kubernetes: ${c.name}`, sub: "cluster", icon: "helm", keywords: `k8s kubectl ${c.context}`, run: () => this.openCluster(c) });
     for (const m of this.secretsMeta ?? []) items.push({ id: String(m.id), kind: "secret", label: m.name, sub: `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`, icon: "key", run: () => void this.vaultDialog() });
     this.ws.screen.groups.forEach((g, i) => {
       const label = this.tabLabel(g.active);
@@ -1363,14 +1399,14 @@ export class App {
     return items;
   }
 
-  /** `Alt+Shift+Space`: every command, server, Space, secret and tab. `Alt+K` is the same, already filtered to servers. */
+  /** `Alt+Shift+Space`: every command, server, cluster, secret and tab. `Alt+K` is the same, already filtered to servers. */
   openPalette(only?: ("server")[]) {
     const recent = loadRecent();
     openPalette({
       items: this.paletteItems(),
       recent,
       only,
-      placeholder: only ? "Open a server…" : "Type a command, a server, a Space, a tab…",
+      placeholder: only ? "Open a server…" : "Type a command, a server, a tab…",
       onRun: (item) => {
         if (item.kind === "action") saveRecent(pushRecent(recent, item.id));
         item.run();
@@ -1417,7 +1453,7 @@ export class App {
     this.treeEl.addEventListener("keydown", (e) => this.treeKey(e));
     const grip = el("div", { id: "lgrip", title: "Drag to change the width" });
     grip.addEventListener("pointerdown", (e) => this.startLeftResize(e, grip));
-    this.side.append(this.spaceEl, searchWrap, this.treeEl, grip);
+    this.side.append(searchWrap, this.treeEl, grip);
     this.renderRail();
   }
 
@@ -1604,24 +1640,8 @@ export class App {
   renderSidebar() {
     this.syncFocus();
     if (this.side.hidden) return;
-    clear(this.spaceEl);
-    this.spaceEl.append(
-      spaceBar(
-        { spaces: this.spaces, active: this.tree.active_space, all: this.tree.view_all, production: !!this.activeSettings()?.production },
-        {
-          select: async (id) => void (await this.selectSpace(id)),
-          newSpace: () => void newSpace(this.spacesCtx()),
-          manage: () => void this.manageSpace(),
-          setAll: async (all): Promise<void> => {
-            await this.be.setViewAll(all);
-            await this.refreshTree();
-          },
-        },
-      ),
-    );
     clear(this.treeEl);
     this.treeEl.hidden = this.leftSection === "agents";
-    this.spaceEl.hidden = this.leftSection === "agents";
     this.searchWrap.hidden = this.leftSection !== "servers";
     switch (this.leftSection) {
       case "servers": {
@@ -1631,8 +1651,8 @@ export class App {
         this.renderServerRows();
         break;
       }
-      case "spaces":
-        this.renderSpacesPanel();
+      case "kubernetes":
+        this.renderKubernetes();
         break;
       case "secrets":
         this.renderSecrets();
@@ -1665,7 +1685,13 @@ export class App {
         const f = this.tree.folders.find((f) => f.id === r.id)!;
         const chev = el("span", { class: "chev" });
         chev.append(icon(f.expanded ? "chevron-down" : "chevron-right", 14));
-        row.append(chev, el("span", { class: "txt" }, el("b", {}, f.name)));
+        const fedit = this.ibtn("edit", "Rename this folder", () => this.renameFolder(f), false, "edit");
+        fedit.style.cssText = "width:24px;height:24px";
+        fedit.onclick = (e) => {
+          e.stopPropagation();
+          this.renameFolder(f);
+        };
+        row.append(chev, el("span", { class: "txt" }, el("b", {}, f.name)), fedit);
         row.onclick = () => {
           this.selected = r;
           void this.be.setFolderOpen(f.id, !f.expanded).then(() => this.refreshTree());
@@ -1685,7 +1711,13 @@ export class App {
           el("span", { class: "txt", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name), el("small", {}, `${s.user ? s.user + "@" : ""}${s.host}`)),
         );
         if (open.has(s.id)) row.append(el("span", { class: "live", title: "Open" }));
-        row.append(tail, go);
+        const edit = this.ibtn("edit", "Edit this server (address, user, credentials...)", () => void this.serverForm(s), false, "edit");
+        edit.style.cssText = "width:24px;height:24px";
+        edit.onclick = (e) => {
+          e.stopPropagation();
+          void this.serverForm(s);
+        };
+        row.append(tail, edit, go);
         row.onclick = () => {
           this.selected = r;
           this.renderSidebar();
@@ -1729,155 +1761,89 @@ export class App {
     this.render();
   }
 
-  /** What the Space in use (or General) fixes. */
-  private activeSettings(): SpaceSettings | null {
-    return (this.tree.active_space === null ? null : this.spaces.find((x) => x.id === this.tree.active_space)) ?? this.general;
+  // ------------------------------------------------------------ kubernetes
+
+  async refreshClusters() {
+    this.clusters = await this.be.clusterList().catch(() => [] as Cluster[]);
   }
 
-  /** The options of a "Space" select: General first (`general` is its text), then each Space. Values are ids, `""` is General. */
-  private spaceOptions(general: string): [string, string][] {
-    return [["", general], ...this.spaces.map((sp): [string, string] => [String(sp.id), sp.name])];
-  }
-
-  /** The Space (id as text, `""` for General) a server, folder or secret is in. */
-  private spaceOf(kind: "server" | "folder", id: number): string {
-    const sp = this.spaces.find((x) => (kind === "server" ? x.servers : x.server_folders).includes(id));
-    return sp ? String(sp.id) : "";
-  }
-
-  /**
-   * Works in a Space (null: General). If it asks for other GitHub/Tailscale accounts than the ones in use, asks first and
-   * switches only if told to. False when the person cancelled.
-   */
-  async selectSpace(id: number | null): Promise<boolean> {
-    if (id === this.tree.active_space) return true;
-    const name = id === null ? "General" : this.spaces.find((x) => x.id === id)?.name ?? "this Space";
-    const changes = await this.be.spaceAccountChanges(id).catch(() => []);
-    let answer: "switch" | "keep" | "cancel" = "keep";
-    if (changes.length) answer = await accountsAsk(name, changes);
-    if (answer === "cancel") {
-      this.renderSidebar();
-      return false;
-    }
-    if (answer === "switch") {
-      for (const c of changes) await this.be.accountUse(c.tool, c.id).catch((e) => toast(`${c.tool}: ${(e as Error).message}`, 6000));
-      void this.refreshAccounts();
-    }
-    await this.be.setActiveSpace(id);
-    await this.refreshTree();
-    return true;
-  }
-
-  /** "Manage": the form of the Space in use, or General's settings. */
-  private async manageSpace() {
-    const sp = this.tree.active_space === null ? null : this.spaces.find((x) => x.id === this.tree.active_space);
-    if (sp) await editSpace(this.spacesCtx(), sp);
-    else await generalDialog(this.be, () => this.tree.proxies, () => this.refreshAll());
-  }
-
-  /** The form of a new secret from inside another form: resolves when it is closed. */
-  private async addSecretFromForm() {
-    if ((await this.unlockDialog(false)) !== "unlocked") return;
-    await new Promise<void>((done) => secretForm(this.secretsCtx(), null, () => done(), { agent_visible: false }));
-    await this.refreshSecrets();
-  }
-
-  private spacesCtx(): SpacesCtx {
+  private k8sCtx(): K8sCtx {
     return {
       be: this.be,
-      tree: () => this.tree,
-      secrets: () => this.secretsMeta,
-      proxies: () => this.tree.proxies,
-      localSudo: () => this.localSudoId,
-      addSecret: () => this.addSecretFromForm(),
-      spaces: () => this.spaces,
-      openCount: (id) => openSpaces(this.ws.tabs.values()).get(id) ?? 0,
-      open: (sp, again) => void this.openSpace(sp, again),
-      newTerminal: (sp) => void this.newSpaceTerminal(sp),
-      newAgent: (sp) => this.newAgent(sp),
+      servers: () => this.tree.servers,
+      clusters: () => this.clusters,
+      run: (c, rest, title) => void this.runKubectl(c, rest, title),
       changed: async () => {
-        await this.refreshSpaces();
-        await this.refreshTree();
+        await this.refreshClusters();
+        // the consoles that are open follow the cluster: its new name, or gone with it
+        for (const t of [...this.ws.tabs.values()]) {
+          if (!t.view) continue;
+          const c = this.clusters.find((x) => x.id === t.view!.cluster);
+          if (!c) {
+            void this.closeSession(t.sid, false);
+            continue;
+          }
+          this.ws.setTitle(t.sid, c.name);
+          redrawConsole(this.k8sCtx(), c.id);
+        }
+        this.renderSidebar();
+      },
+      rerender: () => this.renderSidebar(),
+      openTab: (c) => this.openCluster(c),
+      tunnel: (c) => this.tunnelStatus.get(`${c.via_server}:${2 ** 40 + c.id}`),
+      switchTunnel: async (c, on) => {
+        if (on) await switchOnWith(this.tunnelCtx(), (useVault) => this.be.clusterTunnelStart(c.id, useVault));
+        else await this.be.clusterTunnelStop(c.id);
+        await this.pollTunnels();
+        // it takes a moment to come up: look again soon instead of waiting for the regular round
+        if (on) for (const ms of [800, 2000]) window.setTimeout(() => void this.pollTunnels(), ms);
       },
       emptyBox: (text, buttons) => this.emptyBox(text, buttons),
+      ibtn: (name, tip, run, primary, act) => this.ibtn(name, tip, run, primary, act),
     };
   }
 
-  /** The Spaces section: its header with "+ New Space", then one row per Space (or what a Space is, when there is none). */
-  private renderSpacesPanel() {
-    const { head } = this.secHead("spaces", "Spaces", this.spaces.length ? String(this.spaces.length) : "", [["+ New Space", "Make a Space: the folders, servers, secrets and tabs of a piece of work", () => void newSpace(this.spacesCtx())]]);
+  /** The Kubernetes section: the clusters, and the one that is open with its commands and pods. */
+  private renderKubernetes() {
+    const n = this.clusters.length;
+    const { head } = this.secHead("kubernetes", "Kubernetes", n ? String(n) : "", [["+ Add", "Add a cluster", () => clusterForm(this.k8sCtx(), null)]]);
     this.treeEl.append(head);
-    renderSpaces(this.treeEl, this.spacesCtx());
+    renderClusters(this.treeEl, this.k8sCtx());
   }
 
-  /** The tab on show, kept in a Space (an existing one, or a new one made on the spot). */
-  async saveTabToSpace() {
-    const cur = this.ws.shape();
-    if (!cur) return toast("Open a terminal first, then save its tab");
-    const panes = cur.sids.map((sid) => {
-      const t = this.ws.tabs.get(sid)!;
-      return { server: t.serverId, name: this.tree.servers.find((s) => s.id === t.serverId)?.name ?? t.title, cwd: t.cwd ?? "" };
-    });
-    const first = this.ws.tabs.get(cur.sids[0])?.title ?? "Tab";
-    const tab = tabFor(panes.length > 1 ? `${first} + ${panes.length - 1}` : first, cur.shape, this.ws.broadcasting, panes);
-    const belongs = this.ws.tabs.get(cur.sids[0])?.space;
-    let target: Space | null | "new" = this.spaces.find((x) => x.id === belongs) ?? null;
-    if (!target || this.spaces.length > 1) {
-      const options: [string, string][] = [...this.spaces.map((x): [string, string] => [String(x.id), x.name]), ["new", "+ New Space…"]];
-      const choice = await new Promise<string | null>((resolve) => {
-        let answered = false;
-        openModal(
-          (close) => {
-            const sel = makeSelect(options, target && target !== "new" ? String(target.id) : this.spaces.length ? String(this.spaces[0].id) : "new", { "data-name": "space-choice" });
-            const ok = el("button", { class: "btn primary", type: "button", "data-act": "space-choice-ok" }, "Save");
-            const no = el("button", { class: "btn", type: "button" }, "Cancel");
-            const finish = (v: string | null) => {
-              answered = true;
-              resolve(v);
-              close();
-            };
-            ok.onclick = () => finish(sel.value);
-            no.onclick = () => finish(null);
-            queueMicrotask(() => sel.focus());
-            return el("div", {}, el("h2", {}, "Save this tab in a Space"), el("div", { class: "hint", style: "margin:0 0 10px" }, `${panes.length} terminal${panes.length > 1 ? "s" : ""}, as they are arranged now. It opens again with the Space.`), field("Space", sel), el("div", { class: "actions" }, no, ok));
-          },
-          // closing the window any other way (Escape) is a no
-          () => {
-            if (!answered) resolve(null);
-          },
-        );
-      });
-      if (choice == null) return;
-      target = choice === "new" ? "new" : (this.spaces.find((x) => String(x.id) === choice) ?? null);
-    }
-    if (target === "new") {
-      const id = await newSpace(this.spacesCtx(), { name: first, servers: [...new Set(panes.map((p) => p.server).filter((s) => s !== 0))], tabs: [tab] });
-      if (id == null) return;
-      return void toast("Saved. Open the Space from the left to see it come back.");
-    }
-    if (!target) return;
-    await this.be.spaceSave(withTab(target, tab));
-    await this.refreshSpaces();
-    toast(`Saved in “${target.name}”. It opens again with the Space.`);
+  /** The console of a cluster as a tab of the top bar (the one that is open is shown, not opened twice). Its sid is negative: it has no session. */
+  private openCluster(c: Cluster) {
+    const sid = -c.id;
+    if (this.ws.tabs.has(sid)) return this.focusSession(sid);
+    this.ws.addTab({ sid, title: c.name, serverId: LOCAL, view: { kind: "k8s", cluster: c.id } });
+    this.focusArea = "terminal";
+    this.ensurePane(sid);
+    this.renderSidebar();
   }
 
-  /** Opens a Space: it becomes the one in use, then its tunnels and its saved tabs. One that is already open is only brought forward. */
-  async openSpace(sp: Space, again = false) {
-    const here = [...this.ws.tabs.values()].find((t) => t.space === sp.id && !t.dead);
-    if (here && !again) return void this.focusSession(here.sid);
-    if (this.tree.active_space !== sp.id && !(await this.selectSpace(sp.id))) return;
-    for (const t of sp.tunnels) {
-      if (this.tree.servers.some((s) => s.id === t.server && s.forwards.some((f) => f.id === t.forward))) await this.be.tunnelStart(t.server, t.forward, true).catch((e) => toast(`A tunnel of “${sp.name}” did not start: ${(e as Error).message}`, 6000));
+  /**
+   * A terminal tab for a cluster with `kubectl <rest>` typed in it. Through a server the terminal is an ssh session on it
+   * (kubectl runs there); otherwise a terminal on this computer. An empty `rest` only opens the terminal.
+   */
+  async runKubectl(c: Cluster, rest: string, title: string) {
+    let info: SessionInfo | null;
+    if (c.via_server !== null) {
+      if (!this.tree.servers.some((s) => s.id === c.via_server)) return void toast("The server of this cluster no longer exists: edit the cluster");
+      info = await this.openIn(null, c.via_server, "");
+    } else {
+      info = await this.openIn(null, LOCAL, "");
     }
-    void this.pollTunnels();
-    if (!sp.tabs.length) return void toast(`“${sp.name}” has no saved tabs yet. Open a terminal from it (the terminal button on its row), or arrange a tab and save it in the Space.`, 6000);
-    for (const tab of sp.tabs) await this.openLayout(tab, sp);
-  }
-
-  /** A new local terminal in a Space's first folder, with its secrets and its ssh key. */
-  async newSpaceTerminal(sp: Space) {
-    const info = await this.openIn(sp, LOCAL, sp.folders[0] ?? "");
-    if (info) toast(`Terminal opened in “${sp.name}”`);
+    if (!info) return;
+    this.ws.setTitle(info.sid, title);
+    const t = this.ws.tabs.get(info.sid);
+    if (t) t.named = true;
+    let line = "";
+    try {
+      line = rest ? await this.be.clusterLine(c.id, rest) : c.via_server === null && c.kubeconfig ? `export KUBECONFIG=${shellWord(c.kubeconfig)}${c.context ? ` && kubectl config use-context ${shellWord(c.context)} >/dev/null` : ""}` : "";
+    } catch (e) {
+      return void toast((e as Error).message);
+    }
+    if (line) void this.typeWhenReady(info.sid, line);
   }
 
   /** One session of a Space, put in a new tab. `null` when it could not be opened (the person was told). */
@@ -2066,7 +2032,6 @@ export class App {
 
   async refreshSecrets() {
     this.secretsMeta = this.vault.unlocked ? await this.be.secretList().catch(() => null) : null;
-    this.localSudoId = this.vault.unlocked ? await this.be.localSudoSecret().catch(() => null) : null;
     this.renderSidebar();
     this.render();
   }
@@ -2289,8 +2254,7 @@ export class App {
   private renameFolder(f: Folder) {
     openModal((close) => {
       const name = el("input", { value: f.name, name: "name", autocomplete: "off" });
-      const space = makeSelect(this.spaceOptions("General (every Space)"), this.spaceOf("folder", f.id), { "data-name": "folder-space" });
-      const form = el("form", {}, el("h2", {}, "Folder"), field("Name", name), field("Space", space));
+      const form = el("form", {}, el("h2", {}, "Folder"), field("Name", name));
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -2298,8 +2262,6 @@ export class App {
       form.onsubmit = async (e) => {
         e.preventDefault();
         if (name.value.trim() && name.value.trim() !== f.name) await this.be.renameFolder(f.id, name.value.trim());
-        if (space.value !== this.spaceOf("folder", f.id)) await this.be.moveToSpace("folder", f.id, space.value ? Number(space.value) : null);
-        await this.refreshSpaces();
         close();
         await this.refreshTree();
       };
@@ -2334,7 +2296,6 @@ export class App {
       const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
       const jump = makeSelect([["", "Direct"], ...this.tree.servers.filter((x) => x.id !== s.id).map((x): [string, string] => [String(x.id), x.name])], s.jump == null ? "" : String(s.jump), { "data-name": "jump" });
-      const space = makeSelect(this.spaceOptions("General (every Space)"), existing ? this.spaceOf("server", s.id) : this.tree.active_space === null ? "" : String(this.tree.active_space), { "data-name": "space" });
       const envKind = makeSelect([["", "Not said"], ["production", "Production"], ["staging", "Staging"], ["dev", "Development"]], s.env_kind ?? "", { "data-name": "env-kind" });
       const proxy = makeSelect([["", "Direct"], ...this.tree.proxies.map((p): [string, string] => [String(p.id), p.name])], s.proxy == null ? "" : String(s.proxy), { "data-name": "proxy" });
       const network = el("input", { value: s.network ?? "", name: "network", autocomplete: "off", spellcheck: "false", placeholder: "tailscale:work-tailnet (optional)" });
@@ -2364,7 +2325,7 @@ export class App {
       auth.onchange = sync;
       sync();
       const err = el("div", { class: "err" });
-      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Address", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), field("Space", space), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
+      const form = el("form", {}, el("h2", {}, existing ? `Edit ${s.name}` : "New server"), field("Name", name), el("div", { class: "grid2" }, field("Address", host), field("Port", port)), field("User", user), field("Authentication", auth), keyRow, vaultKeyRow, loginRow, rmRow, field("sudo password (kept in the vault)", sudo), field("One-time codes it asks for (MFA)", mfa), field("Reached through", jump), field("Folder", folder), el("div", { class: "grid2" }, field("What it is for", envKind), field("Connects through", proxy)), field("Network", network), field("When an AI agent asks to use it", aiPolicy), el("div", { class: "hint" }, "A production machine always asks."), field("Notes (agents read them)", notes), existing ? el("div", {}, tunnelsBtn) : null, err);
       const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
       const no = el("button", { class: "btn", type: "button" }, "Cancel");
       no.onclick = close;
@@ -2387,8 +2348,6 @@ export class App {
         }
         try {
           const id = await this.be.saveServer(next, loginSecret, sudoSecret);
-          if (space.value !== (existing ? this.spaceOf("server", id) : "") || (!existing && space.value)) await this.be.moveToSpace("server", id, space.value ? Number(space.value) : null);
-          await this.refreshSpaces();
           if (auth.value === "vaultkey") await this.be.serverSetKey(id, Number(vaultKey.value));
           const wantTotp = mfa.value ? Number(mfa.value) : null;
           if (wantTotp !== (s.vault_totp ?? null)) await this.be.serverSetTotp(id, wantTotp);
@@ -2591,16 +2550,16 @@ export class App {
         return this.openFiles();
       case "tunnels.open":
         return this.openTunnels();
-      case "group.save":
-        return void this.saveTabToSpace();
       case "palette.open":
         return this.openPalette();
       case "search":
         return this.openPalette(["server"]);
       case "snippets.open":
         return this.snippetsDialog();
-      case "space.new":
-        return void newSpace(this.spacesCtx());
+      case "cluster.new":
+        return clusterForm(this.k8sCtx(), null);
+      case "general.settings":
+        return void generalDialog(this.be, () => this.tree.proxies, () => this.refreshAll());
       case "server.add":
         return void this.serverForm(null);
       case "ssh.import":
@@ -2627,7 +2586,7 @@ export class App {
         return this.jumpToAttention();
       case "agent.new":
         return this.newAgent(null);
-      case "panel.spaces":
+      case "panel.kubernetes":
       case "panel.servers":
       case "panel.secrets":
       case "panel.tunnels":
@@ -2761,7 +2720,7 @@ export class App {
   /** A tab (from the bar) or a terminal (by its title) picked up to be placed somewhere else. */
   private startDrag(e: PointerEvent, sid: Id, fromBar: boolean) {
     if (e.button !== 0) return;
-    this.drag = { sid, fromBar, startX: e.clientX, startY: e.clientY, active: false, target: null, toBar: false };
+    this.drag = { sid, fromBar, startX: e.clientX, startY: e.clientY, active: false, target: null, toBar: false, slot: null };
     const move = (m: PointerEvent) => this.dragMove(m);
     const up = (u: PointerEvent) => {
       window.removeEventListener("pointermove", move);
@@ -2780,6 +2739,8 @@ export class App {
     document.body.style.cursor = "grabbing";
     d.target = null;
     d.toBar = false;
+    d.slot = null;
+    this.clearSlot();
     this.tabsEl.classList.remove("drop");
     this.hint.style.display = "none";
     const group = this.ws.screen.group;
@@ -2789,9 +2750,35 @@ export class App {
       d.toBar = true;
       this.tabsEl.classList.add("drop");
     }
+    // a tab of the bar dragged along the bar: it changes place, like a browser's
+    const barRect = this.tabsEl.getBoundingClientRect();
+    if (d.fromBar && m.clientY >= barRect.top && m.clientY <= barRect.bottom && m.clientX >= barRect.left && m.clientX <= barRect.right) {
+      d.slot = this.barSlot(m.clientX, d.sid);
+      if (d.slot) d.slot.at.classList.add(d.slot.after ? "ins-after" : "ins-before");
+      this.hint.style.display = "none";
+      return;
+    }
     if (!overBar) {
       d.target = this.dropTarget(m.clientX, m.clientY, d.sid);
     }
+  }
+
+  private clearSlot() {
+    for (const t of this.tabsEl.querySelectorAll(".ins-before, .ins-after")) t.classList.remove("ins-before", "ins-after");
+  }
+
+  /** Where the tab of `sid` would land if let go at `x` of the bar. */
+  private barSlot(x: number, sid: Id): Drag["slot"] {
+    const tabs = [...this.tabsEl.querySelectorAll(".tab")];
+    if (!tabs.length) return null;
+    const from = this.ws.screen.indexOf(sid);
+    let at = tabs.findIndex((t) => x < t.getBoundingClientRect().left + t.getBoundingClientRect().width / 2);
+    const after = at < 0;
+    if (after) at = tabs.length - 1;
+    // the place it will have once it has left its old one
+    let to = at;
+    if (!after && from < at) to = at - 1;
+    return { to, at: tabs[at], after };
   }
 
   /** Where something dragged over the stage would dock (beside the terminal under it); shows the hint. */
@@ -2818,9 +2805,11 @@ export class App {
     document.body.style.cursor = "";
     this.hint.style.display = "none";
     this.tabsEl.classList.remove("drop");
+    this.clearSlot();
     if (!d?.active) return;
     this.justDragged = true;
     setTimeout(() => (this.justDragged = false), 0);
+    if (d.slot) return this.ws.moveGroup(this.ws.screen.indexOf(d.sid), d.slot.to);
     if (d.toBar) return this.ws.dropIntoBar(d.sid);
     if (d.target?.sid == null) return;
     const same = this.ws.screen.indexOf(d.sid) === this.ws.screen.indexOf(d.target.sid);

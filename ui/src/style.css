@@ -62,8 +62,8 @@ svg { flex: none; }
 .row .txt small { display: block; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .live { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; }
 .row .tail { color: var(--muted); display: flex; align-items: center; gap: 2px; }
-.row .go { display: none; }
-.row:hover .go { display: inline-flex; }
+.row .go, .row .edit { display: none; }
+.row:hover .go, .row:hover .edit { display: inline-flex; }
 .row.drop-target { outline: 1px dashed var(--amber); outline-offset: -1px; }
 .empty { color: var(--muted); padding: 18px 14px; line-height: 1.5; }
 .side-foot { border-top: 1px solid var(--line); padding: 8px 10px; display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
@@ -556,3 +556,36 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .secret-row small.pw { font-family: var(--mono, monospace); color: var(--fg); user-select: all; }
 .secret-row .ib { flex: none; visibility: hidden; }
 .secret-row:hover .ib, .secret-row .ib:focus-visible { visibility: visible; }
+
+/* Kubernetes */
+.row.cluster .chev { color: var(--muted); display: inline-flex; }
+.row .edit, .row .pod-act { display: none; }
+.row:hover .edit, .row:hover .pod-act { display: inline-flex; }
+.k8s-detail { margin: 2px 0 8px 14px; padding-left: 8px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.k8s-quick { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 4px; }
+.k8s-quick .chip { background: transparent; cursor: pointer; font-family: inherit; }
+.k8s-quick .chip:hover { color: var(--fg); border-color: var(--accent); background: var(--hover); }
+.k8s-free { width: 100%; box-sizing: border-box; font-family: var(--mono, monospace); font-size: 12px; }
+.k8s-podhead { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.k8s-podhead .k8s-h { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; flex: none; }
+.k8s-podhead select { flex: 1; min-width: 0; }
+.k8s-note { padding: 6px 2px; font-size: 12px; white-space: pre-wrap; }
+.row.pod { padding-left: 4px; min-height: 34px; }
+.row.pod .pdot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin: 0 6px 0 2px; background: var(--muted); }
+.row.pod .pdot.ok { background: #82e682; }
+.row.pod .pdot.wait { background: #ffc857; }
+.row.pod .pdot.bad { background: var(--red); }
+.row.pod .txt b { font-size: 12.5px; }
+
+.row.cluster.tunnel-up small { color: var(--green); }
+.row.cluster.tunnel-failed small { color: var(--red); }
+.tab.ins-before { box-shadow: inset 2px 0 0 var(--accent); }
+.tab.ins-after { box-shadow: inset -2px 0 0 var(--accent); }
+
+/* the console of a cluster, in a tab */
+.pane.view .w, .pane.view .bc { display: none; }
+.k8s-console { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 24px; }
+.k8s-console .k8s-title { margin: 0 0 12px; font-size: 16px; font-weight: 600; display: flex; align-items: baseline; gap: 10px; }
+.k8s-console .k8s-title small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.k8s-console .k8s-detail { margin: 0; padding: 0; border: 0; max-width: 900px; }
+.k8s-console .row.pod { cursor: default; }

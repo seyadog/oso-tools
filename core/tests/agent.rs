@@ -345,6 +345,7 @@ fn server_for(name: &str, sshd: &Sshd, jump: Option<u64>) -> Server {
         forwards: vec![],
         notes: String::new(),
         env_kind: None,
+        color: None,
         proxy: None,
         network: None,
         ai_policy: Default::default(),

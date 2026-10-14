@@ -36,6 +36,7 @@ fn engine_for(sshd: &Sshd, forwards: Vec<Forward>) -> (Engine, u64) {
             forwards: vec![],
             notes: String::new(),
             env_kind: None,
+            color: None,
             proxy: None,
             network: None,
             ai_policy: Default::default(),
@@ -117,6 +118,28 @@ fn a_local_tunnel_reaches_the_target_and_closes_when_switched_off() {
     assert_eq!(t.state, "up", "{t:?}");
     assert_eq!(read_from(bind), "hello-from-the-target");
     e.tunnel_stop(id, fid);
+    assert!(e.tunnels().is_empty());
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(TcpStream::connect(("127.0.0.1", bind)).is_err(), "the port should be closed again");
+}
+
+#[test]
+fn the_tunnel_of_a_cluster_leads_to_its_api_and_closes_when_switched_off() {
+    use oso_core::k8s::Cluster;
+    let sshd = need_sshd!("cluster-tunnel");
+    let api = greeter("hello-from-the-api");
+    let bind = free_port();
+    let (mut e, id) = engine_for(&sshd, vec![]);
+    let cid = e.clusters.save(Cluster { name: "k3s".into(), via_server: Some(id), api_port: api, local_port: bind, ..Default::default() }).unwrap();
+    // a cluster of this computer has nothing to tunnel
+    let own = e.clusters.save(Cluster { name: "own".into(), ..Default::default() }).unwrap();
+    assert!(e.cluster_tunnel_start(own, true).is_err());
+    e.cluster_tunnel_start(cid, true).unwrap();
+    let t = wait_tunnel(&mut e, "up");
+    assert_eq!(t.state, "up", "{t:?}");
+    assert_eq!(t.forward_id, oso_core::k8s::TUNNEL_BASE + cid);
+    assert_eq!(read_from(bind), "hello-from-the-api");
+    e.cluster_tunnel_stop(cid);
     assert!(e.tunnels().is_empty());
     std::thread::sleep(Duration::from_millis(600));
     assert!(TcpStream::connect(("127.0.0.1", bind)).is_err(), "the port should be closed again");

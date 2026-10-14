@@ -318,6 +318,7 @@ impl Handler {
             "oso_put" => self.put(&ctx, &args),
             "oso_get" => self.get(&ctx, &args),
             "oso_tunnel" => self.tunnel(&ctx, &args),
+            "oso_kubectl" => self.kubectl(&ctx, &args),
             "oso_focus" => self.focus(&ctx),
             // not an MCP tool: what an agent's own hooks report (`oso hook`), for the Agents panel
             "oso_event" => {
@@ -390,6 +391,7 @@ impl Handler {
             Scope::General => json!({ "name": "General", "notes": "", "folders": [] }),
         };
         let focus = self.focus_view(&e, &scope);
+        let clusters: Vec<Value> = e.clusters.list().iter().map(|c| json!({ "name": c.name, "environment": env_word(c.env_kind), "namespace": c.namespace, "notes": c.notes, "through": c.via_server.and_then(|id| e.store.server(id)).map(|s| s.name.clone()) })).collect();
         let out = ok(json!({
             "space": space,
             "terminal": ctx.title,
@@ -398,7 +400,8 @@ impl Handler {
             "environment_variables_already_set_in_your_terminal": vars,
             "secrets_you_can_use_with_oso_run_with": more,
             "focus": focus,
-            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret). The user is asked to approve what is not a plain read. Production servers always ask. When the user says \"this server\", call oso_focus.",
+            "kubernetes_clusters": clusters,
+            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret), oso_kubectl (kubectl on one of the kubernetes_clusters). The user is asked to approve what is not a plain read. Production servers always ask. When the user says \"this server\", call oso_focus.",
         }));
         drop(e);
         self.log(ctx, "context", "", "", "allowed_without_asking", |_| {});
@@ -502,6 +505,11 @@ impl Handler {
     }
 
     fn run(&self, ctx: &Ctx, args: &Value) -> Value {
+        self.run_checked(ctx, args, None)
+    }
+
+    /// `oso_run`. `rule_on` is the text the read-only rule looks at when it is not the command itself (a kubectl line).
+    fn run_checked(&self, ctx: &Ctx, args: &Value, rule_on: Option<&str>) -> Value {
         let (Some(host), Some(command)) = (args.get("host").and_then(Value::as_str), args.get("command").and_then(Value::as_str)) else {
             return no("oso_run needs `host` and `command`.");
         };
@@ -515,14 +523,15 @@ impl Handler {
         };
         let production = t.env == Some(EnvKind::Production);
         let sudo_note = policy::uses_sudo(command).then(|| self.sudo_note(t.id, &t.name)).flatten();
-        match policy::decide(t.policy, t.env, command) {
+        let judged = rule_on.unwrap_or(command);
+        match policy::decide(t.policy, t.env, judged) {
             Verdict::Block(why) => {
                 self.log_why(ctx, "run", &t, command, "blocked", "The server's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.", |_| {});
                 return no(why);
             }
             Verdict::Auto => self.log_why(ctx, "run", &t, command, "allowed_without_asking", "Automatic: the server's policy is \u{201c}read-only auto\u{201d} and this command only reads.", |_| {}),
             Verdict::Ask => {
-                let can_remember = !production && policy::is_read_only(command);
+                let can_remember = !production && policy::is_read_only(judged);
                 let asked = why_asked(&t);
                 match self.ask(ctx, "run", &t.name, command, production, can_remember) {
                     Decision::Once => self.log_why(ctx, "run", &t, command, "allowed", &format!("{asked}: you allowed it once."), |_| {}),
@@ -1024,6 +1033,132 @@ impl Handler {
                 });
                 ok(json!({ "exit_code": c.code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": c.timed_out }))
             }
+        }
+    }
+
+    // ------------------------------------------------------------ kubectl
+
+    /// `kubectl` on a saved cluster. Through a server it is an `oso_run` there (the server's rule decides); from this computer
+    /// the cluster's own rule decides. Reads can go through unasked, anything else asks, a production cluster always asks.
+    fn kubectl(&self, ctx: &Ctx, args: &Value) -> Value {
+        let Some(name) = args.get("cluster").and_then(Value::as_str) else {
+            return no("oso_kubectl needs `cluster` (see oso_context) and `args` (the words after kubectl).");
+        };
+        let Some(words) = args.get("args").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>()) else {
+            return no("oso_kubectl needs `args`: the words after kubectl, as a list, e.g. [\"get\", \"pods\", \"-A\"].");
+        };
+        if words.is_empty() || words.len() > 200 || words.iter().any(|w| w.len() > 4000 || w.contains('\0')) {
+            return no("`args` is empty, too long, or has a NUL in it.");
+        }
+        if let Some(why) = crate::k8s::refused_arg(&words) {
+            return no(why);
+        }
+        let timeout_s = args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT);
+        let (cluster, via) = {
+            let e = self.engine();
+            let c = match e.clusters.find(name) {
+                Ok(c) => c.clone(),
+                Err(m) => return no(m),
+            };
+            let via = match c.via_server {
+                Some(id) => match e.store.server(id) {
+                    Some(s) => Some(s.name.clone()),
+                    None => return no(format!("The server that cluster {:?} goes through no longer exists: ask the user to edit the cluster in oso.", c.name)),
+                },
+                None => None,
+            };
+            (c, via)
+        };
+        let full = crate::k8s::full_line_args(&cluster, &words);
+        if let Some(server) = via {
+            return self.run_checked(ctx, &json!({ "host": server, "command": full, "timeout_seconds": timeout_s }), Some(&crate::k8s::asked_line(&cluster, &words)));
+        }
+        let asked = crate::k8s::asked_line(&cluster, &words);
+        let production = cluster.env_kind == Some(EnvKind::Production);
+        let host = format!("cluster {}", cluster.name);
+        match policy::decide(cluster.ai_policy, cluster.env_kind, &asked) {
+            Verdict::Block(why) => {
+                self.log(ctx, "kubectl", &host, &asked, "blocked", |e| e.reason = "The cluster's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.".into());
+                return no(why);
+            }
+            Verdict::Auto => self.log(ctx, "kubectl", &host, &asked, "allowed_without_asking", |e| e.reason = "Automatic: the cluster's policy is \u{201c}read-only auto\u{201d} and this command only reads.".into()),
+            Verdict::Ask => match self.ask(ctx, "kubectl", &host, &asked, production, false) {
+                Decision::Once | Decision::AlwaysRead => self.log(ctx, "kubectl", &host, &asked, "allowed", |e| e.reason = if production { "A production cluster always asks: you allowed it once.".into() } else { "You allowed it once.".into() }),
+                Decision::Terminal => {
+                    self.log(ctx, "kubectl", &host, &asked, "denied", |e| e.reason = "You chose to run it yourself in a terminal.".into());
+                    return no("The user chose to run this command themselves, in a terminal. Do not try it again; wait for what they tell you.");
+                }
+                Decision::Deny => {
+                    self.log(ctx, "kubectl", &host, &asked, "denied", |e| e.reason = "You denied it (or nobody answered in time).".into());
+                    return no("The user did not allow this command.");
+                }
+            },
+        }
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &full]).env_clear().envs(connect::client_env());
+        if let Some(h) = directories::BaseDirs::new() {
+            cmd.current_dir(h.home_dir());
+        }
+        let result = run_capture(cmd, None, Duration::from_secs(timeout_s));
+        self.finish_local(ctx, "kubectl", &host, &asked, result, &[])
+    }
+
+    /// For the window (the person asked, so nothing is asked again): what a **read-only** kubectl command prints on a cluster.
+    /// Anything that is not a read is refused here, whatever the window sends.
+    pub fn cluster_read(&self, id: u64, args: &[String]) -> Result<String, String> {
+        if args.is_empty() || args.len() > 60 || args.iter().any(|w| w.len() > 500 || w.contains('\0')) {
+            return Err("That is not a command oso will run for the list.".into());
+        }
+        let (cluster, target) = {
+            let e = self.engine();
+            let c = e.clusters.get(id).cloned().ok_or("That cluster no longer exists.")?;
+            let t = match c.via_server {
+                Some(sid) => {
+                    let s = e.store.server(sid).ok_or("The server of this cluster no longer exists.")?;
+                    if let Some(why) = connect::proxy_problem(&e.store, sid).or_else(|| connect::key_problem(&e.store, sid)) {
+                        return Err(why);
+                    }
+                    if connect::needs_vault(&e.store, sid) && !e.vault.is_unlocked() {
+                        return Err("oso's vault is locked: unlock it (the lock at the bottom left), then try again.".into());
+                    }
+                    Some(Target { id: sid, name: s.name.clone(), policy: s.ai_policy, env: s.env_kind })
+                }
+                None => None,
+            };
+            (c, t)
+        };
+        if !policy::is_read_only(&crate::k8s::asked_line(&cluster, args)) {
+            return Err("Only commands that read are run for the lists.".into());
+        }
+        let full = crate::k8s::full_line_args(&cluster, args);
+        let timeout = Duration::from_secs(20);
+        let (out, err, code, hide) = match target {
+            Some(t) => {
+                let (r, _, hide) = self.exec_remote(&t, &full, timeout)?;
+                let c = r.map_err(|e| format!("Could not reach the server: {e}"))?;
+                if c.timed_out {
+                    return Err("The cluster did not answer in time.".into());
+                }
+                (c.stdout, c.stderr, c.code, hide)
+            }
+            None => {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &full]).env_clear().envs(connect::client_env());
+                if let Some(h) = directories::BaseDirs::new() {
+                    cmd.current_dir(h.home_dir());
+                }
+                let c = run_capture(cmd, None, timeout).map_err(|e| format!("Could not run kubectl: {e}"))?;
+                if c.timed_out {
+                    return Err("The cluster did not answer in time.".into());
+                }
+                (c.stdout, c.stderr, c.code, vec![])
+            }
+        };
+        if code == Some(0) {
+            Ok(redact(&out, &hide))
+        } else {
+            let e = redact(&strip_ansi(if err.trim().is_empty() { &out } else { &err }), &hide);
+            Err(e.lines().take(6).collect::<Vec<_>>().join("\n"))
         }
     }
 

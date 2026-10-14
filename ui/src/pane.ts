@@ -57,6 +57,7 @@ export class Pane {
   private fit = new FitAddon();
   private termEl: HTMLElement;
   private opened = false;
+  isView = false;
   private resizeObs: ResizeObserver;
   private lastSize = "";
   /** When output last arrived (ms since the epoch), 0 if none yet. */
@@ -130,7 +131,7 @@ export class Pane {
   /** Makes the emulator once the pane is in the page (xterm needs a real element to measure). */
   attach(parent: HTMLElement) {
     parent.append(this.root);
-    if (!this.opened) {
+    if (!this.opened && !this.isView) {
       this.term.open(this.termEl);
       this.opened = true;
     }
@@ -235,8 +236,26 @@ export class Pane {
     return b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? "";
   }
 
+  /** The text selected in the terminal ("" when none). */
+  selection(): string {
+    return this.term.getSelection();
+  }
+
+  /** Types text as a paste (the shell is told it is a paste when it asked for that). */
+  paste(text: string) {
+    this.term.paste(text);
+  }
+
+  /** Makes this pane a page of oso (the console of a cluster) instead of a terminal. */
+  setView(node: HTMLElement) {
+    this.isView = true;
+    this.root.classList.add("view");
+    this.termEl.style.display = "none";
+    this.root.querySelector(".frame")!.insertBefore(node, this.banner);
+  }
+
   focus() {
-    this.term.focus();
+    if (!this.isView) this.term.focus();
   }
 
   dispose() {

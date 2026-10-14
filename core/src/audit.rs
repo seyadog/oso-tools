@@ -133,7 +133,7 @@ pub struct Activity {
 
 /// Actions that run something; the others (a tunnel, a list of servers) have no end to wait for.
 fn runs(action: &str) -> bool {
-    matches!(action, "run" | "sudo" | "run_with" | "put" | "get")
+    matches!(action, "run" | "sudo" | "run_with" | "put" | "get" | "kubectl")
 }
 
 fn start_state(e: &Entry) -> &'static str {

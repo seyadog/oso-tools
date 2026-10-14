@@ -27,6 +27,8 @@ export interface Tab {
   space?: number;
   /** The folder it was opened in (a local terminal). */
   cwd?: string;
+  /** Not a terminal: a page of oso that lives in a tab (it has no session; its sid is negative). */
+  view?: { kind: "k8s"; cluster: number };
 }
 
 /** One tab of a screen: a single terminal, or several tiled together. */
@@ -204,6 +206,17 @@ export class Workspace {
     if (s.cur > gi) s.cur--;
     else if (s.cur === gi) s.cur = Math.max(0, gi - 1);
     s.cur = Math.min(s.cur, Math.max(0, s.groups.length - 1));
+  }
+
+  /** Moves the tab at `from` to place `to` (like dragging a browser tab); the tab on show stays on show. */
+  moveGroup(from: number, to: number) {
+    const s = this.screen;
+    if (from === to || from < 0 || to < 0 || from >= s.groups.length || to >= s.groups.length) return;
+    const showing = s.group;
+    const [g] = s.groups.splice(from, 1);
+    s.groups.splice(to, 0, g);
+    if (showing) s.cur = s.groups.indexOf(showing);
+    this.changed();
   }
 
   closeTab(sid: Id) {

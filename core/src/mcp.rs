@@ -55,6 +55,11 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "host": host, "remote_path": { "type": "string", "description": "A file or folder on the server (a plain path)." }, "local_path": { "type": "string", "description": "Where it goes here, absolute or relative to your working folder." }, "sha256": { "type": "string", "description": "Optional. The expected sha256 (hex) of the file; checked before it is put in place. One file only." }, "overwrite": { "type": "boolean", "description": "Replace an existing local file. Default false." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Default 600." } }, "required": ["host", "remote_path", "local_path"], "additionalProperties": false },
         },
         {
+            "name": "oso_kubectl",
+            "description": "Run kubectl on one of the Kubernetes clusters the user saved in oso (oso_context lists them under kubernetes_clusters). oso picks the kubeconfig, context and login: never pass --kubeconfig, --context, --server, --token or --as, and never ask for a kubeconfig. `args` are the words after kubectl, as a list. Plain reads (get, describe, logs, top, ...) can run without asking depending on the cluster's rule; anything else (apply, delete, scale, exec, rollout ...) asks the user each time, and a production cluster always asks. `get secrets` always asks. Output is cut at a limit: narrow it with -n, -l or --tail.",
+            "inputSchema": { "type": "object", "properties": { "cluster": { "type": "string", "description": "The cluster's name." }, "args": { "type": "array", "items": { "type": "string" }, "description": "The words after kubectl, e.g. [\"get\", \"pods\", \"-n\", \"web\"]. No shell: each item is one argument." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["cluster", "args"], "additionalProperties": false },
+        },
+        {
             "name": "oso_focus",
             "description": "What the user is looking at in oso right now: the server they have selected, the server of the terminal in front, and the servers they have an SSH session open on (names only, never what is on a screen), limited to what you may use. Call it when the user says \"this server\", \"the one I am on\" or \"the one I selected\". Empty answers mean nothing is selected.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
@@ -296,7 +301,7 @@ mod tests {
         let (a, _) = talk(&[json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })]);
         let tools = a[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_put", "oso_get", "oso_focus", "oso_tunnel"]);
+        assert_eq!(names, vec!["oso_context", "oso_hosts", "oso_run", "oso_sudo", "oso_run_with", "oso_put", "oso_get", "oso_kubectl", "oso_focus", "oso_tunnel"]);
         assert!(tools[0]["description"].as_str().unwrap().starts_with("Call this first"));
         assert!(tools[2]["description"].as_str().unwrap().contains("asked to approve"));
         for t in tools {

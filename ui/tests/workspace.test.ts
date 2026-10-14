@@ -16,6 +16,21 @@ beforeEach(() => {
   ws.size = { x: 0, y: 0, w: 1600, h: 900 };
 });
 
+describe("moving a tab", () => {
+  it("changes its place and keeps the tab on show on show", () => {
+    for (let i = 1; i <= 4; i++) ws.addTab(tab(i));
+    ws.focus(2);
+    ws.moveGroup(0, 3);
+    expect(tabsOf()).toEqual([[2], [3], [4], [1]]);
+    expect(ws.screen.active).toBe(2);
+    ws.moveGroup(3, 0);
+    expect(tabsOf()).toEqual([[1], [2], [3], [4]]);
+    ws.moveGroup(1, 1);
+    ws.moveGroup(9, 0);
+    expect(tabsOf()).toEqual([[1], [2], [3], [4]]);
+  });
+});
+
 describe("tabs", () => {
   it("every new terminal is a tab of its own", () => {
     ws.addTab(tab(1));

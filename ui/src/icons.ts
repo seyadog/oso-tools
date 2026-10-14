@@ -37,6 +37,10 @@ const P: Record<string, string> = {
   upload: '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>',
   files: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 17h6"/>',
   save: '<path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
+  helm: '<circle cx="12" cy="12" r="2.6"/><circle cx="12" cy="12" r="6.6"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>',
+  log: '<path d="M5 6h14M5 10h14M5 14h9M5 18h6"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14-4.5L4 9M4 4v5h5M4 13a8 8 0 0 0 14 4.5L20 15M20 20v-5h-5"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
   play: '<path d="M7 5v14l11-7z"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
 };
@@ -56,9 +60,7 @@ export function icon(name: string, size = 16): SVGElement {
   return s;
 }
 
-/** The colours oso gives to servers (the same ones the terminal version used): one per server, far apart. */
-export const SERVER_COLORS = ["#6ea8ff", "#ff6e91", "#82e682", "#ffa05a", "#be82ff", "#5ad7f5", "#ffd764", "#50e1b9"];
-export const serverColor = (id: number) => (id === 0 ? "#6c7086" : SERVER_COLORS[id % SERVER_COLORS.length]);
+export { PALETTE as SERVER_COLORS, serverColor } from "./colors";
 
 /** The oso mark (a bear-shaped shield with a keyhole nose); `oso-small.svg` is the simplified one for 32 px or less. */
 export function logoMark(size = 48): SVGElement {

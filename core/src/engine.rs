@@ -150,6 +150,8 @@ pub struct Engine {
     space_agents: HashMap<u64, agent::Agent>,
     /// The Spaces (saved in `oso-spaces.json`).
     pub spaces: Spaces,
+    /// The Kubernetes clusters (saved in `clusters.json`).
+    pub clusters: crate::k8s::Clusters,
     /// What each agent running in a terminal is doing.
     tracker: crate::agents::Tracker,
     focus: Focus,
@@ -189,11 +191,15 @@ pub struct OpenCtx {
 }
 
 impl Engine {
-    pub fn new(store: Store, vault: Vault, emit: Emit) -> Self {
+    pub fn new(mut store: Store, vault: Vault, emit: Emit) -> Self {
+        if store.assign_colors() {
+            let _ = store.save();
+        }
         let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
+        let clusters = crate::k8s::Clusters::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
         let active_space = settings.active_space.filter(|id| spaces.get(*id).is_some());
-        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_space, view_all: settings.view_all, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, tracker: Default::default(), focus: Focus::default() }
+        Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_space, view_all: settings.view_all, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, clusters, tracker: Default::default(), focus: Focus::default() }
     }
 
     fn config_dir(&self) -> std::path::PathBuf {
@@ -1237,6 +1243,7 @@ impl Engine {
             s.has_secret = old.has_secret;
             s.has_sudo = old.has_sudo;
             s.forwards = old.forwards.clone();
+            s.color = old.color;
             let id = s.id;
             self.store.update_server(s);
             id
@@ -1347,6 +1354,30 @@ impl Engine {
     pub fn tunnel_start(&mut self, server_id: u64, forward_id: u64, use_vault: bool) -> std::result::Result<(), OpenError> {
         let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
         let fwd = server.forwards.iter().find(|f| f.id == forward_id).ok_or(OpenError::NoSuchServer)?.clone();
+        self.tunnel_start_fwd(server_id, fwd, use_vault)
+    }
+
+    /// Switches on the tunnel of a cluster that is reached through a server: this computer's port leads to the API of
+    /// the cluster, so a `kubectl` (or k9s) of this computer can use it. It is listed with the other tunnels.
+    pub fn cluster_tunnel_start(&mut self, cluster_id: u64, use_vault: bool) -> std::result::Result<(), OpenError> {
+        let c = self.clusters.get(cluster_id).ok_or_else(|| OpenError::Other("That cluster no longer exists.".into()))?.clone();
+        let Some(server_id) = c.via_server else {
+            return Err(OpenError::Other("This cluster is reached from this computer: it needs no tunnel.".into()));
+        };
+        let fwd = Forward { id: crate::k8s::TUNNEL_BASE + c.id, name: c.name.clone(), auto: false, kind: ForwardKind::Local, bind_port: crate::k8s::local_port(&c), host: "127.0.0.1".into(), port: crate::k8s::api_port(&c) };
+        self.tunnel_start_fwd(server_id, fwd, use_vault)
+    }
+
+    pub fn cluster_tunnel_stop(&mut self, cluster_id: u64) {
+        let keys: Vec<(u64, u64)> = self.tunnels.keys().filter(|k| k.1 == crate::k8s::TUNNEL_BASE + cluster_id).cloned().collect();
+        for (s, f) in keys {
+            self.tunnel_stop(s, f);
+        }
+    }
+
+    fn tunnel_start_fwd(&mut self, server_id: u64, fwd: Forward, use_vault: bool) -> std::result::Result<(), OpenError> {
+        let forward_id = fwd.id;
+        let server = self.store.server(server_id).ok_or(OpenError::NoSuchServer)?.clone();
         if let Some(why) = connect::proxy_problem(&self.store, server_id) {
             return Err(OpenError::Other(why));
         }
@@ -1606,6 +1637,7 @@ mod tests {
             forwards: vec![],
             notes: String::new(),
             env_kind: None,
+            color: None,
             proxy: None,
             network: None,
             ai_policy: Default::default(),

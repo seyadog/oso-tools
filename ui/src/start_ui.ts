@@ -3,11 +3,9 @@
 
 import { el } from "./dom";
 
-export type StepId = "space" | "key" | "terminal" | "ai";
+export type StepId = "key" | "terminal" | "ai";
 
 export interface State {
-  /** Spaces that exist. */
-  spaces: number;
   /** Secrets of the API-key type (null: the vault is locked or does not exist, so it is not known). */
   apiKeys: number | null;
   /** A local terminal was opened at least once. */
@@ -26,9 +24,8 @@ export interface Step {
 
 export function steps(s: State): Step[] {
   return [
-    { id: "space", title: "Create a Space", text: "A Space keeps the servers, secrets and accounts of one project together. Switch it at the top of the left panel; what is in no Space is General and shows everywhere.", button: "New Space", done: s.spaces > 0 },
-    { id: "key", title: "Add an API key", text: "Save a key once, in the encrypted vault, and give it an environment variable (like ANTHROPIC_API_KEY): every local terminal of its Space will have it.", button: "Add an API key", done: (s.apiKeys ?? 0) > 0 },
-    { id: "terminal", title: "Open a local terminal", text: "It starts inside your Space, with its variables set. Start your AI tool there.", button: "Open a local terminal", done: s.openedLocal },
+    { id: "key", title: "Add an API key", text: "Save a key once, in the encrypted vault, and give it an environment variable (like ANTHROPIC_API_KEY): every local terminal will have it.", button: "Add an API key", done: (s.apiKeys ?? 0) > 0 },
+    { id: "terminal", title: "Open a local terminal", text: "It starts with your variables set. Start your AI tool there.", button: "Open a local terminal", done: s.openedLocal },
     { id: "ai", title: "Connect your AI", text: "Lets Claude Code, OpenCode or Codex ask oso for servers and secrets instead of being given passwords. You see every change before it is made.", button: "Connect your AI", done: s.aiConnected },
   ];
 }

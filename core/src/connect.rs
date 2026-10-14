@@ -370,6 +370,7 @@ mod tests {
             forwards: vec![],
             notes: String::new(),
             env_kind: None,
+            color: None,
             proxy: None,
             network: None,
             ai_policy: Default::default(),

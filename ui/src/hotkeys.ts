@@ -46,7 +46,6 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "tab.close": "Mod+W",
   "tab.rename": "F2",
   "broadcast.toggle": "Mod+B",
-  "group.save": "Mod+G",
   "watch.toggle": "Mod+A",
   "files.open": "Mod+U",
   "tunnels.open": "Mod+T",
@@ -61,12 +60,12 @@ export const DEFAULTS: Record<string, string | string[]> = {
   "focus.toggle": "Mod+Z",
   "attention.next": "Mod+N",
   "agent.new": "Mod+Shift+A",
-  "panel.spaces": "Mod+Shift+1",
   "panel.servers": "Mod+Shift+2",
   "panel.secrets": "Mod+Shift+3",
   "panel.tunnels": "Mod+Shift+4",
   "panel.agents": "Mod+Shift+6",
   "panel.accounts": "Mod+Shift+5",
+  "panel.kubernetes": "Mod+Shift+7",
 };
 
 /** What each action does, for the settings screen and the sheet of shortcuts: it comes from the one list of actions. */

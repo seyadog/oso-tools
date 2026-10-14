@@ -37,10 +37,15 @@ const key = (s: number, f: number) => `${s}:${f}`;
 
 /** Switches a tunnel on, asking for the vault if it needs it. Returns whether it was started. */
 export async function switchOn(ctx: Ctx, serverId: number, forwardId: number, beforeUnlock: () => void = () => {}): Promise<boolean> {
+  return switchOnWith(ctx, (useVault) => ctx.be.tunnelStart(serverId, forwardId, useVault), beforeUnlock);
+}
+
+/** Switches a tunnel on with `start`, asking for the vault when the server needs it. */
+export async function switchOnWith(ctx: Ctx, start: (useVault: boolean) => Promise<void>, beforeUnlock: () => void = () => {}): Promise<boolean> {
   let useVault = true;
   for (;;) {
     try {
-      await ctx.be.tunnelStart(serverId, forwardId, useVault);
+      await start(useVault);
       return true;
     } catch (e) {
       if (e instanceof VaultLockedError) {

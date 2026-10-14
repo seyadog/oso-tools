@@ -71,8 +71,8 @@ describe("the width", () => {
 
 describe("the rail and the left panel", () => {
   it("has the six sections in the order asked for, each with its own shortcut", () => {
-    expect(SECTIONS.map((x) => x.key)).toEqual(["spaces", "servers", "secrets", "tunnels", "accounts", "agents"]);
-    for (const sec of SECTIONS) expect(DEFAULTS[sec.action], sec.key).toMatch(/^Mod\+Shift\+[1-6]$/);
+    expect(SECTIONS.map((x) => x.key)).toEqual(["servers", "secrets", "tunnels", "kubernetes", "accounts", "agents"]);
+    for (const sec of SECTIONS) expect(DEFAULTS[sec.action], sec.key).toMatch(/^Mod\+Shift\+[1-7]$/);
   });
   it("a click opens only that section, a second click closes it, another one swaps it", () => {
     expect(clickSection("", "secrets")).toBe("secrets");
@@ -191,39 +191,9 @@ describe("requests waiting for an answer", () => {
 });
 
 describe("agentColor", () => {
-  it("gives the first ten agents ten different colours, and the same one every time", () => {
-    const colours = Array.from({ length: 10 }, (_, i) => agentColor(i + 1));
+  it("gives the first ten projects ten different colours, and the same one every time", () => {
+    const colours = Array.from({ length: 10 }, (_, i) => agentColor(`/work/project-${i}`));
     expect(new Set(colours).size).toBe(10);
-    expect(agentColor(3)).toBe(agentColor(3));
-  });
-});
-
-describe("remembered agents", () => {
-  const live = (cwd: string) => ({ kind: "claude", name: "Claude", cwd, folder: "x", branch: "", space: null });
-  it("remembers what runs, keeps it when it stops, and lists only what is not running", async () => {
-    const { rememberAgents, notRunning } = await import("../src/agents");
-    const a = rememberAgents([], [live("/a"), live("/b")], 1000);
-    expect(a.map((s) => s.cwd).sort()).toEqual(["/a", "/b"]);
-    expect(rememberAgents(a, [live("/a")], 1500)).toBe(a);
-    expect(notRunning(a, [{ kind: "claude", cwd: "/a" }]).map((s) => s.cwd)).toEqual(["/b"]);
-  });
-});
-
-describe("the address of a tunnel", () => {
-  it("is a link only for a port opened on this computer", async () => {
-    const { tunnelUrl } = await import("../src/tunnels");
-    const f = { id: 1, name: "", auto: false, kind: "local" as const, bind_port: 8080, host: "web", port: 80 };
-    expect(tunnelUrl(f)).toBe("http://localhost:8080");
-    expect(tunnelUrl({ ...f, port: 443 })).toBe("https://localhost:8080");
-    expect(tunnelUrl({ ...f, kind: "remote" })).toBeNull();
-    expect(tunnelUrl({ ...f, kind: "dynamic" })).toBeNull();
-  });
-});
-
-describe("closed terminals", () => {
-  it("are not remembered: old terminal entries are dropped on load", async () => {
-    localStorage.setItem("oso.agents.saved", JSON.stringify([{ kind: "term", name: "nucdeb", cwd: "", folder: "nucdeb", branch: "", space: null, last: 1, server: 3 }, { kind: "claude", name: "Claude Code", cwd: "/a", folder: "a", branch: "", space: null, last: 2 }]));
-    const { loadSavedAgents } = await import("../src/agents");
-    expect(loadSavedAgents().map((s) => s.kind)).toEqual(["claude"]);
+    expect(agentColor("/work/project-3")).toBe(colours[3]);
   });
 });

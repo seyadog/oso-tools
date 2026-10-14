@@ -2,8 +2,33 @@ import type { Tree } from "./tree";
 // What the window asks of the engine. In the app these go to Rust (Tauri); in a plain browser (development and
 // tests) a small mock stands in, so the whole interface can be tried without a background server.
 
+/** A Kubernetes cluster: where kubectl runs and how it is pointed at it. */
+export interface Cluster {
+  /** 0: not saved yet. */
+  id: number;
+  name: string;
+  /** Run kubectl on this server (over ssh) instead of on this computer. */
+  via_server: number | null;
+  /** The program (`kubectl` when empty; `k3s kubectl` for k3s). */
+  kubectl: string;
+  /** A kubeconfig file on this computer (empty: kubectl's own). Not used through a server. */
+  kubeconfig: string;
+  context: string;
+  namespace: string;
+  /** What an AI agent may do on a cluster of this computer (through a server, the server's rule applies). */
+  ai_policy: "ask" | "read_only_auto" | "blocked";
+  env_kind: "production" | "staging" | "dev" | null;
+  notes: string;
+  /** Through a server: the port of the cluster's API there (0 = 6443). */
+  api_port: number;
+  /** The port the tunnel opens on this computer (0 = one chosen from the cluster). */
+  local_port: number;
+}
+
 export interface Server {
   id: number;
+  /** Its colour (an index of the palette), given once and kept. */
+  color?: number | null;
   name: string;
   host: string;
   port: number;
@@ -444,6 +469,20 @@ export interface Backend {
   deleteNode(kind: "folder" | "server", id: number): Promise<void>;
   moveInto(kind: "folder" | "server", id: number, dest: number | null): Promise<boolean>;
   open(serverId: number, rows: number, cols: number, useVault?: boolean, opts?: { space?: number; cwd?: string }): Promise<SessionInfo>;
+  /** The colour of each project (folder), by its index in the palette. */
+  projectColors(): Promise<Record<string, number>>;
+  projectColorsSave(colors: Record<string, number>): Promise<void>;
+  clusterList(): Promise<Cluster[]>;
+  /** Saves (id 0: a new one) and returns the id. */
+  clusterSave(c: Cluster): Promise<number>;
+  clusterDelete(id: number): Promise<void>;
+  /** Switches on the tunnel of a cluster reached through a server (its API on a port of this computer). */
+  clusterTunnelStart(id: number, useVault: boolean): Promise<void>;
+  clusterTunnelStop(id: number): Promise<void>;
+  /** What a kubectl command that only reads prints on the cluster (the words after kubectl). */
+  clusterRead(id: number, args: string[]): Promise<string>;
+  /** The whole command line of the cluster (its kubeconfig, context and namespace included), to type in a terminal. */
+  clusterLine(id: number, rest: string): Promise<string>;
   spaceList(): Promise<Space[]>;
   /** Saves (id 0: a new one) and returns the id. */
   spaceSave(space: Space): Promise<number>;
