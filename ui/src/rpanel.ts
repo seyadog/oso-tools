@@ -4,6 +4,8 @@
 // before it is written.
 
 import { projectColor } from "./colors";
+import { PANEL_ONLY } from "./chrome";
+import { makeSelect } from "./dom";
 import { Activity, ActivityDetail, ApprovalDecision, ApprovalRequest, Backend } from "./api";
 import { AgentState, SavedAgent } from "./agents";
 import { hasSudo, writeCommand } from "./sudo";
@@ -94,7 +96,8 @@ export function resultLabel(a: Activity): string {
 }
 
 /** Where a request came from: "Claude · pane 2 (web-1)". */
-export function whoLabel(a: Activity, tab?: string): string {
+export function whoLabel(a: Activity, tab?: string, panelOnly = PANEL_ONLY): string {
+  if (panelOnly) return agentName(a.agent);
   return `${agentName(a.agent)} · ${tab ?? "terminal closed"}`;
 }
 
@@ -221,8 +224,10 @@ export class RightPanel {
   /** Whether the Agents section of the left panel is the one on show (the app sets it). */
   open = false;
   /** Which of its two tabs is on show. */
-  tab: "agents" | "activity" = store.get("oso.rpanel.tab") === "activity" ? "activity" : "agents";
+  tab: "agents" | "activity" = PANEL_ONLY || store.get("oso.rpanel.tab") === "activity" ? "activity" : "agents";
   private activity: Activity[] = [];
+  private paused = false;
+  private filterHost = "";
   private loaded = false;
   /** The newest thing the person has seen in the panel. */
   private seen = Number(store.get("oso.rpanel.seen") ?? "0") || 0;
@@ -278,6 +283,7 @@ export class RightPanel {
     const list = await this.ctx.be.agentActivity(60).catch(() => null);
     if (!list) return;
     this.activity = list;
+    this.paused = await this.ctx.be.agentsPaused().catch(() => false);
     const latest = latestUpdate(list);
     if (!this.loaded) {
       this.loaded = true;
@@ -340,7 +346,7 @@ export class RightPanel {
     const nowS = Math.floor(now / 1000);
     const pending = this.ctx.queue.list();
     this.agentRows = sortAgents(this.ctx.agents());
-    const sig = JSON.stringify([this.tab, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), this.ctx.savedAgents().map((s) => [s.cwd, s.kind, openFor(s.last, now)]), pending.map((r) => r.id), this.ctx.queue.allowAll, this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
+    const sig = JSON.stringify([this.tab, this.paused, this.filterHost, this.agentRows.map((r) => [r.sid, r.name, r.where, r.folder, r.branch, r.state, openFor(r.since, now), r.space]), this.ctx.savedAgents().map((s) => [s.cwd, s.kind, openFor(s.last, now)]), pending.map((r) => r.id), this.ctx.queue.allowAll, this.activity.map((a) => [a.id, a.ts, a.updated, a.state, ago(a.ts, nowS)]), [...this.expanded]]);
     if (!force && sig === this.sig) return;
     this.sig = sig;
     const cur = this.body.querySelector(".rp-scroll") as HTMLElement | null;
@@ -353,7 +359,7 @@ export class RightPanel {
       b.onclick = () => this.showTab(id);
       return b;
     };
-    this.body.append(el("div", { class: "rp-tabs", role: "tablist" }, tabBtn("agents", "Agents", needs), tabBtn("activity", "Activity", pending.length)));
+    if (!PANEL_ONLY) this.body.append(el("div", { class: "rp-tabs", role: "tablist" }, tabBtn("agents", "Agents", needs), tabBtn("activity", "Activity", pending.length)));
     this.body.append(this.tab === "agents" ? this.agentsSection(now) : this.activitySection(pending, nowS));
     const next = this.body.querySelector(".rp-scroll") as HTMLElement | null;
     if (next) next.scrollTop = this.scroll[this.tab === "agents" ? "s" : "a"];
@@ -444,6 +450,21 @@ export class RightPanel {
       };
       return b;
     };
+    if (PANEL_ONLY) {
+      const pause = el("button", { class: `btn${this.paused ? " primary" : ""}`, type: "button", "data-act": "pause-agents", "aria-pressed": String(this.paused) }, this.paused ? "Agents paused: resume" : "Pause all AI agents");
+      pause.onclick = async () => {
+        await this.ctx.be.setAgentsPaused(!this.paused);
+        this.paused = !this.paused;
+        this.render();
+      };
+      const hosts = [...new Set(this.activity.map((a) => a.host).filter(Boolean))].sort();
+      const filter = makeSelect([["", "All servers"], ...hosts.map((h): [string, string] => [h, h])], this.filterHost, { "data-name": "activity-host" });
+      filter.onchange = () => {
+        this.filterHost = filter.value;
+        this.render();
+      };
+      list.append(el("div", { class: "rp-top" }, pause, filter, this.paused ? el("small", {}, "Every agent is refused until you resume.") : null));
+    } else
     list.append(
       el(
         "div",
@@ -453,9 +474,9 @@ export class RightPanel {
       ),
     );
     for (const r of pending) list.append(this.pendingCard(r));
-    const shown = this.activity.filter((a) => a.action !== "context" && a.action !== "hosts");
+    const shown = this.activity.filter((a) => a.action !== "context" && a.action !== "hosts" && (!this.filterHost || a.host === this.filterHost));
     for (const a of [...shown].reverse()) list.append(this.activityCard(a, nowS));
-    if (!pending.length && !shown.length) list.append(el("div", { class: "rp-empty" }, "Nothing yet. When an AI agent in one of your terminals asks oso to do something, it shows up here: what, where, and how it was decided."));
+    if (!pending.length && !shown.length) list.append(el("div", { class: "rp-empty" }, "Nothing yet. When an AI agent asks oso to do something, it shows up here: what, where, and how it was decided."));
     return el("section", { class: "rp-sec rp-activity", "data-section": "activity" }, list);
   }
 
@@ -465,7 +486,7 @@ export class RightPanel {
       b.onclick = () => void this.ctx.queue.answer(r, d);
       return b;
     };
-    const buttons = el("div", { class: "rp-actions" }, btn("", "Deny", "deny", "panel-deny"), btn("", "In a terminal", "terminal", "panel-terminal"), btn("primary", "Allow once", "once", "panel-once"));
+    const buttons = el("div", { class: "rp-actions" }, btn("", "Deny", "deny", "panel-deny"), ...(PANEL_ONLY ? [] : [btn("", "In a terminal", "terminal", "panel-terminal")]), btn("primary", "Allow once", "once", "panel-once"), ...(r.action === "run" && !r.production ? [btn("", "Allow this server for 1 hour", "hour", "panel-hour")] : []));
     const extra = r.can_remember ? btn("link", "Always for read-only commands on this host", "always_read", "panel-always") : null;
     return el(
       "div",

@@ -9,7 +9,7 @@ license = "MIT"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 oso-core = { path = "../core" }
 directories = "6"
 anyhow = "1"

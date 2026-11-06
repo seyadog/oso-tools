@@ -18,7 +18,7 @@ const TOML_BEGIN: &str = "# oso:begin";
 const TOML_END: &str = "# oso:end";
 
 /// What the instructions file gets.
-pub const INSTRUCTIONS: &str = "If the environment variable `OSO=1` is set, call `oso_context` before working with servers, credentials or secrets. Never ask the user for passwords or keys: use oso's tools.";
+pub const INSTRUCTIONS: &str = "If the `oso_context` tool exists (oso's MCP server), call it before working with servers, credentials or secrets, wherever you were started from (herdr, OpenCode, a plain terminal; not only oso's own terminals) while oso's app is running. Never ask the user for passwords or keys, and never read their ~/.ssh or .env files for it: use oso's tools (oso_run, oso_sudo, oso_run_with, oso_put, oso_get, oso_tunnel, oso_kubectl). Plain reads on a server go through without asking (not on production servers); anything that changes something, sudo, file copies and tunnels ask the user in oso's window. If the user says no, do not retry the same thing. If oso says it is not open or the vault is locked, tell the user to open oso or unlock the vault instead of looking for another way in.";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Agent {
@@ -597,7 +597,7 @@ mod tests {
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["numStartups", "projects", "mcpServers", "theme"], "the order of the keys is kept");
         let md = std::fs::read_to_string(h.join(".claude/CLAUDE.md")).unwrap();
-        assert!(md.starts_with("# My rules\n\nBe brief.\n\n<!-- oso:begin -->\n") && md.ends_with("<!-- oso:end -->\n") && md.contains("call `oso_context`"), "{md}");
+        assert!(md.starts_with("# My rules\n\nBe brief.\n\n<!-- oso:begin -->\n") && md.ends_with("<!-- oso:end -->\n") && md.contains("If the `oso_context` tool exists"), "{md}");
         assert!(plan[0].diff().contains("+     \"oso\": {"), "the plan shows what changes:\n{}", plan[0].diff());
         // a copy of each old file is beside it
         let backups: Vec<String> = std::fs::read_dir(&h).unwrap().chain(std::fs::read_dir(h.join(".claude")).unwrap()).flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains("oso-backup")).collect();

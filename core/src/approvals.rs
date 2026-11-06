@@ -30,6 +30,8 @@ pub enum Decision {
     Once,
     /// Once, and from now on read-only commands on this host go through without asking.
     AlwaysRead,
+    /// Once, and for the next hour anything on this (not production) server goes through without asking.
+    Hour,
     Deny,
     /// The person will run it themselves in a terminal: the agent is told no.
     Terminal,

@@ -28,7 +28,8 @@ import { Item, loadRecent, pushRecent, saveRecent } from "./palette";
 import { openPalette } from "./palette_ui";
 import { SoundPlayer } from "./sound";
 import { soundsDialog } from "./sounds_ui";
-import { LEFT_DEFAULT, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
+import { keyBrowser } from "./keypicker_ui";
+import { LEFT_DEFAULT, PANEL_ONLY, RAIL_WIDTH, SECTIONS, Section, clampLeft, clickSection, readSection, store, storeSet } from "./chrome";
 import { importDialog } from "./import_ui";
 import { envImportDialog, protonImportDialog, showCode } from "./importers_ui";
 import { generalDialog } from "./space_bar";
@@ -105,7 +106,7 @@ export class App {
   private side = el("div", { id: "side" });
   private searchWrap = el("div", { class: "search" });
   /** Which section the left panel shows (`""`: the panel is closed). */
-  private leftSection: Section = readSection();
+  private leftSection: Section = PANEL_ONLY ? readSection() || "servers" : readSection();
   private leftWidth = clampLeft(Number(store("oso.ui.left.w") ?? LEFT_DEFAULT));
   /** Focus mode: no rail and no panels, only the tabs and the terminals. */
   private focusMode = false;
@@ -217,7 +218,7 @@ export class App {
     });
 
     // What was left running, and where it was.
-    const live = await this.be.restore(this.guessRows(), this.guessCols()).catch(() => [] as SessionInfo[]);
+    const live = PANEL_ONLY ? [] : await this.be.restore(this.guessRows(), this.guessCols()).catch(() => [] as SessionInfo[]);
     this.measure();
     live.forEach((s) => this.since.set(s.sid, Date.now() - 60000));
     live.forEach((s) => this.opened.set(s.sid, Number(s.meta.opened) || Date.now()));
@@ -1388,7 +1389,7 @@ export class App {
       this.ws.pending = pending;
       void this.openServer(id);
     };
-    items.push({ id: String(LOCAL), kind: "server", label: "Local terminal", sub: "this computer", icon: "terminal", run: open(LOCAL) });
+    if (!PANEL_ONLY) items.push({ id: String(LOCAL), kind: "server", label: "Local terminal", sub: "this computer", icon: "terminal", run: open(LOCAL) });
     for (const s of this.tree.servers) items.push({ id: String(s.id), kind: "server", label: s.name, sub: `${s.user ? s.user + "@" : ""}${s.host}`, icon: "server", run: open(s.id) });
     for (const c of this.clusters) items.push({ id: `cluster${c.id}`, kind: "action", label: `Kubernetes: ${c.name}`, sub: "cluster", icon: "helm", keywords: `k8s kubectl ${c.context}`, run: () => this.openCluster(c) });
     for (const m of this.secretsMeta ?? []) items.push({ id: String(m.id), kind: "secret", label: m.name, sub: `${KIND_LABEL[m.kind]}${m.env_var ? ` · $${m.env_var}` : ""}`, icon: "key", run: () => void this.vaultDialog() });
@@ -1463,7 +1464,8 @@ export class App {
   private applyChrome() {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
-    this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${RAIL_WIDTH}px`);
+    this.root.classList.toggle("panel-only", PANEL_ONLY);
+    this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${PANEL_ONLY ? 72 : RAIL_WIDTH}px`);
     this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
     this.side.hidden = !open;
@@ -1473,7 +1475,7 @@ export class App {
   /** A click on a rail icon (or its shortcut): that section only, or nothing when it was already the open one. */
   toggleSection(key: Exclude<Section, "">, forceOpen = false) {
     if (this.focusMode) this.setFocusMode(false);
-    this.leftSection = forceOpen ? key : clickSection(this.leftSection, key);
+    this.leftSection = forceOpen || PANEL_ONLY ? key : clickSection(this.leftSection, key);
     this.rpanel?.setOpen(this.leftSection === "agents");
     storeSet("oso.ui.left", this.leftSection);
     this.applyChrome();
@@ -1519,10 +1521,10 @@ export class App {
   private renderRail() {
     clear(this.rail);
     const top = el("div", { class: "rail-top" });
-    for (const sec of SECTIONS) {
+    for (const sec of SECTIONS.filter((x) => !(PANEL_ONLY && x.key === "kubernetes"))) {
       const on = this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
-      b.append(icon(sec.icon, 21));
+      b.append(icon(sec.icon, PANEL_ONLY ? 30 : 21));
       if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
@@ -1530,16 +1532,16 @@ export class App {
     const bottom = el("div", { class: "rail-bottom" });
     const tool = (iconName: string, title: string, act: string, run: () => void, cls = "") => {
       const b = el("button", { class: `rail-btn small ${cls}`.trim(), type: "button", title, "aria-label": title, "data-act": act });
-      b.append(icon(iconName, 19));
+      b.append(icon(iconName, PANEL_ONLY ? 26 : 19));
       b.onclick = run;
       return b;
     };
     const vaultTip = this.vault.unlocked ? "Vault unlocked" : this.vault.exists ? "Vault locked" : "Create the vault";
     bottom.append(
       tool(this.vault.unlocked ? "unlock" : "lock", `${vaultTip}  (${this.keyText("secrets.open")})`, "vault", () => void this.vaultDialog(), this.vault.unlocked ? "open" : ""),
-      tool("terminal", `Local terminal  (${this.keyText("local.new")})`, "foot-local", () => void this.openServer(LOCAL)),
+      ...(PANEL_ONLY ? [] : [tool("terminal", `Local terminal  (${this.keyText("local.new")})`, "foot-local", () => void this.openServer(LOCAL))]),
       tool("settings", `Settings  (${this.keyText("settings")})`, "foot-settings", () => this.settingsDialog()),
-      tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog()),
+      ...(PANEL_ONLY ? [] : [tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog())]),
     );
     this.rail.append(top, bottom);
     this.updateAgentsBadge();
@@ -1717,12 +1719,20 @@ export class App {
           e.stopPropagation();
           void this.serverForm(s);
         };
-        row.append(tail, edit, go);
+        const ping = this.ibtn("refresh", "Check that this server answers", () => {}, false, "ping");
+        ping.style.cssText = "width:24px;height:24px";
+        ping.onclick = async (e) => {
+          e.stopPropagation();
+          if (s.jump != null || s.proxy != null) return toast(`${s.name} is reached through something else: oso cannot check it from here.`);
+          const up = await this.be.serverPing(s.host, s.port).catch(() => false);
+          toast(up ? `${s.name} answers.` : `${s.name} does not answer on port ${s.port}.`);
+        };
+        row.append(tail, ...(PANEL_ONLY ? [ping] : []), edit, ...(PANEL_ONLY ? [] : [go]));
         row.onclick = () => {
           this.selected = r;
           this.renderSidebar();
         };
-        row.ondblclick = () => void this.openOrFocus(s.id);
+        row.ondblclick = () => (PANEL_ONLY ? void this.serverForm(s) : void this.openOrFocus(s.id));
       }
       // drag a server onto the stage to open it there, or a server / folder onto a folder to move it
       row.addEventListener("pointerdown", (e) => {
@@ -2285,7 +2295,7 @@ export class App {
     const all = this.vault.unlocked ? await this.be.secretList().catch(() => []) : [];
     const keys = all.filter((k) => k.kind === "ssh_key");
     const seeds = all.filter((k) => k.kind === "totp");
-    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "ask" };
+    const s: Server = existing ?? { id: 0, name: "", host: "", port: 22, user: "", auth: "agent", key_path: "", parent: this.selected?.kind === "folder" ? this.selected.id : null, jump: null, has_secret: false, has_sudo: false, has_totp: false, forwards: [], notes: "", env_kind: null, proxy: null, network: null, ai_policy: "read_only_auto" };
     openModal((close) => {
       const name = el("input", { value: s.name, name: "name", autocomplete: "off" });
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
@@ -2312,6 +2322,22 @@ export class App {
       const vaultKeyRow = field("Key (kept in the vault, signed by oso's own ssh-agent)", vaultKey);
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
+      const browse = el("button", { class: "btn small", type: "button", "data-act": "browse-key" }, "Browse…");
+      let picker: HTMLElement | null = null;
+      browse.onclick = () => {
+        if (picker) {
+          picker.remove();
+          picker = null;
+          return;
+        }
+        picker = keyBrowser(this.be, (path) => {
+          key.value = path;
+          picker?.remove();
+          picker = null;
+        });
+        keyRow.append(picker);
+      };
+      keyRow.append(browse);
       const loginLabel = el("label", {}, "");
       const loginRow = el("div", {}, loginLabel, login);
       const rmRow = el("div", { class: "hint" }, clearLogin, " remove the saved password");
@@ -2372,7 +2398,31 @@ export class App {
     }
   }
 
+  /** Settings of the panel-only window: how long the vault stays open, a backup, nothing else. */
+  private async simpleSettings() {
+    const now = await this.be.vaultMinutes().catch(() => 240);
+    openModal((close) => {
+      const hours: [string, string][] = [["60", "1 hour"], ["120", "2 hours"], ["240", "4 hours"], ["480", "8 hours"], ["720", "12 hours"]];
+      if (!hours.some(([v]) => v === String(now))) hours.push([String(now), `${now} minutes`]);
+      const sel = makeSelect(hours, String(now), { "data-name": "vault-minutes" });
+      sel.onchange = () => void this.be.setVaultMinutes(Number(sel.value)).then(() => toast("Saved."));
+      const out = el("div", { class: "hint" });
+      const backup = el("button", { class: "btn", type: "button", "data-act": "backup" }, "Back up servers and vault now");
+      backup.onclick = async () => {
+        try {
+          out.textContent = `Saved: ${await this.be.backupNow()} (the vault inside stays encrypted with your master password)`;
+        } catch (x) {
+          out.textContent = (x as Error).message;
+        }
+      };
+      const done = el("button", { class: "btn primary", type: "button" }, "Close");
+      done.onclick = () => close();
+      return el("div", { class: "modal", "data-modal": "settings" }, el("h3", {}, "Settings"), field("Keep the vault unlocked for", sel), el("div", {}, backup), out, el("div", { class: "actions" }, done));
+    });
+  }
+
   settingsDialog() {
+    if (PANEL_ONLY) return void this.simpleSettings();
     const edits: Record<string, unknown> = { ...(this.userKeys ?? {}) };
     delete edits.modifier;
     let mod = modifierOf(this.userKeys);
@@ -2501,6 +2551,7 @@ export class App {
   // ------------------------------------------------------------ keyboard
 
   private onKey(e: KeyboardEvent) {
+    if (PANEL_ONLY) return; // no shortcuts: oso is a vault and its panels
     if (modalOpen()) return;
     if (e.isComposing) return;
     const tgt = e.target as HTMLElement | null;

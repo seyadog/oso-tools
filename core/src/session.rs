@@ -438,6 +438,37 @@ impl Session {
     }
 }
 
+/// What to answer to a question that `ssh` asked through `SSH_ASKPASS` (there is no screen to read there, only the
+/// question): the same choice as the terminal makes. A secret is given once; `None` means "ask the person".
+pub fn answer_for(fills: &mut [Option<Autofill>], question: &str) -> Option<String> {
+    let text = question.trim_end().to_lowercase();
+    match classify_prompt(&text, true)? {
+        Prompt::Code => {
+            let generic = !text.contains('@');
+            let pick = fills
+                .iter()
+                .position(|f| f.as_ref().is_some_and(|f| f.totp && text.contains(&f.when)))
+                .or_else(|| if generic { fills.iter().position(|f| f.as_ref().is_some_and(|f| f.totp && f.fallback)) } else { None })?;
+            let mut f = fills[pick].take()?;
+            let spec = crate::totp::parse(&f.secret).ok()?;
+            let code = crate::totp::code(&spec, crate::totp::now());
+            f.secret.zeroize();
+            Some(code)
+        }
+        Prompt::Login => {
+            let generic = !text.contains('@') && !text.contains("passphrase");
+            let pick = fills
+                .iter()
+                .position(|f| f.as_ref().is_some_and(|f| !f.totp && text.contains(&f.when)))
+                .or_else(|| if generic { fills.iter().position(|f| f.as_ref().is_some_and(|f| !f.totp && f.fallback)) } else { None })?;
+            let mut f = fills[pick].take()?;
+            Some(std::mem::take(&mut f.secret))
+        }
+        // a `sudo` password is never answered here
+        Prompt::Sudo => None,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Prompt {
     /// ssh asking for the login password or a key passphrase.

@@ -11,8 +11,12 @@ export const SECTIONS: { key: Exclude<Section, "">; label: string; icon: string;
   { key: "tunnels", label: "Tunnels", icon: "tunnel", action: "panel.tunnels" },
   { key: "kubernetes", label: "Kubernetes", icon: "helm", action: "panel.kubernetes" },
   { key: "accounts", label: "Accounts", icon: "user", action: "panel.accounts" },
-  { key: "agents", label: "AI agents", icon: "agent", action: "panel.agents" },
+  { key: "agents", label: "Activity", icon: "agent", action: "panel.agents" },
 ];
+
+/** oso is the vault and the connections, not a terminal: the window shows the panels only. (`?terminals` brings the old
+ *  terminal workspace back for the tests of that code, which is still in the tree.) */
+export const PANEL_ONLY = typeof location === "undefined" || !/[?&]terminals/.test(location.search);
 
 export const RAIL_WIDTH = 48;
 export const LEFT_MIN = 200;

@@ -65,7 +65,7 @@ impl Term for RealTerm {
 }
 
 /// The commands of the command line, or `None` when `args` is not one of them (the window starts instead).
-pub const COMMANDS: [&str; 8] = ["status", "unlock", "lock", "space", "run", "ssh", "host", "scan"];
+pub const COMMANDS: [&str; 11] = ["status", "unlock", "lock", "space", "run", "ssh", "open", "host", "scan", "show", "quit"];
 
 pub fn is_command(args: &[String]) -> bool {
     args.first().is_some_and(|a| COMMANDS.contains(&a.as_str()))
@@ -76,7 +76,8 @@ const USAGE: &str = "oso commands:
   oso unlock | lock                  the vault (the master password is asked here, not shown)
   oso space [use <name>]             list the Spaces, or work in one (General: the things that are in no Space)
   oso run [-s space] -- cmd...       run a program with the secrets of a Space (and General's) in its environment
-  oso ssh <host>                     open a host in oso's window
+  oso ssh <host> [ssh args…]         connect to a host from this terminal (user, key, jump hosts and saved secrets from oso)
+  oso open <host>                    open a host in oso's window
   oso host add <name> <address> [--user U] [--port N] [--auth agent|key|password] [--key FILE] [--space S] [--notes TEXT]
   oso scan <dir> [--import]          find .env files with secrets in a folder (and bring them into the vault)";
 
@@ -127,6 +128,19 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
             t.out("Vault locked.");
             0
         }
+        ["show"] => {
+            if ask(socket, json!({ "cmd": "show" }), t).is_none() {
+                return 1;
+            }
+            0
+        }
+        ["quit"] => {
+            if ask(socket, json!({ "cmd": "quit" }), t).is_none() {
+                return 1;
+            }
+            t.out("oso stopped.");
+            0
+        }
         ["space"] => {
             let Some(v) = ask(socket, json!({ "cmd": "spaces" }), t) else { return 1 };
             let active = v["active"].as_str().unwrap_or("General");
@@ -145,10 +159,37 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
             }
             0
         }
-        ["ssh", host] => {
+        ["open", host] => {
             let Some(v) = ask(socket, json!({ "cmd": "open", "host": host }), t) else { return 1 };
             t.out(&format!("Opened {} in oso.", v["host"].as_str().unwrap_or(host)));
             0
+        }
+        ["ssh", host, extra @ ..] => {
+            let Some(v) = ask(socket, json!({ "cmd": "connect", "host": host }), t) else { return 1 };
+            let mut argv: Vec<String> = v["argv"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+            if argv.is_empty() {
+                t.err("oso gave no command to run");
+                return 1;
+            }
+            argv.extend(extra.iter().map(|a| a.to_string()));
+            let mut env: Vec<(String, String)> = std::env::vars().collect();
+            let mut set = |k: &str, val: &str| {
+                env.retain(|(name, _)| name != k);
+                env.push((k.to_string(), val.to_string()));
+            };
+            // ssh asks oso (through this same program) for the saved password, passphrase or code of each prompt
+            if let (Some(token), Ok(me)) = (v["token"].as_str(), std::env::current_exe()) {
+                set("SSH_ASKPASS", &me.to_string_lossy());
+                set("SSH_ASKPASS_REQUIRE", "force");
+                set(ASKPASS_TOKEN, token);
+                set("OSO_ASKPASS_SOCKET", &socket.to_string_lossy());
+            }
+            // a key kept in the vault is offered by oso's own agent
+            if let Some(sock) = v["agent"].as_str() {
+                set("SSH_AUTH_SOCK", sock);
+            }
+            let program = argv.remove(0);
+            t.exec(&program, &argv, &env)
         }
         ["run", rest @ ..] => {
             let (profile, command) = match rest {
@@ -205,4 +246,51 @@ pub fn run(args: &[String], socket: &Path, t: &mut dyn Term) -> i32 {
             2
         }
     }
+}
+
+/// The environment variable that tells this program it was started by `ssh` as its `SSH_ASKPASS` helper.
+pub const ASKPASS_TOKEN: &str = "OSO_ASKPASS_TOKEN";
+
+/// `ssh` runs this with its question as the only argument and reads the answer from standard output. The saved secret
+/// comes from the running oso; a question without one (a host key to confirm, a wrong password) is asked on the
+/// terminal itself.
+pub fn askpass(question: &str, token: &str, socket: &Path) -> i32 {
+    let answer = control::request(socket, &json!({ "cmd": "askpass", "token": token, "prompt": question }))
+        .ok()
+        .and_then(|v| v["answer"].as_str().map(str::to_string));
+    let answer = match answer {
+        Some(a) => a,
+        None => match ask_on_terminal(question) {
+            Some(a) => a,
+            None => return 1,
+        },
+    };
+    println!("{answer}");
+    0
+}
+
+fn ask_on_terminal(question: &str) -> Option<String> {
+    use std::os::fd::AsRawFd;
+    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+    let fd = tty.as_raw_fd();
+    let mut out = &tty;
+    let _ = write!(out, "{question}");
+    let _ = out.flush();
+    // what is typed is hidden unless it is a plain yes/no question (a host key)
+    let hide = !question.to_lowercase().contains("(yes/no");
+    // SAFETY: plain termios calls on the terminal opened above; the saved state is put back before returning.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    let hidden = hide && unsafe { libc::tcgetattr(fd, &mut saved) } == 0 && {
+        let mut quiet = saved;
+        quiet.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &quiet) == 0 }
+    };
+    let mut line = String::new();
+    let read = std::io::BufReader::new(&tty).read_line(&mut line);
+    if hidden {
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
+        let _ = writeln!(out);
+    }
+    read.ok().filter(|n| *n > 0)?;
+    Some(line.trim_end_matches(['\n', '\r']).to_string())
 }

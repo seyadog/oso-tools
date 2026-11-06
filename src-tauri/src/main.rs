@@ -226,6 +226,7 @@ fn approval_answer(state: State<AppState>, id: u64, decision: String) -> Res<boo
     let d = match decision.as_str() {
         "once" => oso_core::approvals::Decision::Once,
         "always_read" => oso_core::approvals::Decision::AlwaysRead,
+        "hour" => oso_core::approvals::Decision::Hour,
         "terminal" => oso_core::approvals::Decision::Terminal,
         _ => oso_core::approvals::Decision::Deny,
     };
@@ -253,6 +254,76 @@ fn agent_activity(state: State<AppState>, limit: usize) -> Res<Vec<oso_core::aud
 fn agent_activity_detail(state: State<AppState>, id: u64) -> Res<Option<oso_core::audit::Detail>> {
     let path = engine!(state).store_path().with_file_name("audit.jsonl");
     Ok(oso_core::audit::find_detail(&path, id))
+}
+
+#[tauri::command]
+fn vault_minutes() -> u64 {
+    oso_core::settings::Settings::load().vault_minutes
+}
+
+#[tauri::command]
+fn set_vault_minutes(minutes: u64) {
+    oso_core::settings::save_key_in(&oso_core::store::Store::config_dir(), "vault_minutes", json!(minutes.clamp(5, 24 * 60)));
+}
+
+#[tauri::command]
+fn agents_paused() -> bool {
+    oso_core::agent_api::paused()
+}
+
+#[tauri::command]
+fn set_agents_paused(on: bool) {
+    oso_core::agent_api::set_paused(on);
+}
+
+/// Whether a server answers on its port (a plain connection, no login). Servers reached through another one cannot be checked this way.
+#[tauri::command]
+fn server_ping(host: String, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    (host.as_str(), port).to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|addr| std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+}
+
+/// Copies servers and the (already encrypted) vault into one file in the home folder; returns its path.
+#[tauri::command]
+fn backup_now() -> Result<String, String> {
+    let dir = oso_core::store::Store::config_dir();
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let stamp = std::process::Command::new("date").arg("+%Y%m%d-%H%M").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "now".into());
+    let out = format!("{home}/oso-backup-{stamp}.tar.gz");
+    let files: Vec<&str> = ["servers.json", "vault.json", "settings.json"].into_iter().filter(|f| dir.join(f).exists()).collect();
+    if files.is_empty() {
+        return Err("nothing to back up".into());
+    }
+    let st = std::process::Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(&dir).args(&files).status().map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err("tar failed".into());
+    }
+    let _ = std::fs::set_permissions(&out, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    Ok(out)
+}
+
+/// The names in a folder, for the key-file picker (never file contents). Starts at ~/.ssh; `~` is the home folder.
+#[tauri::command]
+fn list_dir(path: String) -> Result<Value, String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let want = if path.is_empty() { format!("{home}/.ssh") } else if let Some(rest) = path.strip_prefix('~') { format!("{home}{rest}") } else { path };
+    let dir = std::fs::canonicalize(&want).map_err(|e| format!("{want}: {e}"))?;
+    let mut entries: Vec<(bool, String)> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    let shown = |p: &std::path::Path| match p.strip_prefix(&home) {
+        Ok(r) if !home.is_empty() => format!("~/{}", r.display()).trim_end_matches('/').to_string(),
+        _ => p.display().to_string(),
+    };
+    Ok(json!({
+        "path": dir.to_string_lossy(),
+        "shown": shown(&dir),
+        "parent": dir.parent().map(|p| p.to_string_lossy().into_owned()),
+        "entries": entries.iter().map(|(d, n)| json!({ "name": n, "dir": d })).collect::<Vec<_>>(),
+    }))
 }
 
 /// Who is using this computer, for the label of a terminal ("tab 1 · Local · me").
@@ -738,9 +809,92 @@ fn build_engine(handle: AppHandle) -> anyhow::Result<Engine> {
     Ok(engine)
 }
 
+/// The menu of the icon in the top bar: open, switch GitHub / Tailscale account (only when there is more than one), lock, quit.
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let menu = Menu::new(app)?;
+    menu.append(&MenuItem::with_id(app, "open", "Open oso", true, None::<&str>)?)?;
+    let view = app.try_state::<AppState>().and_then(|st| st.engine.lock().ok().map(|e| e.accounts())).unwrap_or_default();
+    // each tailscaled that runs on this computer (the normal one, a headscale one…): one click turns it on or off
+    let nets = tailnets();
+    if nets.len() >= 2 {
+        let sub = Submenu::with_id(app, "sub:tailnets", "Tailscale networks", true)?;
+        for (sock, label, running) in &nets {
+            sub.append(&CheckMenuItem::with_id(app, format!("ts:{sock}"), label, true, *running, None::<&str>)?)?;
+        }
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&sub)?;
+    }
+    for (tool, title, list) in [("github", "GitHub", &view.github)] {
+        if list.accounts.len() < 2 {
+            continue;
+        }
+        let sub = Submenu::with_id(app, format!("sub:{tool}"), title, true)?;
+        for a in &list.accounts {
+            let label = if a.detail.is_empty() { a.name.clone() } else { format!("{} · {}", a.name, a.detail) };
+            sub.append(&CheckMenuItem::with_id(app, format!("acct:{tool}:{}", a.id), label, true, a.active, None::<&str>)?)?;
+        }
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&sub)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "lock", "Lock the vault", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "Quit oso", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+/// The tailscaled daemons on this computer: (socket, name to show, whether it is on). A daemon is a socket
+/// `/run/tailscale*/tailscaled.sock`; the name is its tailnet (`tailscale status --json`).
+fn tailnets() -> Vec<(String, String, bool)> {
+    let mut out = vec![];
+    let Ok(dir) = std::fs::read_dir("/run") else { return out };
+    let mut socks: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("tailscale"))
+        .map(|e| format!("{}/tailscaled.sock", e.path().display()))
+        .filter(|p| std::path::Path::new(p).exists())
+        .collect();
+    socks.sort();
+    for sock in socks {
+        let Ok(o) = std::process::Command::new("tailscale").arg(format!("--socket={sock}")).args(["status", "--json"]).output() else { continue };
+        let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) else { continue };
+        let running = v["BackendState"] == "Running";
+        let net = v["CurrentTailnet"]["Name"].as_str().unwrap_or("").to_string();
+        let base = sock.trim_start_matches("/run/").split('/').next().unwrap_or("tailscale").to_string();
+        let label = if net.is_empty() { base } else { format!("{base} · {net}") };
+        out.push((sock, label, running));
+    }
+    out
+}
+
+/// Turns one tailscaled on or off. Returns what to tell the person.
+fn toggle_tailnet(sock: &str) -> String {
+    let on = std::process::Command::new("tailscale").arg(format!("--socket={sock}")).args(["status", "--json"]).output().ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).is_some_and(|v| v["BackendState"] == "Running");
+    let verb = if on { "down" } else { "up" };
+    match std::process::Command::new("tailscale").arg(format!("--socket={sock}")).arg(verb).output() {
+        Ok(o) if o.status.success() => format!("{}: {}.", sock.trim_start_matches("/run/").split('/').next().unwrap_or(""), if on { "off" } else { "on" }),
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("").to_string();
+            format!("It did not work ({why}). Once, in a terminal: sudo tailscale --socket={sock} set --operator=$USER")
+        }
+        Err(e) => format!("tailscale: {e}"),
+    }
+}
+
+fn refresh_tray_menu(app: &AppHandle) {
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id("oso"), build_tray_menu(app)) {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
 fn main() {
     // oso's command line (`oso unlock`, `oso run -- …`): it talks to the window that is open, and never starts one
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    // `ssh` started by `oso ssh` runs this same program to ask for a saved password (SSH_ASKPASS)
+    if let (Ok(token), [question]) = (std::env::var(oso_core::cli::ASKPASS_TOKEN), cli_args.as_slice()) {
+        let socket = std::env::var_os("OSO_ASKPASS_SOCKET").map(std::path::PathBuf::from).unwrap_or_else(oso_core::control::socket_path);
+        std::process::exit(oso_core::cli::askpass(question, &token, &socket));
+    }
     if oso_core::cli::is_command(&cli_args) {
         let code = oso_core::cli::run(&cli_args, &oso_core::control::socket_path(), &mut oso_core::cli::RealTerm);
         std::process::exit(code);
@@ -790,8 +944,113 @@ fn main() {
         _ => {}
     }
 
+    // Only one oso runs (it holds the vault and the agents' door). A second start asks the first to show its window.
+    if let Ok(mut c) = std::os::unix::net::UnixStream::connect(oso_core::control::socket_path()) {
+        use std::io::{BufRead, Write};
+        c.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        if writeln!(c, "{}", json!({ "cmd": "show" })).is_ok() {
+            let mut answer = String::new();
+            if std::io::BufReader::new(c).read_line(&mut answer).is_ok() && answer.contains("\"ok\":true") {
+                return;
+            }
+        }
+    }
+    let background = std::env::args().any(|a| a == "--background");
+
     tauri::Builder::default()
-        .setup(|app| {
+        // closing the window only hides it: oso keeps running, so the vault and the agents' tools stay available
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .setup(move |app| {
+            // the icon in the top bar: click opens the window; the menu opens, locks the vault or quits
+            {
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+                let menu = build_tray_menu(app.handle())?;
+                let show = |h: &AppHandle| {
+                    if let Some(w) = h.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                };
+                let mut tray = TrayIconBuilder::with_id("oso")
+                    .tooltip("oso")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |h, e| match e.id().as_ref() {
+                        "open" => show(h),
+                        "lock" => {
+                            if let Some(state) = h.try_state::<AppState>() {
+                                if let Ok(mut en) = state.engine.lock() {
+                                    en.vault_lock();
+                                }
+                            }
+                        }
+                        "quit" => h.exit(0),
+                        id if id.starts_with("ts:") => {
+                            let (sock, h2) = (id[3..].to_string(), h.clone());
+                            std::thread::spawn(move || {
+                                let said = toggle_tailnet(&sock);
+                                notify_agent(h2.clone(), "oso".into(), said, 0);
+                                refresh_tray_menu(&h2);
+                            });
+                        }
+                        id if id.starts_with("acct:") => {
+                            // acct:<tool>:<account id>
+                            let mut parts = id.splitn(3, ':');
+                            let (_, tool, acct) = (parts.next(), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                            let (tool, acct, h2) = (tool.to_string(), acct.to_string(), h.clone());
+                            std::thread::spawn(move || {
+                                if let Some(state) = h2.try_state::<AppState>() {
+                                    let r = state.engine.lock().map(|mut e| e.account_use(&tool, &acct));
+                                    let said = match r {
+                                        Ok(Ok(_)) => format!("{tool}: switched."),
+                                        Ok(Err(e)) => format!("{tool}: {e}"),
+                                        Err(_) => "oso is busy".into(),
+                                    };
+                                    notify_agent(h2.clone(), "oso".into(), said, 0);
+                                }
+                                refresh_tray_menu(&h2);
+                            });
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|t, e| {
+                        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                            if let Some(w) = t.app_handle().get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    tray = tray.icon(icon.clone());
+                }
+                if let Err(e) = tray.build(app) {
+                    eprintln!("oso: no icon in the top bar ({e})");
+                }
+            }
+            // the accounts in the menu follow the tools: look again once a minute
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(3)); // once the engine is there
+                    loop {
+                        refresh_tray_menu(&h);
+                        std::thread::sleep(Duration::from_secs(60));
+                    }
+                });
+            }
+            if background {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
             let engine = Arc::new(Mutex::new(build_engine(app.handle().clone())?));
             // oso's ssh-agent: the keys of the vault, offered to ssh and git only while the vault is unlocked
             let agent = match Engine::start_agent(&engine) {
@@ -807,14 +1066,25 @@ fn main() {
             let shown = app.handle().clone();
             approvals.on_request(Arc::new(move |r| {
                 let _ = shown.emit("approval", &r);
+                // an agent that runs outside oso (herdr…): the window may be behind or hidden, so bring it up and tell the desktop
+                if r.pane == 0 {
+                    if let Some(w) = shown.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                    }
+                    let what: String = r.command.chars().take(120).collect();
+                    notify_agent(shown.clone(), "oso: an agent is asking".into(), format!("{}: {what}", r.label), 0);
+                }
             }));
             let handler = Arc::new(oso_core::agent_api::Handler::new(Arc::clone(&engine), Arc::clone(&approvals)));
+            let agent_side = Arc::clone(&handler);
             app.manage(HandlerHolder(Arc::clone(&handler)));
             if let Ok(e) = engine.lock() {
                 e.set_agent_handler(Arc::new(move |call| handler.handle(call)));
             }
             // the command line: it asks this window (the vault is here); `oso ssh` and `oso host add` tell the page
             let to_page = app.handle().clone();
+            let shown_cmd = app.handle().clone();
             let api = Arc::new(oso_core::control::Api {
                 engine: Arc::clone(&engine),
                 approvals: Arc::clone(&approvals),
@@ -822,7 +1092,39 @@ fn main() {
                     let _ = to_page.emit("cli", json!({ "event": event, "data": data }));
                 }),
             });
-            let control = match oso_core::control::start(oso_core::control::socket_path(), Arc::new(move |req| api.handle(req))) {
+            let control = match oso_core::control::start(
+                oso_core::control::socket_path(),
+                Arc::new(move |req| {
+                    match req.get("cmd").and_then(|c| c.as_str()) {
+                        Some("show") => {
+                            if let Some(w) = shown_cmd.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                            json!({ "ok": true })
+                        }
+                        Some("quit") => {
+                            shown_cmd.exit(0);
+                            json!({ "ok": true })
+                        }
+                        // an agent that was not started in an oso terminal (herdr, OpenCode…) comes through `oso mcp`
+                        Some("agent") => {
+                            let answer = agent_side.handle_external(&req);
+                            // the vault is locked: bring the window up so the person can unlock it
+                            if answer.to_string().contains("vault is locked") {
+                                if let Some(w) = shown_cmd.get_webview_window("main") {
+                                    let _ = w.show();
+                                    let _ = w.unminimize();
+                                }
+                                notify_agent(shown_cmd.clone(), "oso: the vault is locked".into(), "An agent needs it: unlock it in oso.".into(), 0);
+                            }
+                            answer
+                        }
+                        _ => api.handle(req),
+                    }
+                }),
+            ) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     eprintln!("oso: the command line will not reach this window ({e:#})");
@@ -845,7 +1147,8 @@ fn main() {
                     std::thread::sleep(Duration::from_secs(30));
                     if let Some(state) = handle.try_state::<AppState>() {
                         if let Ok(mut e) = state.engine.lock() {
-                            e.vault.lock_if_idle(Duration::from_secs(15 * 60));
+                            let minutes = oso_core::settings::Settings::load().vault_minutes.clamp(5, 24 * 60);
+                            e.vault.lock_if_idle(Duration::from_secs(minutes * 60));
                         }
                     }
                 }
@@ -855,6 +1158,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             tree,
             vault_status,
+            list_dir,
+            vault_minutes,
+            set_vault_minutes,
+            agents_paused,
+            set_agents_paused,
+            server_ping,
+            backup_now,
             vault_unlock,
             vault_lock,
             vault_reveal,

@@ -6,7 +6,9 @@
 //! already has, the window asks first.
 
 use crate::approvals::{ApprovalRequest, Approvals, Decision};
+use crate::connect;
 use crate::engine::Engine;
+use crate::session::Autofill;
 use crate::store::{Auth, Server};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -99,6 +101,33 @@ pub fn request(path: &Path, req: &Value) -> Result<Value> {
     serde_json::from_str(&line).context("oso did not answer")
 }
 
+const FILLS_LIFE: Duration = Duration::from_secs(600);
+type Fills = (Vec<Option<Autofill>>, std::time::Instant);
+static ASKPASS: Mutex<std::collections::BTreeMap<String, Fills>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Keeps the secrets of one connection for ten minutes under a random token; the old ones are dropped.
+fn keep_fills(fills: Vec<Option<Autofill>>) -> String {
+    let mut raw = [0u8; 16];
+    let _ = getrandom::fill(&mut raw);
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let mut table = ASKPASS.lock().unwrap_or_else(|x| x.into_inner());
+    table.retain(|_, (_, at)| at.elapsed() < FILLS_LIFE);
+    table.insert(token.clone(), (fills, std::time::Instant::now()));
+    token
+}
+
+/// The one host a name means: by its name, else by address, else by part of its name.
+fn find_host(e: &Engine, name: &str) -> Result<(u64, String), String> {
+    let name = name.to_lowercase();
+    let hits: Vec<&Server> = e.store.servers.iter().filter(|s| s.name.to_lowercase() == name).collect();
+    let hits = if hits.is_empty() { e.store.servers.iter().filter(|s| s.host.to_lowercase() == name || s.name.to_lowercase().contains(&name)).collect() } else { hits };
+    match hits.as_slice() {
+        [s] => Ok((s.id, s.name.clone())),
+        [] => Err(format!("there is no host {name:?}")),
+        many => Err(format!("{name:?} matches {}: say which", many.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "))),
+    }
+}
+
 fn fail(msg: impl Into<String>) -> Value {
     json!({ "ok": false, "error": msg.into() })
 }
@@ -188,23 +217,55 @@ impl Api {
             "run_env" => self.run_env(&req),
             "host_add" => self.host_add(&req),
             "open" => {
-                let name = req.get("host").and_then(Value::as_str).unwrap_or("").to_lowercase();
                 let e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
-                let hits: Vec<&Server> = e.store.servers.iter().filter(|s| s.name.to_lowercase() == name).collect();
-                let hits = if hits.is_empty() { e.store.servers.iter().filter(|s| s.host.to_lowercase() == name || s.name.to_lowercase().contains(&name)).collect() } else { hits };
-                match hits.as_slice() {
-                    [s] => {
-                        let (id, n) = (s.id, s.name.clone());
+                match find_host(&e, req.get("host").and_then(Value::as_str).unwrap_or("")) {
+                    Ok((id, n)) => {
                         drop(e);
                         (self.ui)("open", json!({ "server_id": id }));
                         json!({ "ok": true, "host": n })
                     }
-                    [] => fail(format!("there is no host {name:?}")),
-                    many => fail(format!("{name:?} matches {}: say which", many.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "))),
+                    Err(m) => fail(m),
                 }
             }
+            "connect" => self.connect(&req),
+            "askpass" => self.askpass(&req),
             other => fail(format!("unknown command {other:?}")),
         }
+    }
+
+    /// What `oso ssh` needs to connect from the terminal it was typed in: the `ssh` command, and a token with which
+    /// `ssh` (through `SSH_ASKPASS`) can ask for the saved secrets of this connection, one prompt at a time.
+    fn connect(&self, req: &Value) -> Value {
+        let mut e = self.engine.lock().unwrap_or_else(|x| x.into_inner());
+        let (id, name) = match find_host(&e, req.get("host").and_then(Value::as_str).unwrap_or("")) {
+            Ok(x) => x,
+            Err(m) => return fail(m),
+        };
+        if connect::needs_vault(&e.store, id) && !e.vault.is_unlocked() {
+            return fail("the vault is locked: run `oso unlock` first");
+        }
+        if let Some(problem) = connect::key_problem(&e.store, id).or_else(|| connect::proxy_problem(&e.store, id)) {
+            return fail(problem);
+        }
+        let Some(server) = e.store.server(id).cloned() else { return fail("there is no such host") };
+        let argv = connect::ssh_argv(&e.store, &server);
+        let uses_agent = connect::uses_vault_key(&e.store, id);
+        let e = &mut *e;
+        let fills: Vec<Option<Autofill>> = connect::autofills(&e.store, &mut e.vault, id).into_iter().map(Some).collect();
+        let token = if fills.is_empty() { None } else { Some(keep_fills(fills)) };
+        let agent = uses_agent.then(|| crate::agent::socket_path().to_string_lossy().into_owned());
+        json!({ "ok": true, "host": name, "argv": argv, "token": token, "agent": agent })
+    }
+
+    /// `ssh` asks a question (a password, a passphrase, a code); the answer comes from the secrets kept for the token,
+    /// or is `null` so the helper asks the person.
+    fn askpass(&self, req: &Value) -> Value {
+        let (Some(token), Some(question)) = (req.get("token").and_then(Value::as_str), req.get("prompt").and_then(Value::as_str)) else {
+            return fail("no token or no question");
+        };
+        let mut table = ASKPASS.lock().unwrap_or_else(|x| x.into_inner());
+        let answer = table.get_mut(token).filter(|(_, at)| at.elapsed() < FILLS_LIFE).and_then(|(fills, _)| crate::session::answer_for(fills, question));
+        json!({ "ok": true, "answer": answer })
     }
 
     /// The environment for `oso run`: asks first when it would hand over more than a terminal of oso already has.

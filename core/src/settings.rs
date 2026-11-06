@@ -14,6 +14,16 @@ pub struct Settings {
     /// `"terminal"` (pastels on your terminal's own background, the default) or `"classic"` (fixed colours).
     #[serde(default = "terminal")]
     pub theme: String,
+    /// The one-time change "servers that were on `ask` let plain reads through" has been done (2026-11-06).
+    #[serde(default)]
+    pub reads_default_applied: bool,
+    /// Minutes the vault stays unlocked without being used (default 4 hours).
+    #[serde(default = "four_hours")]
+    pub vault_minutes: u64,
+}
+
+fn four_hours() -> u64 {
+    240
 }
 
 fn terminal() -> String {
@@ -22,7 +32,7 @@ fn terminal() -> String {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: terminal(), active_space: None, view_all: false }
+        Settings { theme: terminal(), active_space: None, view_all: false, reads_default_applied: false, vault_minutes: four_hours() }
     }
 }
 

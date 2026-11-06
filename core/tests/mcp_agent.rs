@@ -205,26 +205,29 @@ fn the_policy_of_a_server_decides_what_goes_through_without_asking() {
 }
 
 #[test]
-fn a_server_nobody_configured_asks_even_for_df_h_and_the_log_says_which_rule_applied() {
+fn a_server_set_to_ask_asks_even_for_df_h_and_a_new_one_lets_reads_through_and_the_log_says_which_rule_applied() {
     let sshd = need_sshd!("whichrule");
     let r = rig("whichrule");
-    // a server added the ordinary way gets the default policy, and the default is to ask
-    let id = add_server(&r, &sshd, "fresh", None, AiPolicy::default(), "");
+    // a server added the ordinary way gets the default policy, and the default lets plain reads through
+    let plain = add_server(&r, &sshd, "plain", None, AiPolicy::default(), "");
+    assert_eq!(r.engine.lock().unwrap().store.server(plain).unwrap().ai_policy, AiPolicy::ReadOnlyAuto);
+    assert_eq!(call(&r, "oso_run", json!({ "host": "plain", "command": "df -h" }))["ok"], true, "a read on a new server needs nobody at the window");
+    let id = add_server(&r, &sshd, "fresh", None, AiPolicy::Ask, "");
     assert_eq!(r.engine.lock().unwrap().store.server(id).unwrap().ai_policy, AiPolicy::Ask);
     // nobody at the window: it is refused, and nothing ran
     let alone = call(&r, "oso_run", json!({ "host": "fresh", "command": "df -h" }));
     assert_eq!(alone["ok"], false, "df -h on a server with no policy must not run by itself: {alone}");
-    assert!(!audit(&r).iter().any(|l| l["decision"] == "finished"), "it did not run");
+    assert!(!audit(&r).iter().any(|l| l["host"] == "fresh" && l["decision"] == "finished"), "it did not run");
     // the person is there and says yes once: it asks, runs, and the record says who decided and why
     let seen = person(&r.approvals, |_| Decision::Once);
     let out = call(&r, "oso_run", json!({ "host": "fresh", "command": "df -h" }));
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(seen.lock().unwrap().len(), 1, "it asked");
     let log = audit(&r);
-    let asked = log.iter().find(|l| l["decision"] == "allowed").expect("an allowed line");
+    let asked = log.iter().find(|l| l["host"] == "fresh" && l["decision"] == "allowed").expect("an allowed line");
     assert_eq!(asked["policy"], "ask");
     assert_eq!(asked["reason"].as_str().unwrap(), "The server's policy is \u{201c}ask\u{201d}: you allowed it once.");
-    let finished = log.iter().find(|l| l["decision"] == "finished").expect("a finished line");
+    let finished = log.iter().find(|l| l["host"] == "fresh" && l["decision"] == "finished").expect("a finished line");
     assert_eq!(finished["id"], asked["id"], "the two lines belong to one request");
     assert!(finished["preview"].as_str().unwrap().contains("Filesystem"), "the first lines of the output are kept");
     let detail = oso_core::audit::find_detail(r.handler.audit_path(), finished["id"].as_u64().unwrap()).expect("the detail of the request");
@@ -317,6 +320,28 @@ fn always_for_reads_changes_the_servers_policy_but_only_for_a_read_and_never_on_
     // it survives a restart
     let again = Store::load_from(r.engine.lock().unwrap().store_path()).unwrap();
     assert_eq!(again.server(id).unwrap().ai_policy, AiPolicy::ReadOnlyAuto);
+}
+
+#[test]
+fn allow_for_an_hour_lets_changes_through_on_that_server_only_and_never_on_production() {
+    let sshd = need_sshd!("hour");
+    let r = rig("hour");
+    add_server(&r, &sshd, "box", None, AiPolicy::Ask, "");
+    add_server(&r, &sshd, "other", None, AiPolicy::Ask, "");
+    add_server(&r, &sshd, "prod", Some(EnvKind::Production), AiPolicy::Ask, "");
+    let seen = person(&r.approvals, |_| Decision::Hour);
+    assert_eq!(call(&r, "oso_run", json!({ "host": "box", "command": "touch /tmp/oso-hour-a; true" }))["ok"], true);
+    assert_eq!(seen.lock().unwrap().len(), 1, "the first one asked");
+    // a change on the same server goes through without asking
+    assert_eq!(call(&r, "oso_run", json!({ "host": "box", "command": "touch /tmp/oso-hour-b; true" }))["ok"], true);
+    assert_eq!(seen.lock().unwrap().len(), 1, "it did not ask again");
+    // another server still asks
+    call(&r, "oso_run", json!({ "host": "other", "command": "touch /tmp/oso-hour-c; true" }));
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // production asks every time, whatever the person answered
+    call(&r, "oso_run", json!({ "host": "prod", "command": "touch /tmp/oso-hour-d; true" }));
+    call(&r, "oso_run", json!({ "host": "prod", "command": "touch /tmp/oso-hour-e; true" }));
+    assert_eq!(seen.lock().unwrap().len(), 4, "production asked both times");
 }
 
 #[test]

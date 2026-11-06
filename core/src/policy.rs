@@ -1,5 +1,5 @@
-//! What an AI agent may do on a server without asking. The default is to ask about everything; a person can let
-//! read-only commands through on a server they trust, and never on a production one.
+//! What an AI agent may do on a server without asking. The default lets plain reads through (and a production server
+//! always asks, whatever its rule says); a person can make a server ask about everything, or block it.
 
 use crate::store::EnvKind;
 use serde::{Deserialize, Serialize};
@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiPolicy {
-    /// Commands that only read go through; anything else asks.
-    ReadOnlyAuto,
+    /// Commands that only read go through; anything else asks. The rule for a new server (production always asks).
     #[default]
+    ReadOnlyAuto,
+    /// Everything asks.
     Ask,
     /// An agent cannot use this server at all.
     Blocked,
@@ -86,7 +87,7 @@ fn stage_is_read_only(w: &[String]) -> bool {
     }
     let flag = |f: &str| args.iter().any(|a| a == f || a.starts_with(&format!("{f}=")));
     match cmd.as_str() {
-        "ls" | "pwd" | "whoami" | "id" | "hostname" | "uname" | "date" | "uptime" | "free" | "df" | "du" | "ps" | "lsblk" | "lscpu" | "which" | "stat" | "file" | "tree" | "wc" | "head" | "tail" | "cat" | "grep" | "egrep" | "fgrep" | "cut" | "uniq" | "tr" | "echo" | "basename" | "dirname" | "readlink" | "nproc" | "arch" | "groups" | "lsof" | "ss" | "netstat" | "lsmod" | "lspci" | "lsusb" | "w" | "who" | "last" => true,
+        "cd" | "sleep" | "true" | "ls" | "pwd" | "whoami" | "id" | "hostname" | "uname" | "date" | "uptime" | "free" | "df" | "du" | "ps" | "lsblk" | "lscpu" | "which" | "stat" | "file" | "tree" | "wc" | "head" | "tail" | "cat" | "grep" | "egrep" | "fgrep" | "cut" | "uniq" | "tr" | "echo" | "basename" | "dirname" | "readlink" | "nproc" | "arch" | "groups" | "lsof" | "ss" | "netstat" | "lsmod" | "lspci" | "lsusb" | "w" | "who" | "last" => true,
         "sort" => !flag("-o") && !flag("--output"),
         "ip" => matches!(args.first().map(String::as_str), Some("a" | "addr" | "address" | "l" | "link" | "r" | "route" | "n" | "neigh")) && !args.iter().any(|a| matches!(a.as_str(), "add" | "del" | "delete" | "flush" | "set" | "change" | "replace")),
         "journalctl" => !args.iter().any(|a| a.starts_with("--vacuum") || a == "--rotate" || a == "--flush" || a == "--sync" || a.starts_with("--setup")),
@@ -125,18 +126,59 @@ pub fn uses_sudo(command: &str) -> bool {
         })
 }
 
-/// Is this command line made only of commands that read? Anything unclear says no, which only means "ask".
+/// Splits a command line at `;`, `&&` and `||` (outside quotes). A single `&` (a background job) or anything else
+/// unusual gives `None`; pipes stay inside the piece.
+fn split_chain(command: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = command.chars().collect();
+    let (mut pieces, mut cur, mut quote) = (vec![], String::new(), None::<char>);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, ';') => pieces.push(std::mem::take(&mut cur)),
+            (None, '&') if next == Some('&') => {
+                pieces.push(std::mem::take(&mut cur));
+                i += 1;
+            }
+            (None, '&') => return None,
+            (None, '|') if next == Some('|') => {
+                pieces.push(std::mem::take(&mut cur));
+                i += 1;
+            }
+            (None, c) => cur.push(c),
+        }
+        i += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    pieces.push(cur);
+    Some(pieces)
+}
+
+/// Is this command line made only of commands that read? Pieces joined with `;`, `&&` or `||` count when every one
+/// of them reads (`cd /var/log && tail -n 20 syslog`). Anything unclear says no, which only means "ask".
 pub fn is_read_only(command: &str) -> bool {
     let command = command.trim();
     if command.is_empty() || command.contains('\n') || command.len() > 2000 {
         return false;
     }
-    // `a | b` (a pipe is the only way of joining that stays read-only); `||` is a second command
-    let stages: Vec<&str> = command.split('|').collect();
-    if stages.iter().any(|s| s.trim().is_empty()) {
-        return false;
-    }
-    stages.iter().all(|s| words(s).is_some_and(|w| stage_is_read_only(&w)))
+    let Some(pieces) = split_chain(command) else { return false };
+    pieces.iter().all(|piece| {
+        // `a | b` (a pipe keeps it read-only); an empty piece (`ls ;;`, `ls &&`) is not a command
+        let stages: Vec<&str> = piece.split('|').collect();
+        !stages.iter().any(|s| s.trim().is_empty()) && stages.iter().all(|s| words(s).is_some_and(|w| stage_is_read_only(&w)))
+    })
 }
 
 #[cfg(test)]
@@ -200,6 +242,16 @@ mod tests {
     }
 
     #[test]
+    fn reads_joined_with_and_semicolon_or_or_pass_only_when_every_piece_reads() {
+        for c in ["cd /var/log && tail -n 20 syslog", "hostname; uptime", "df -h; free -m; uptime", "sleep 5 && systemctl status nginx", "cat /etc/hostname || echo none", "cd /srv/app && git status && git log --oneline -n 3", "grep 'a;b' /var/log/syslog", "echo 'a && b'"] {
+            assert!(is_read_only(c), "{c}");
+        }
+        for c in ["cd /tmp && rm x", "ls; rm x", "ls && reboot", "cat x || rm y", "ls & reboot", "ls &", "cd /x &&", "; ls", "ls ;; ls", "ls && && ls", "cd ~/.ssh && ls", "cd /x && cat .env", "sleep 5 && systemctl restart nginx", "echo 'x && y", "ls &&& ls"] {
+            assert!(!is_read_only(c), "{c:?}");
+        }
+    }
+
+    #[test]
     fn reading_what_holds_secrets_is_not_let_through_unasked() {
         for c in ["cat ~/.ssh/id_rsa", "cat /home/u/.ssh/id_ed25519", "cat .env", "cat /etc/shadow", "cat /proc/1/environ", "cat ~/.aws/credentials", "grep -r password /etc", "kubectl get secrets", "ls ~/.ssh", "head /var/app/token.txt", "cat /root/.kube/config"] {
             assert!(!is_read_only(c), "{c:?}");
@@ -235,7 +287,7 @@ mod tests {
         assert_eq!(decide(ReadOnlyAuto, Some(EnvKind::Production), "df -h"), Verdict::Ask, "production asks even for a read");
         assert!(matches!(decide(Blocked, None, "ls"), Verdict::Block(_)));
         assert!(matches!(decide(Blocked, Some(EnvKind::Production), "ls"), Verdict::Block(_)));
-        assert_eq!(AiPolicy::default(), Ask);
+        assert_eq!(AiPolicy::default(), ReadOnlyAuto);
         assert_eq!(serde_json::to_string(&ReadOnlyAuto).unwrap(), "\"read_only_auto\"");
     }
 

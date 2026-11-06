@@ -41,8 +41,9 @@ describe("the words of the panel", () => {
     expect(resultLabel(act({ state: "running" }))).toBe("running…");
     expect(resultLabel(act({ state: "denied" }))).toBe("not run");
     expect(resultLabel(act({ state: "done" }))).toBe("");
-    expect(whoLabel(act(), "tab 1 · Local · me")).toBe("Claude · tab 1 · Local · me");
-    expect(whoLabel(act({ agent: "" }))).toBe("An AI agent · terminal closed");
+    expect(whoLabel(act(), "tab 1 · Local · me", false)).toBe("Claude · tab 1 · Local · me");
+    expect(whoLabel(act(), undefined, true)).toBe("Claude");
+    expect(whoLabel(act({ agent: "" }), undefined, false)).toBe("An AI agent · terminal closed");
   });
 });
 

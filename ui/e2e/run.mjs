@@ -3,7 +3,7 @@
 import { chromium } from "playwright-core";
 import { spawn } from "node:child_process";
 
-const URL = "http://localhost:1420/";
+const URL = "http://localhost:1420/?terminals";
 const vite = spawn("npx", ["vite", "--port", "1420", "--strictPort"], { stdio: "pipe" });
 process.on("exit", () => vite.kill());
 await new Promise((res, rej) => {

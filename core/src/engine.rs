@@ -195,9 +195,19 @@ impl Engine {
         if store.assign_colors() {
             let _ = store.save();
         }
-        let settings = crate::settings::Settings::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
-        let spaces = Spaces::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
-        let clusters = crate::k8s::Clusters::load_from(store.path().parent().unwrap_or(std::path::Path::new(".")));
+        let dir = store.path().parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let settings = crate::settings::Settings::load_from(&dir);
+        // Once: servers left on the factory rule "ask about everything" let plain reads through, except production ones
+        // (which always ask). A copy of servers.json is kept next to it. Whoever sets a server back to "ask" later keeps it.
+        if !settings.reads_default_applied {
+            if store.reads_without_asking() {
+                let _ = std::fs::copy(store.path(), dir.join("servers.json.before-reads"));
+                let _ = store.save();
+            }
+            crate::settings::save_key_in(&dir, "reads_default_applied", serde_json::Value::Bool(true));
+        }
+        let spaces = Spaces::load_from(&dir);
+        let clusters = crate::k8s::Clusters::load_from(&dir);
         let active_space = settings.active_space.filter(|id| spaces.get(*id).is_some());
         Engine { store, vault, daemon: None, sessions: HashMap::new(), emit, tunnels: HashMap::new(), transfers: HashMap::new(), next_transfer: 1, ssh_extra: vec![], active_space, view_all: settings.view_all, runner: Box::new(accounts::RealRunner), network_ok: Default::default(), agent_sock: None, agent_upstream: None, self_ref: None, space_agents: HashMap::new(), spaces, clusters, tracker: Default::default(), focus: Focus::default() }
     }

@@ -211,7 +211,7 @@ impl Backend for Daemon {
                 }
             }
         }
-        self.call_within(tool, args, agent, std::time::Duration::from_secs(900))
+        self.call_within(tool, args, agent, std::time::Duration::from_secs(50 * 60))
     }
 }
 
@@ -225,6 +225,35 @@ pub fn hook(agent: &str, event: &str) {
 }
 
 /// What answers when there is no oso around.
+/// An agent started anywhere but a terminal of oso (herdr, OpenCode, Hermes, a plain terminal): it asks the running
+/// oso over its private socket, which only this user can open. oso answers as it does for any agent.
+pub struct External {
+    socket: std::path::PathBuf,
+}
+
+impl External {
+    pub fn new(socket: std::path::PathBuf) -> External {
+        External { socket }
+    }
+}
+
+impl Backend for External {
+    fn call(&self, tool: &str, args: Value, agent: &str) -> Value {
+        let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut args = args;
+        if matches!(tool, "oso_put" | "oso_get") {
+            if let Some(o) = args.as_object_mut() {
+                o.remove("_cwd");
+                o.insert("_cwd".into(), json!(cwd));
+            }
+        }
+        match crate::control::request(&self.socket, &json!({ "cmd": "agent", "tool": tool, "args": args, "agent": agent, "cwd": cwd })) {
+            Ok(v) => v,
+            Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+        }
+    }
+}
+
 pub struct Outside(pub String);
 
 impl Backend for Outside {
@@ -239,7 +268,8 @@ pub fn run() -> std::io::Result<()> {
     let stdout = std::io::stdout();
     match Daemon::from_env() {
         Ok(d) => serve(stdin.lock(), stdout.lock(), &d),
-        Err(why) => serve(stdin.lock(), stdout.lock(), &Outside(why)),
+        // not started from a terminal of oso: ask the running oso directly
+        Err(_) => serve(stdin.lock(), stdout.lock(), &External::new(crate::control::socket_path())),
     }
 }
 

@@ -3,6 +3,9 @@
 
 import { Cluster, AccountChange, AccountsView, Activity, AgentStatusRow, ProfileMigration, Space, SpaceMigration, SpaceSettings, ApprovalRequest, AuditEntry, Backend, CliEvent, EnvFile, ProtonItem, FileDrag, Folder, Forward, Proxy, SecretMeta, Server, SessionEvent, SessionInfo, TransferStatus, TreeData, TunnelStatus, VaultLockedError, b64 } from "./api";
 
+let mockMinutes = 240;
+let mockPaused = false;
+
 export function mockBackend(): Backend {
   let next = 10;
   const folders: Folder[] = [{ id: 1, name: "production", parent: null, expanded: true }];
@@ -324,7 +327,7 @@ const clusters: Cluster[] = [];
     integrationStatus: async () => ({ ...connected }),
     integrationPlan: async (agent, install) => [
       { path: `/home/me/.${agent}.json`, changed: true, diff: install ? '+ "oso": {\n+   "command": "/home/me/.local/bin/oso-app",\n+   "args": ["mcp"]\n+ }\n' : '- "oso": { … }\n' },
-      { path: `/home/me/.${agent}/AGENTS.md`, changed: true, diff: install ? "+ <!-- oso:begin -->\n+ If the environment variable `OSO=1` is set, call `oso_context` first.\n+ <!-- oso:end -->\n" : "- <!-- oso:begin --> … <!-- oso:end -->\n" },
+      { path: `/home/me/.${agent}/AGENTS.md`, changed: true, diff: install ? "+ <!-- oso:begin -->\n+ If the `oso_context` tool exists, call it first.\n+ <!-- oso:end -->\n" : "- <!-- oso:begin --> … <!-- oso:end -->\n" },
     ],
     integrationApply: async (agent, install) => {
       (connected as Record<string, boolean>)[agent] = install;
@@ -341,6 +344,16 @@ const clusters: Cluster[] = [];
       return a ? { command: a.command, output: a.output ?? a.preview, cut: false } : null;
     },
     localUser: async () => "me",
+    vaultMinutes: async () => mockMinutes,
+    setVaultMinutes: async (m) => void (mockMinutes = m),
+    agentsPaused: async () => mockPaused,
+    setAgentsPaused: async (on) => void (mockPaused = on),
+    serverPing: async (host) => !host.startsWith("down"),
+    backupNow: async () => "/home/me/oso-backup-test.tar.gz",
+    listDir: async (path) => {
+      const at = path || "/home/me/.ssh";
+      return at === "/home/me" ? { path: at, shown: "~", parent: "/home", entries: [{ name: ".ssh", dir: true }, { name: "notes.txt", dir: false }] } : { path: at, shown: "~/.ssh", parent: "/home/me", entries: [{ name: "id_ed25519", dir: false }, { name: "id_ed25519.pub", dir: false }, { name: "known_hosts", dir: false }] };
+    },
     agentStatus: async (pending) => {
       // as the engine does: a request waiting makes its terminal "needs you", also when nothing else is known about the agent there
       const rows: AgentStatusRow[] = agents.map((a) => ({ ...a, ...(pending.includes(a.sid) ? { state: "needs_you" as const, source: "approval" as const } : {}) }));

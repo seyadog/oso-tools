@@ -11,6 +11,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 const TRAP_VISIBLE: &str = "TRAP-VISIBLE-aa11bb22";
 const TRAP_HIDDEN: &str = "TRAP-HIDDEN-cc33dd44";
 const TRAP_OTHER: &str = "TRAP-OTHER-ee55ff66";
@@ -219,10 +221,59 @@ fn hosts_are_added_and_opened_from_the_command_line() {
     assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "z", "z.example", "--auth", "magic"]), 1);
     assert_eq!(run(&r, &mut Fake::default(), &["host", "add", "z", "z.example", "--bogus", "1"]), 2);
     let mut t = Fake::default();
-    assert_eq!(run(&r, &mut t, &["ssh", "example"]), 0);
+    assert_eq!(run(&r, &mut t, &["open", "example"]), 0);
     let ev = r.events.lock().unwrap().iter().find(|(k, _)| k == "open").cloned().unwrap();
     assert_eq!(ev.1["server_id"], s.id);
+    assert_eq!(run(&r, &mut Fake::default(), &["open", "nope"]), 1);
     assert_eq!(run(&r, &mut Fake::default(), &["ssh", "nope"]), 1);
+}
+
+const SSH_PASSWORD: &str = "TRAP-SSH-9a8b7c6d";
+
+#[test]
+fn ssh_connects_from_this_terminal_and_ssh_asks_oso_for_the_password() {
+    use oso_core::store::{Auth, Server};
+    let r = rig("sshhere");
+    {
+        let mut e = r.engine.lock().unwrap();
+        e.vault_unlock("master").unwrap();
+        let pw = Server { name: "pw".into(), host: "pw.example".into(), user: "deploy".into(), auth: Auth::Password, ..Default::default() };
+        e.save_server(pw, Some(SSH_PASSWORD), None).unwrap();
+        let plain = Server { name: "plain".into(), host: "plain.example".into(), user: "me".into(), port: 2200, ..Default::default() };
+        e.save_server(plain, None, None).unwrap();
+        e.vault_lock();
+    }
+    // a host that needs nothing from the vault connects with the vault locked, and asks oso for nothing
+    let mut t = Fake::default();
+    assert_eq!(run(&r, &mut t, &["ssh", "plain", "uptime"]), 0, "{}", t.said());
+    let (program, args, env) = t.ran.clone().unwrap();
+    assert_eq!(program, "ssh");
+    assert!(args.windows(2).any(|w| w == ["-p", "2200"]) && args.contains(&"me@plain.example".to_string()), "{args:?}");
+    assert_eq!(args.last().map(String::as_str), Some("uptime"), "what follows the host goes to ssh");
+    assert!(!env.iter().any(|(k, _)| k == "SSH_ASKPASS"));
+    // a host with a saved password needs the vault open
+    let mut t = Fake::default();
+    assert_eq!(run(&r, &mut t, &["ssh", "pw"]), 1);
+    assert!(t.said().contains("locked"), "{}", t.said());
+    assert!(t.ran.is_none());
+    r.engine.lock().unwrap().vault_unlock("master").unwrap();
+    let mut t = Fake::default();
+    assert_eq!(run(&r, &mut t, &["ssh", "pw"]), 0, "{}", t.said());
+    let (program, args, env) = t.ran.clone().unwrap();
+    assert_eq!(program, "ssh");
+    assert!(!args.iter().any(|a| a.contains(SSH_PASSWORD)) && !env.iter().any(|(_, v)| v.contains(SSH_PASSWORD)) && !t.said().contains(SSH_PASSWORD), "the password is never handed over, only asked for by ssh");
+    let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(get("SSH_ASKPASS_REQUIRE").as_deref(), Some("force"));
+    assert!(get("SSH_ASKPASS").is_some());
+    let token = get(cli::ASKPASS_TOKEN).expect("a token for ssh to ask with");
+    let ask = |token: &str, prompt: &str| control::request(&r.socket, &serde_json::json!({ "cmd": "askpass", "token": token, "prompt": prompt })).unwrap()["answer"].clone();
+    // the question of another host, a host key and a wrong token get nothing
+    assert!(ask(&token, "other@elsewhere.example's password: ").is_null());
+    assert!(ask(&token, "Are you sure you want to continue connecting (yes/no/[fingerprint])? ").is_null());
+    assert!(ask("0000", "deploy@pw.example's password: ").is_null());
+    // its own question gets the password, once
+    assert_eq!(ask(&token, "deploy@pw.example's password: "), SSH_PASSWORD);
+    assert!(ask(&token, "deploy@pw.example's password: ").is_null(), "a wrong password is not tried again");
 }
 
 #[test]
@@ -232,7 +283,7 @@ fn no_command_has_a_way_to_print_a_secret() {
     r.engine.lock().unwrap().vault_unlock("master").unwrap();
     person(&r.approvals, Decision::Once);
     let mut all = String::new();
-    for args in [vec!["status"], vec!["space"], vec!["space", "use", "work"], vec!["space", "use", "General"], vec!["host", "add", "x", "x.example"], vec!["ssh", "x"], vec!["run", "-s", "work", "--", "true"], vec!["lock"], vec!["bogus"], vec!["status", "--secrets"]] {
+    for args in [vec!["status"], vec!["space"], vec!["space", "use", "work"], vec!["space", "use", "General"], vec!["host", "add", "x", "x.example"], vec!["ssh", "x"], vec!["open", "x"], vec!["run", "-s", "work", "--", "true"], vec!["lock"], vec!["bogus"], vec!["status", "--secrets"]] {
         let mut t = Fake { password: "master".into(), ..Default::default() };
         run(&r, &mut t, &args);
         all.push_str(&t.said());
@@ -352,4 +403,47 @@ fn proton_pass_logins_come_in_with_their_two_factor_seeds_and_nothing_else() {
     assert!(list.iter().any(|m| m.name == "GitHub (me)" && m.notes.contains("https://github.com")));
     assert!(!list.iter().any(|m| m.name.starts_with("Mail")), "only what was chosen");
     assert!(std::fs::write(r.dir.join("bad.txt"), "nothing here").is_ok() && e.proton_preview(r.dir.join("bad.txt").to_str().unwrap()).is_err());
+}
+
+/// The whole path with a real `ssh`: a key with a passphrase kept in the vault, a throwaway `sshd`, and the real
+/// `oso` program as ssh's askpass helper. Skipped (and says so) without `sshd` or without a built `oso`.
+#[test]
+fn a_real_ssh_gets_the_passphrase_from_oso_and_nothing_is_typed() {
+    use oso_core::store::{Auth, Server};
+    use std::process::{Command, Stdio};
+    let Some(sshd) = common::start_sshd("askpass") else {
+        eprintln!("skipped: no sshd here");
+        return;
+    };
+    let oso = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/oso");
+    if !oso.exists() {
+        eprintln!("skipped: build the app first (cargo build -p oso)");
+        return;
+    }
+    // the same key, now with a passphrase
+    let locked = sshd.dir.join("locked");
+    std::fs::copy(sshd.dir.join("client"), &locked).unwrap();
+    std::fs::copy(sshd.dir.join("client.pub"), sshd.dir.join("locked.pub")).unwrap();
+    assert!(Command::new("ssh-keygen").args(["-q", "-p", "-P", "", "-N", "open-sesame-77"]).arg("-f").arg(&locked).status().unwrap().success());
+    let r = rig("realssh");
+    {
+        let mut e = r.engine.lock().unwrap();
+        e.vault_unlock("master").unwrap();
+        e.store.extra_options = ["-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR"].iter().map(|s| s.to_string()).collect();
+        let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap().trim().to_string();
+        let s = Server { name: "locked".into(), host: "127.0.0.1".into(), port: sshd.port, user, auth: Auth::Key, key_path: locked.to_string_lossy().into(), ..Default::default() };
+        e.save_server(s, Some("open-sesame-77"), None).unwrap();
+    }
+    let mut t = Fake::default();
+    assert_eq!(run(&r, &mut t, &["ssh", "locked", "echo", "hello-from-oso"]), 0, "{}", t.said());
+    let (program, args, env) = t.ran.clone().unwrap();
+    let out = Command::new(program)
+        .args(&args)
+        .env_clear()
+        .envs(env.iter().cloned().filter(|(k, _)| k != "SSH_ASKPASS").chain([("SSH_ASKPASS".to_string(), oso.to_string_lossy().into_owned())]))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ssh failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("hello-from-oso"));
 }

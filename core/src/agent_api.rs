@@ -28,7 +28,10 @@ use zeroize::Zeroizing;
 /// How much of a program's output an agent gets (each of stdout and stderr).
 const MAX_OUTPUT: usize = 64 * 1024;
 /// How long the person has to answer.
-const APPROVAL_WAIT: Duration = Duration::from_secs(300);
+/// How long an agent waits for the person to answer: they may be away while it works (up to 45 minutes).
+const APPROVAL_WAIT: Duration = Duration::from_secs(45 * 60);
+/// How long "allow for an hour" lasts.
+const GRANT: Duration = Duration::from_secs(3600);
 const DEFAULT_TIMEOUT: u64 = 60;
 const MAX_TIMEOUT: u64 = 300;
 /// A file transfer may take longer than a command.
@@ -46,6 +49,8 @@ pub struct Handler {
     /// Numbers the requests (the time it started, in ms, then one more each), so that the lines of one request in
     /// the audit log can be put together.
     next_id: AtomicU64,
+    /// Servers the person allowed for a while ("Allow for 1 hour"): server id → when it ends.
+    grants: Mutex<std::collections::HashMap<u64, Instant>>,
 }
 
 /// Who is asking, from where.
@@ -68,12 +73,28 @@ impl Ctx {
                 c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
             }
         };
-        format!("{who} in {}, pane {}", self.title, self.pane)
+        if self.pane == 0 {
+            // an agent started anywhere else (herdr, a plain terminal…): there is no oso pane to name
+            format!("{who}, outside oso, in {}", self.title)
+        } else {
+            format!("{who} in {}, pane {}", self.title, self.pane)
+        }
     }
 }
 
 fn ok(v: Value) -> Value {
     json!({ "ok": true, "result": v })
+}
+
+/// "Pause AI agents": while on, every tool call of every agent is refused (the person's switch in oso).
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_paused(on: bool) {
+    PAUSED.store(on, Ordering::Relaxed);
+}
+
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
 }
 
 fn no(msg: impl Into<String>) -> Value {
@@ -296,7 +317,17 @@ impl Handler {
     pub fn new(engine: Arc<Mutex<Engine>>, approvals: Arc<Approvals>) -> Handler {
         let path = engine.lock().map(|e| e.store_path().with_file_name("audit.jsonl")).unwrap_or_default();
         let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1).max(1);
-        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into(), next_id: AtomicU64::new(start) }
+        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into(), next_id: AtomicU64::new(start), grants: Mutex::new(Default::default()) }
+    }
+
+    /// A request from an agent that was not started in a terminal of oso (herdr, OpenCode, Hermes, a plain
+    /// terminal…), brought by `oso mcp` over the private socket (only this user can reach it). It has no pane and no
+    /// token, so it is in the Space in use now; everything else (policy, asking, the record, blanking) is the same.
+    pub fn handle_external(&self, req: &Value) -> Value {
+        let space = self.engine().active_space();
+        let cwd = req.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let title = if cwd.is_empty() { "an unknown folder".to_string() } else { cwd.chars().take(200).collect() };
+        self.handle(AgentCall { sid: 0, space, title, body: req.clone() })
     }
 
     pub fn audit_path(&self) -> &std::path::Path {
@@ -309,6 +340,9 @@ impl Handler {
         let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, space: call.space, title: call.title, agent };
         let tool = call.body.get("tool").and_then(Value::as_str).unwrap_or("");
         let args = call.body.get("args").cloned().unwrap_or(Value::Null);
+        if paused() && tool != "oso_event" {
+            return no("The person paused AI agents in oso, so nothing can be done now. Do not try another way: tell them, and they can resume it in oso.");
+        }
         match tool {
             "oso_context" => self.context(&ctx),
             "oso_hosts" => self.hosts(&ctx, &args),
@@ -504,6 +538,16 @@ impl Handler {
         Some(format!("This command uses sudo. oso does not type a sudo password into a command run this way: it works only if {name} lets this user run sudo without a password. If it failed for that reason, ask the user to run it in a terminal of oso, where oso types the saved password."))
     }
 
+    fn granted(&self, server: u64) -> bool {
+        let mut g = self.grants.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|_, until| *until > Instant::now());
+        g.contains_key(&server)
+    }
+
+    fn grant(&self, server: u64) {
+        self.grants.lock().unwrap_or_else(|e| e.into_inner()).insert(server, Instant::now() + GRANT);
+    }
+
     fn run(&self, ctx: &Ctx, args: &Value) -> Value {
         self.run_checked(ctx, args, None)
     }
@@ -524,7 +568,11 @@ impl Handler {
         let production = t.env == Some(EnvKind::Production);
         let sudo_note = policy::uses_sudo(command).then(|| self.sudo_note(t.id, &t.name)).flatten();
         let judged = rule_on.unwrap_or(command);
-        match policy::decide(t.policy, t.env, judged) {
+        let verdict = policy::decide(t.policy, t.env, judged);
+        if !production && matches!(verdict, Verdict::Ask) && self.granted(t.id) {
+            self.log_why(ctx, "run", &t, command, "allowed_without_asking", "You allowed this server for 1 hour.", |_| {});
+        } else {
+        match verdict {
             Verdict::Block(why) => {
                 self.log_why(ctx, "run", &t, command, "blocked", "The server's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.", |_| {});
                 return no(why);
@@ -548,6 +596,12 @@ impl Handler {
                         self.log_why(ctx, "run", &t, command, "allowed_and_remembered_for_reads", &format!("{asked}: you allowed it and chose \u{201c}always for read-only commands\u{201d} on this server."), |_| {});
                     }
                     Decision::AlwaysRead => self.log_why(ctx, "run", &t, command, "allowed", &format!("{asked}: you allowed it once."), |_| {}),
+                    Decision::Hour => {
+                        if !production {
+                            self.grant(t.id);
+                        }
+                        self.log_why(ctx, "run", &t, command, "allowed", &format!("{asked}: you allowed it, and this server for 1 hour."), |_| {});
+                    }
                     Decision::Terminal => {
                         self.log_why(ctx, "run", &t, command, "denied", &format!("{asked}: you chose to run it yourself in a terminal."), |e| e.note = "the person runs it themselves".into());
                         return no("The user chose to run this command themselves, in a terminal. Do not try it again; wait for what they tell you.");
@@ -558,6 +612,7 @@ impl Handler {
                     }
                 }
             }
+        }
         }
         let started = Instant::now();
         let (result, needs_prompt, hide) = match self.exec_remote(&t, command, timeout) {
@@ -669,7 +724,7 @@ impl Handler {
         let production = t.env == Some(EnvKind::Production);
         let asked = if production { "Production always asks, whatever the server's policy says" } else { "A file transfer always asks" };
         match self.ask(ctx, action, &t.name, summary, production, false) {
-            Decision::Once | Decision::AlwaysRead => {
+            Decision::Once | Decision::AlwaysRead | Decision::Hour => {
                 self.log_why(ctx, action, t, what, "allowed", &format!("{asked}: you allowed it once."), |_| {});
                 Ok(())
             }
@@ -925,7 +980,7 @@ impl Handler {
             }
         }
         match self.ask(ctx, "sudo", "this computer", &format!("sudo {command}"), false, false) {
-            Decision::Once | Decision::AlwaysRead => self.log(ctx, "sudo", "this computer", command, "allowed", |e| e.reason = "sudo always asks: you allowed it once.".into()),
+            Decision::Once | Decision::AlwaysRead | Decision::Hour => self.log(ctx, "sudo", "this computer", command, "allowed", |e| e.reason = "sudo always asks: you allowed it once.".into()),
             Decision::Terminal => {
                 self.log(ctx, "sudo", "this computer", command, "denied", |e| {
                     e.note = "the person runs it themselves".into();
@@ -987,7 +1042,7 @@ impl Handler {
         };
         let shown = wanted.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
         match self.ask(ctx, "run_with", "this computer", &format!("{command}    [with the secrets: {shown}]"), false, false) {
-            Decision::Once | Decision::AlwaysRead => self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "allowed", |e| e.reason = "Handing secrets to a command always asks: you allowed it once.".into()),
+            Decision::Once | Decision::AlwaysRead | Decision::Hour => self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "allowed", |e| e.reason = "Handing secrets to a command always asks: you allowed it once.".into()),
             Decision::Terminal => return no("The user chose to run this themselves, in a terminal. Do not try it again."),
             Decision::Deny => {
                 self.log(ctx, "run_with", "this computer", &format!("{command} [with: {shown}]"), "denied", |e| e.reason = "Handing secrets to a command always asks: you denied it (or nobody answered in time).".into());
@@ -1083,7 +1138,7 @@ impl Handler {
             }
             Verdict::Auto => self.log(ctx, "kubectl", &host, &asked, "allowed_without_asking", |e| e.reason = "Automatic: the cluster's policy is \u{201c}read-only auto\u{201d} and this command only reads.".into()),
             Verdict::Ask => match self.ask(ctx, "kubectl", &host, &asked, production, false) {
-                Decision::Once | Decision::AlwaysRead => self.log(ctx, "kubectl", &host, &asked, "allowed", |e| e.reason = if production { "A production cluster always asks: you allowed it once.".into() } else { "You allowed it once.".into() }),
+                Decision::Once | Decision::AlwaysRead | Decision::Hour => self.log(ctx, "kubectl", &host, &asked, "allowed", |e| e.reason = if production { "A production cluster always asks: you allowed it once.".into() } else { "You allowed it once.".into() }),
                 Decision::Terminal => {
                     self.log(ctx, "kubectl", &host, &asked, "denied", |e| e.reason = "You chose to run it yourself in a terminal.".into());
                     return no("The user chose to run this command themselves, in a terminal. Do not try it again; wait for what they tell you.");
@@ -1187,7 +1242,7 @@ impl Handler {
         };
         if action == "start" {
             match self.ask(ctx, "tunnel", &server_name, &desc, production, false) {
-                Decision::Once | Decision::AlwaysRead => {}
+                Decision::Once | Decision::AlwaysRead | Decision::Hour => {}
                 _ => {
                     self.log(ctx, "tunnel", &server_name, &desc, "denied", |e| e.reason = "Starting a tunnel always asks: you denied it (or nobody answered in time).".into());
                     return no("The user did not allow this.");

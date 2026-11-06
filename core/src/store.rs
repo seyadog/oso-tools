@@ -334,6 +334,17 @@ impl Store {
         (0..COLORS).min_by_key(|c| self.servers.iter().filter(|s| s.color == Some(*c)).count()).unwrap_or(0)
     }
 
+    /// Puts every server on "ask about everything" (and not production) on "plain reads go through". Says whether it changed any.
+    pub fn reads_without_asking(&mut self) -> bool {
+        use crate::policy::AiPolicy;
+        let mut changed = false;
+        for s in self.servers.iter_mut().filter(|s| s.ai_policy == AiPolicy::Ask && s.env_kind != Some(EnvKind::Production)) {
+            s.ai_policy = AiPolicy::ReadOnlyAuto;
+            changed = true;
+        }
+        changed
+    }
+
     /// Gives a colour to every server that has none (older files). Says whether it changed anything.
     pub fn assign_colors(&mut self) -> bool {
         let mut changed = false;

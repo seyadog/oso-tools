@@ -1,3 +1,4 @@
+import { PANEL_ONLY } from "./chrome";
 // What AI agents ask of oso, for the person to answer: a window per request (they queue), always naming who asks,
 // from which terminal, on which host and the exact command. And the record of what was asked.
 
@@ -139,7 +140,7 @@ export class ApprovalQueue {
     const deny = btn("", "Deny", "deny", "approval-deny");
     // a copy of files is not something to type into a terminal: only commands have that button
     const transfer = r.action === "put" || r.action === "get";
-    const actions = el("div", { class: "actions" }, transfer ? null : btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"));
+    const actions = el("div", { class: "actions" }, transfer || PANEL_ONLY ? null : btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"), ...(r.action === "run" && !r.production ? [btn("", "Allow this server for 1 hour", "hour", "approval-hour")] : []));
     if (r.can_remember) actions.prepend(btn("", "Always for read-only commands on this host", "always_read", "approval-always"));
     const more = this.queue.length > 1 ? el("div", { class: "hint" }, `${this.queue.length - 1} more waiting after this one`) : null;
     const box = el(

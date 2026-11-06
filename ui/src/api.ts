@@ -248,7 +248,7 @@ export interface ApprovalRequest {
   production: boolean;
   can_remember: boolean;
 }
-export type ApprovalDecision = "once" | "always_read" | "deny" | "terminal";
+export type ApprovalDecision = "once" | "always_read" | "hour" | "deny" | "terminal";
 export interface AuditEntry {
   ts: number;
   pane: number;
@@ -440,6 +440,16 @@ export interface Backend {
   activityDetail(id: number): Promise<ActivityDetail | null>;
   /** The name of the person using this computer ("me"). */
   localUser(): Promise<string>;
+  vaultMinutes(): Promise<number>;
+  setVaultMinutes(minutes: number): Promise<void>;
+  agentsPaused(): Promise<boolean>;
+  setAgentsPaused(on: boolean): Promise<void>;
+  /** Whether the server answers on its port (no login). */
+  serverPing(host: string, port: number): Promise<boolean>;
+  /** Writes a backup file in the home folder and returns its path. */
+  backupNow(): Promise<string>;
+  /** The names in a folder ("" = ~/.ssh), for the key-file picker. */
+  listDir(path: string): Promise<{ path: string; shown: string; parent: string | null; entries: { name: string; dir: boolean }[] }>;
   /** The agents that run in the terminals, and what each is doing. `pending`: terminals with a request waiting. */
   agentStatus(pending: number[]): Promise<AgentStatusRow[]>;
   /** The person looked at this terminal. */
