@@ -229,11 +229,39 @@ pub fn hook(agent: &str, event: &str) {
 /// oso over its private socket, which only this user can open. oso answers as it does for any agent.
 pub struct External {
     socket: std::path::PathBuf,
+    /// Start oso (hidden) when it is not running. Only the real `oso mcp` does: the tests have a socket of their own.
+    autostart: bool,
 }
 
 impl External {
     pub fn new(socket: std::path::PathBuf) -> External {
-        External { socket }
+        External { socket, autostart: false }
+    }
+
+    /// Makes sure oso is running: when nothing answers on its socket, starts this same program hidden (`--background`)
+    /// and waits for it up to 15 seconds. The agent never has to ask the person to open oso.
+    fn ensure_running(&self) {
+        if !self.autostart || std::os::unix::net::UnixStream::connect(&self.socket).is_ok() {
+            return;
+        }
+        use std::os::unix::process::CommandExt;
+        let Ok(exe) = std::env::current_exe() else { return };
+        let started = std::process::Command::new(exe)
+            .arg("--background")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn();
+        if started.is_err() {
+            return;
+        }
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if std::os::unix::net::UnixStream::connect(&self.socket).is_ok() {
+                return;
+            }
+        }
     }
 }
 
@@ -247,6 +275,7 @@ impl Backend for External {
                 o.insert("_cwd".into(), json!(cwd));
             }
         }
+        self.ensure_running();
         match crate::control::request(&self.socket, &json!({ "cmd": "agent", "tool": tool, "args": args, "agent": agent, "cwd": cwd })) {
             Ok(v) => v,
             Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
@@ -269,7 +298,7 @@ pub fn run() -> std::io::Result<()> {
     match Daemon::from_env() {
         Ok(d) => serve(stdin.lock(), stdout.lock(), &d),
         // not started from a terminal of oso: ask the running oso directly
-        Err(_) => serve(stdin.lock(), stdout.lock(), &External::new(crate::control::socket_path())),
+        Err(_) => serve(stdin.lock(), stdout.lock(), &External { socket: crate::control::socket_path(), autostart: true }),
     }
 }
 

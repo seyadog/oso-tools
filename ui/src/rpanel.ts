@@ -464,7 +464,7 @@ export class RightPanel {
         this.render();
       };
       list.append(el("div", { class: "rp-top" }, pause, filter, this.paused ? el("small", {}, "Every agent is refused until you resume.") : null));
-    } else
+    }
     list.append(
       el(
         "div",
