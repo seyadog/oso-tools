@@ -54,7 +54,7 @@ export class ApprovalQueue {
   private listeners: (() => void)[] = [];
   private pushListeners: ((r: ApprovalRequest) => void)[] = [];
 
-  /** "Allow all": requests are allowed without asking, except those on a production host. Only for this run of the window. */
+  /** "Allow all": requests are allowed without asking, except those on a production host. oso remembers it (settings.json), also after a restart. */
   private allowAllOn = false;
 
   constructor(private ctx: QueueCtx) {}
@@ -63,8 +63,19 @@ export class ApprovalQueue {
     return this.allowAllOn;
   }
 
+  /** Reads what oso remembered (Allow all or Ask) when the window starts. */
+  async restore() {
+    try {
+      this.allowAllOn = await this.ctx.be.allowAll();
+      this.changed();
+    } catch {
+      /* the old way: Ask */
+    }
+  }
+
   setAllowAll(on: boolean) {
     this.allowAllOn = on;
+    void this.ctx.be.setAllowAll(on).catch(() => {});
     if (on) for (const r of this.queue.filter((x) => !x.production)) void this.answer(r, "once");
     else this.changed();
   }

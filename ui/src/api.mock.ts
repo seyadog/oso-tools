@@ -50,6 +50,7 @@ export function mockBackend(): Backend {
   const sessions = new Map<number, { info: SessionInfo; line: string; dead: boolean }>();
   let handler: (e: SessionEvent) => void = () => {};
   const vault = { exists: true, unlocked: false };
+  let mockAllowAll = false;
   const enc = new TextEncoder();
   const emit = (sid: number, text: string) => queueMicrotask(() => handler({ sid, kind: "output", data: b64.encode(enc.encode(text)) }));
   const prompt = (title: string) => `\x1b[32m${title}\x1b[0m:\x1b[34m~\x1b[0m$ `;
@@ -345,6 +346,8 @@ const clusters: Cluster[] = [];
     },
     localUser: async () => "me",
     vaultMinutes: async () => mockMinutes,
+    allowAll: async () => mockAllowAll,
+    setAllowAll: async (on) => void (mockAllowAll = on),
     setVaultMinutes: async (m) => void (mockMinutes = m),
     agentsPaused: async () => mockPaused,
     setAgentsPaused: async (on) => void (mockPaused = on),

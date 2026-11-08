@@ -32,6 +32,7 @@ const MAX_OUTPUT: usize = 64 * 1024;
 const APPROVAL_WAIT: Duration = Duration::from_secs(45 * 60);
 /// How long "allow for an hour" lasts.
 const GRANT: Duration = Duration::from_secs(3600);
+const UNLOCK_WAIT: Duration = Duration::from_secs(180);
 const DEFAULT_TIMEOUT: u64 = 60;
 const MAX_TIMEOUT: u64 = 300;
 /// A file transfer may take longer than a command.
@@ -51,6 +52,10 @@ pub struct Handler {
     next_id: AtomicU64,
     /// Servers the person allowed for a while ("Allow for 1 hour"): server id → when it ends.
     grants: Mutex<std::collections::HashMap<u64, Instant>>,
+    /// Called when a request finds the vault locked: the app shows a small window that asks for the master password.
+    on_locked: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// How long a request waits for the person to unlock the vault before it gives up.
+    pub unlock_wait: Duration,
 }
 
 /// Who is asking, from where.
@@ -317,7 +322,7 @@ impl Handler {
     pub fn new(engine: Arc<Mutex<Engine>>, approvals: Arc<Approvals>) -> Handler {
         let path = engine.lock().map(|e| e.store_path().with_file_name("audit.jsonl")).unwrap_or_default();
         let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(1).max(1);
-        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into(), next_id: AtomicU64::new(start), grants: Mutex::new(Default::default()) }
+        Handler { engine, approvals, audit: Audit::new(path), sudo_program: "sudo".into(), next_id: AtomicU64::new(start), grants: Mutex::new(Default::default()), on_locked: Mutex::new(None), unlock_wait: UNLOCK_WAIT }
     }
 
     /// A request from an agent that was not started in a terminal of oso (herdr, OpenCode, Hermes, a plain
@@ -330,12 +335,44 @@ impl Handler {
         self.handle(AgentCall { sid: 0, space, title, body: req.clone() })
     }
 
+    /// What to do when a request needs the vault and it is locked (ask the person for the master password).
+    pub fn on_vault_locked(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_locked.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Waits (no lock held) for the vault to be unlocked, asking the app to show its password window. True when it is.
+    fn wait_for_unlock(&self) -> bool {
+        if self.engine().vault.is_unlocked() {
+            return true;
+        }
+        if let Some(f) = self.on_locked.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            f();
+        }
+        let end = Instant::now() + self.unlock_wait;
+        while Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(250));
+            if self.engine().vault.is_unlocked() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn audit_path(&self) -> &std::path::Path {
         self.audit.path()
     }
 
-    /// Answers one request. Never panics on a bad one: the answer says what was wrong.
+    /// Answers one request. A request that finds the vault locked waits for the person to unlock it (the app asks for the
+    /// master password in a small window) and then goes on by itself; those errors come before anything is asked or run.
     pub fn handle(&self, call: AgentCall) -> Value {
+        let first = self.handle_once(AgentCall { sid: call.sid, space: call.space, title: call.title.clone(), body: call.body.clone() });
+        if first.to_string().contains("vault is locked") && self.wait_for_unlock() {
+            return self.handle_once(call);
+        }
+        first
+    }
+
+    fn handle_once(&self, call: AgentCall) -> Value {
         let agent = call.body.get("agent").and_then(Value::as_str).unwrap_or("").chars().take(60).collect();
         let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, space: call.space, title: call.title, agent };
         let tool = call.body.get("tool").and_then(Value::as_str).unwrap_or("");
@@ -655,7 +692,9 @@ impl Handler {
             let mut guard = self.engine();
             let e = &mut *guard;
             let Some(server) = e.store.server(t.id).cloned() else { return Err("That server no longer exists.".into()) };
+            e.store.accept_new_hosts = true;
             let argv = connect::ssh_argv(&e.store, &server);
+            e.store.accept_new_hosts = false;
             let mut o = connect::opts_for(&e.store, &mut e.vault, t.id, argv, 24, 200, true);
             if let Err(m) = e.agent_env(t.id, &mut o) {
                 return Err(format!("{m:?}"));
@@ -686,7 +725,9 @@ impl Handler {
             if o.fills.is_empty() {
                 extra.extend(["-o".into(), "BatchMode=yes".into()]);
             }
+            e.store.accept_new_hosts = true;
             o.argv = connect::scp_argv(&e.store, &server, dir, local, remote, &extra);
+            e.store.accept_new_hosts = false;
             if let Err(m) = e.agent_env(t.id, &mut o) {
                 return Err(format!("{m:?}"));
             }

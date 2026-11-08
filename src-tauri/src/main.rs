@@ -107,6 +107,33 @@ fn vault_status(state: State<AppState>) -> Res<VaultStatus> {
     Ok(engine!(state).vault_status())
 }
 
+/// The small window that only asks for the master password. It is there at most once; its page closes it when the vault is open.
+fn open_unlock_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("unlock") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let built = tauri::WebviewWindowBuilder::new(app, "unlock", tauri::WebviewUrl::App("index.html?unlock".into()))
+        .title("oso: unlock the vault")
+        .inner_size(400.0, 210.0)
+        .resizable(false)
+        .always_on_top(true)
+        .center()
+        .focused(true)
+        .build();
+    if let Err(e) = built {
+        eprintln!("oso: could not open the unlock window ({e})");
+    }
+}
+
+#[tauri::command]
+fn close_unlock_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("unlock") {
+        let _ = w.destroy();
+    }
+}
+
 #[tauri::command]
 fn vault_unlock(state: State<AppState>, master: String) -> Res<()> {
     engine!(state).vault_unlock(&master)
@@ -254,6 +281,18 @@ fn agent_activity(state: State<AppState>, limit: usize) -> Res<Vec<oso_core::aud
 fn agent_activity_detail(state: State<AppState>, id: u64) -> Res<Option<oso_core::audit::Detail>> {
     let path = engine!(state).store_path().with_file_name("audit.jsonl");
     Ok(oso_core::audit::find_detail(&path, id))
+}
+
+#[tauri::command]
+fn allow_all(state: State<AppState>) -> bool {
+    state.approvals.allow_all()
+}
+
+/// Allow all / Ask: kept on disk, so it is the same after a restart or a reboot.
+#[tauri::command]
+fn set_allow_all(state: State<AppState>, on: bool) {
+    state.approvals.set_allow_all(on);
+    oso_core::settings::save_key_in(&oso_core::store::Store::config_dir(), "allow_all", json!(on));
 }
 
 #[tauri::command]
@@ -961,8 +1000,11 @@ fn main() {
         // closing the window only hides it: oso keeps running, so the vault and the agents' tools stay available
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                // only the big window hides; the small unlock window really closes
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .setup(move |app| {
@@ -1063,6 +1105,7 @@ fn main() {
             app.manage(AgentHolder(agent));
             // what AI agents ask of oso: shown to the person, who answers; it all goes in the audit log
             let approvals = oso_core::approvals::Approvals::new();
+            approvals.set_allow_all(oso_core::settings::Settings::load().allow_all);
             let shown = app.handle().clone();
             approvals.on_request(Arc::new(move |r| {
                 let _ = shown.emit("approval", &r);
@@ -1078,6 +1121,15 @@ fn main() {
             }));
             let handler = Arc::new(oso_core::agent_api::Handler::new(Arc::clone(&engine), Arc::clone(&approvals)));
             let agent_side = Arc::clone(&handler);
+            {
+                let app_h = app.handle().clone();
+                handler.on_vault_locked(Arc::new(move || {
+                    let app2 = app_h.clone();
+                    // windows are made on the main thread
+                    let _ = app_h.run_on_main_thread(move || open_unlock_window(&app2));
+                    notify_agent(app_h.clone(), "oso: the vault is locked".into(), "An AI agent is waiting: type the master password in oso's small window.".into(), 0);
+                }));
+            }
             app.manage(HandlerHolder(Arc::clone(&handler)));
             if let Ok(e) = engine.lock() {
                 e.set_agent_handler(Arc::new(move |call| handler.handle(call)));
@@ -1110,16 +1162,8 @@ fn main() {
                         }
                         // an agent that was not started in an oso terminal (herdr, OpenCode…) comes through `oso mcp`
                         Some("agent") => {
-                            let answer = agent_side.handle_external(&req);
-                            // the vault is locked: bring the window up so the person can unlock it
-                            if answer.to_string().contains("vault is locked") {
-                                if let Some(w) = shown_cmd.get_webview_window("main") {
-                                    let _ = w.show();
-                                    let _ = w.unminimize();
-                                }
-                                notify_agent(shown_cmd.clone(), "oso: the vault is locked".into(), "An agent needs it: unlock it in oso.".into(), 0);
-                            }
-                            answer
+                            // a locked vault is handled inside: the small unlock window opens and the request waits for it
+                            agent_side.handle_external(&req)
                         }
                         _ => api.handle(req),
                     }
@@ -1160,12 +1204,15 @@ fn main() {
             vault_status,
             list_dir,
             vault_minutes,
+            allow_all,
+            set_allow_all,
             set_vault_minutes,
             agents_paused,
             set_agents_paused,
             server_ping,
             backup_now,
             vault_unlock,
+            close_unlock_window,
             vault_lock,
             vault_reveal,
             vault_set,

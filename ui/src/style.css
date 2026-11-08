@@ -613,3 +613,36 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .kb-row:hover { background: var(--hover); }
 .kb-row.dir { color: var(--accent); }
 .rp-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 0 14px; }
+
+/* the small unlock window (oso opens it when an AI agent needs the vault) */
+#unlock-root.ul { display: flex; width: 100%; flex-direction: column; gap: 10px; padding: 18px 20px; height: 100%; }
+.ul-head { display: flex; gap: 12px; align-items: center; }
+.ul-head b { display: block; font-size: 14px; }
+.ul-head small { color: var(--dim); font-size: 12px; }
+.ul-input { background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 11px; outline: none; }
+.ul-input:focus { border-color: var(--accent); }
+.ul-error { color: var(--red); font-size: 12px; min-height: 16px; }
+.ul-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
+.ul-go { background: var(--accent); color: var(--on-accent); border-radius: 8px; padding: 8px 16px; font-weight: 600; }
+.ul-go[disabled] { opacity: .5; }
+.ul-cancel { color: var(--dim); padding: 8px 12px; }
+
+/* small labels on a server row */
+.row .tag { font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; margin-right: 3px; border: 1px solid var(--line-2); color: var(--dim); }
+.row .tag.env-production { color: var(--red); border-color: var(--red); }
+.row .tag.env-staging { color: var(--amber); border-color: var(--amber); }
+.row .tag.env-dev { color: var(--green); border-color: var(--green); }
+.row .tag.ai-blocked { color: var(--red); }
+.row .tag.ai-ask { color: var(--amber); }
+
+/* the copy card under a server's address */
+.copycard { position: fixed; z-index: 60; min-width: 250px; max-width: 420px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45); overflow: hidden; }
+.cc-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; border-top: 1px solid var(--line); }
+.cc-row:first-child { border-top: 0; }
+.cc-text { display: flex; flex-direction: column; min-width: 0; }
+.cc-text small { color: var(--muted); font-size: 10.5px; }
+.cc-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.cc-copy { color: var(--dim); font-size: 11px; padding: 4px; border-radius: 6px; flex: none; }
+.cc-copy:hover { background: var(--hover); color: var(--fg); }
+.row .txt small.copyable { cursor: copy; }
+.row .txt small.copyable:hover { color: var(--fg); text-decoration: underline dotted; }

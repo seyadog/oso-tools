@@ -20,6 +20,9 @@ pub struct Settings {
     /// Minutes the vault stays unlocked without being used (default 4 hours).
     #[serde(default = "four_hours")]
     pub vault_minutes: u64,
+    /// "Allow all" was on when oso last ran: it stays on (it is a choice, not a mood of this run).
+    #[serde(default)]
+    pub allow_all: bool,
 }
 
 fn four_hours() -> u64 {
@@ -32,7 +35,7 @@ fn terminal() -> String {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: terminal(), active_space: None, view_all: false, reads_default_applied: false, vault_minutes: four_hours() }
+        Settings { theme: terminal(), active_space: None, view_all: false, reads_default_applied: false, vault_minutes: four_hours(), allow_all: false }
     }
 }
 

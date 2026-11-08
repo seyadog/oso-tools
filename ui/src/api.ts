@@ -441,6 +441,9 @@ export interface Backend {
   /** The name of the person using this computer ("me"). */
   localUser(): Promise<string>;
   vaultMinutes(): Promise<number>;
+  /** "Allow all" (true) or "Ask" (false): kept on disk by oso. */
+  allowAll(): Promise<boolean>;
+  setAllowAll(on: boolean): Promise<void>;
   setVaultMinutes(minutes: number): Promise<void>;
   agentsPaused(): Promise<boolean>;
   setAgentsPaused(on: boolean): Promise<void>;

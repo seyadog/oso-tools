@@ -58,6 +58,8 @@ export function tauriBackend(): Backend {
     activityDetail: (id) => call("agent_activity_detail", { id }),
     localUser: () => call("local_user"),
     vaultMinutes: () => call("vault_minutes"),
+    allowAll: () => call("allow_all"),
+    setAllowAll: (on) => call("set_allow_all", { on }),
     setVaultMinutes: (minutes) => call("set_vault_minutes", { minutes }),
     agentsPaused: () => call("agents_paused"),
     setAgentsPaused: (on) => call("set_agents_paused", { on }),

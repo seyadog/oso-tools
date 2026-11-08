@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "What the oso window may do",
-  "windows": ["main"],
+  "windows": ["main", "unlock"],
   "permissions": ["core:default"]
 }

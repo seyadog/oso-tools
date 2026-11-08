@@ -211,6 +211,10 @@ pub struct Store {
     /// Saved in `proxies.json`, next to this file.
     #[serde(skip)]
     pub proxies: Vec<Proxy>,
+    /// Set only while building a command for an AI agent: a server never seen before is trusted the first time
+    /// (`StrictHostKeyChecking=accept-new`, a CHANGED key is still refused), because nobody is there to type "yes".
+    #[serde(skip)]
+    pub accept_new_hosts: bool,
     /// For servers that log in with a key from the vault: the file with its public half (written when the vault is
     /// unlocked), which `ssh -i` uses to pick that key from oso's agent. Never saved.
     #[serde(skip)]

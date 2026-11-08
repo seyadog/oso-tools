@@ -124,8 +124,9 @@ describe("requests waiting for an answer", () => {
   const make = () => {
     const answers: [number, string][] = [];
     const typed: number[] = [];
-    const q = new ApprovalQueue({ be: { approvalAnswer: async (id: number, d: string) => (answers.push([id, d]), true) } as never, openInTerminal: async (r) => void typed.push(r.id) });
-    return { q, answers, typed };
+    const saved = { allowAll: false };
+    const q = new ApprovalQueue({ be: { approvalAnswer: async (id: number, d: string) => (answers.push([id, d]), true), allowAll: async () => saved.allowAll, setAllowAll: async (on: boolean) => void (saved.allowAll = on) } as never, openInTerminal: async (r) => void typed.push(r.id) });
+    return { q, answers, typed, saved };
   };
 
   it("Allow all answers what comes without asking, but a production host still asks", () => {
@@ -140,6 +141,18 @@ describe("requests waiting for an answer", () => {
     q.setAllowAll(false);
     q.push(req(5));
     expect(q.list().map((r) => r.id)).toEqual([2, 4, 5]);
+  });
+
+  it("Allow all is remembered: the choice is saved, and a new window starts with it", async () => {
+    const { q, saved } = make();
+    q.setAllowAll(true);
+    expect(saved.allowAll).toBe(true);
+    const again = new ApprovalQueue({ be: { allowAll: async () => saved.allowAll, setAllowAll: async () => {} } as never, openInTerminal: async () => {} });
+    expect(again.allowAll).toBe(false);
+    await again.restore();
+    expect(again.allowAll).toBe(true);
+    q.setAllowAll(false);
+    expect(saved.allowAll).toBe(false);
   });
 
   it("lists what is waiting, and an answer from the panel takes it off and tells the agent once", async () => {

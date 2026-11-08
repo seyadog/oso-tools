@@ -1,5 +1,6 @@
 // The window: sidebar, screens, tabs and mosaic, the dialogs and the hotkeys, wired to the workspace and the engine.
 
+import { copyRows, showCopyCard } from "./copy_ui";
 import { AccountsView, AgentKindRow, Backend, Cluster, Space, SpaceSettings, SpaceTab, Folder, SecretMeta, Server, SessionEvent, SessionInfo, TreeData, TunnelStatus, VaultLockedError, VaultStatus, b64 } from "./api";
 import { MenuItem, clear, confirmBox, contextMenu, el, field, makeSelect, modalOpen, openModal, promptBox, toast } from "./dom";
 import { looksReady, withoutPanes } from "./layout";
@@ -153,6 +154,7 @@ export class App {
         }
       },
     });
+    void this.approvals.restore();
     this.be.onApproval((r) => this.approvals.push(r));
     this.rpanel = new RightPanel({
       be: this.be,
@@ -1701,16 +1703,27 @@ export class App {
       } else {
         const s = this.tree.servers.find((s) => s.id === r.id)!;
         const tail = el("span", { class: "tail" });
+        // what tells servers apart at a glance: production / staging / dev, and what AI agents may do on it
+        if (s.env_kind) tail.append(el("span", { class: `tag env-${s.env_kind}`, title: `This is a ${s.env_kind} server` }, s.env_kind === "production" ? "prod" : s.env_kind));
+        if (s.ai_policy === "blocked") tail.append(el("span", { class: "tag ai-blocked", title: "AI agents cannot use this server" }, "no AI"));
+        else if (s.ai_policy === "ask") tail.append(el("span", { class: "tag ai-ask", title: "AI agents ask you before anything on this server" }, "asks"));
         if (s.has_secret) tail.append(icon("key", 14));
+        const jumpName = s.jump != null ? this.tree.servers.find((x) => x.id === s.jump)?.name : undefined;
+        const where = `${s.user ? s.user + "@" : ""}${s.host}${s.port !== 22 ? ":" + s.port : ""}${jumpName ? " · via " + jumpName : ""}`;
         const go = this.ibtn("play", "Open a terminal on this server", () => void this.openServer(s.id), false, "go");
         go.style.cssText = "width:24px;height:24px";
         go.onclick = (e) => {
           e.stopPropagation();
           void this.openServer(s.id);
         };
+        const addr = el("small", { class: "copyable", title: "Click to copy the name, address, user or the ssh command" }, where);
+        addr.onclick = (e) => {
+          e.stopPropagation();
+          showCopyCard(addr, copyRows(s, jumpName));
+        };
         row.append(
           el("span", { class: "dot", style: `background:${serverColor(s.id)}` }),
-          el("span", { class: "txt", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name), el("small", {}, `${s.user ? s.user + "@" : ""}${s.host}`)),
+          el("span", { class: "txt", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name), addr),
         );
         if (open.has(s.id)) row.append(el("span", { class: "live", title: "Open" }));
         const edit = this.ibtn("edit", "Edit this server (address, user, credentials...)", () => void this.serverForm(s), false, "edit");

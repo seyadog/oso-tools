@@ -70,7 +70,9 @@ fn rig(name: &str) -> Rig {
     e.vault_set(0, true, Some(TRAP_SUDO)).unwrap();
     let engine = Arc::new(Mutex::new(e));
     let approvals = Approvals::new();
-    let handler = Handler::new(Arc::clone(&engine), Arc::clone(&approvals));
+    let mut handler = Handler::new(Arc::clone(&engine), Arc::clone(&approvals));
+    // a locked vault answers at once in these tests, unless one of them waits on purpose
+    handler.unlock_wait = Duration::ZERO;
     Rig { engine, handler, approvals, dir }
 }
 
@@ -1141,4 +1143,42 @@ fn kubectl_on_a_cluster_behind_a_server_is_a_command_on_that_server_with_its_rul
     let a = call(&r, "oso_kubectl", json!({ "cluster": "k3s-ask", "args": ["get", "nodes"] }));
     assert_eq!(a["ok"], true, "{a}");
     assert_eq!(seen.lock().unwrap().len(), 1, "that server asks about everything");
+}
+
+#[test]
+fn a_request_that_finds_the_vault_locked_waits_for_the_password_and_then_goes_on() {
+    let r = rig("wait-unlock");
+    r.engine.lock().unwrap().vault_set(0, true, Some(TRAP_SUDO)).unwrap();
+    r.engine.lock().unwrap().vault_lock();
+    let mut r = r;
+    r.handler.unlock_wait = Duration::from_secs(10);
+    let asked = Arc::new(Mutex::new(0u32));
+    let (engine, count) = (Arc::clone(&r.engine), Arc::clone(&asked));
+    // the app's small window: the person types the master password a moment later
+    r.handler.on_vault_locked(Arc::new(move || {
+        *count.lock().unwrap() += 1;
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            engine.lock().unwrap().vault_unlock("master").unwrap();
+        });
+    }));
+    let seen = person(&r.approvals, |_| Decision::Deny);
+    let started = Instant::now();
+    let answer = call(&r, "oso_sudo", json!({ "command": "ls" }));
+    assert_eq!(*asked.lock().unwrap(), 1, "the person is asked once");
+    assert!(started.elapsed() >= Duration::from_millis(400));
+    // it got past the lock (it now asks about the command, and the person said no)
+    assert!(!answer.to_string().contains("vault is locked"), "{answer}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "{answer}");
+}
+
+#[test]
+fn nobody_types_the_password_and_the_agent_gets_the_locked_answer_after_the_wait() {
+    let mut r = rig("wait-unlock-nobody");
+    r.engine.lock().unwrap().vault_lock();
+    r.handler.unlock_wait = Duration::from_millis(600);
+    r.handler.on_vault_locked(Arc::new(|| {}));
+    let answer = call(&r, "oso_sudo", json!({ "command": "ls" }));
+    assert!(answer["error"].as_str().unwrap().contains("locked"), "{answer}");
 }

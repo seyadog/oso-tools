@@ -469,8 +469,8 @@ export class RightPanel {
       el(
         "div",
         { class: `rp-mode${q.allowAll ? " all" : ""}` },
-        el("div", { class: "segs", role: "group", "aria-label": "What oso does when an agent asks" }, mode(false, "Ask", "Every request waits for your answer"), mode(true, "Allow all", "Allow everything without asking, except production hosts. Until you close oso.")),
-        q.allowAll ? el("small", {}, "Everything is allowed without asking, except hosts marked production. It goes back to Ask when you close oso.") : null,
+        el("div", { class: "segs", role: "group", "aria-label": "What oso does when an agent asks" }, mode(false, "Ask", "Every request waits for your answer"), mode(true, "Allow all", "Allow everything without asking, except production hosts. oso remembers it.")),
+        q.allowAll ? el("small", {}, "Everything is allowed without asking, except hosts marked production. oso remembers this choice.") : null,
       ),
     );
     for (const r of pending) list.append(this.pendingCard(r));

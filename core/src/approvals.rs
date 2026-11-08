@@ -49,6 +49,8 @@ struct Inner {
 pub struct Approvals {
     inner: Mutex<Inner>,
     cv: Condvar,
+    /// "Allow all": everything is allowed once without asking, except on production servers.
+    allow_all: std::sync::atomic::AtomicBool,
 }
 
 /// More than this waiting at once is an agent in a loop, not a person being asked.
@@ -56,7 +58,7 @@ const MAX_WAITING: usize = 12;
 
 impl Approvals {
     pub fn new() -> Arc<Approvals> {
-        Arc::new(Approvals { inner: Mutex::new(Inner::default()), cv: Condvar::new() })
+        Arc::new(Approvals { inner: Mutex::new(Inner::default()), cv: Condvar::new(), allow_all: Default::default() })
     }
 
     /// Where requests are shown (the window).
@@ -64,8 +66,19 @@ impl Approvals {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).notify = Some(f);
     }
 
+    pub fn set_allow_all(&self, on: bool) {
+        self.allow_all.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn allow_all(&self) -> bool {
+        self.allow_all.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Shows the request and waits for the answer. No window, too many waiting, or no answer in `wait`: no.
     pub fn ask(&self, mut req: ApprovalRequest, wait: Duration) -> Decision {
+        if self.allow_all() && !req.production {
+            return Decision::Once;
+        }
         let (id, notify) = {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(notify) = g.notify.clone() else { return Decision::Deny };

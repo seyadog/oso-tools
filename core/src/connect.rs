@@ -173,6 +173,7 @@ fn proxy_command(store: &Store, chain: &[&Server], via: Option<&str>) -> String 
     let mut parts = vec!["ssh".to_string()];
     parts.extend(auth_args(store, hop).into_iter().map(|a| sh_quote(&a)));
     parts.extend(store.extra_options.iter().map(|a| sh_quote(a)));
+    parts.extend(host_key_args(store).into_iter().map(|a| sh_quote(&a)));
     parts.extend(["-p".into(), hop.port.to_string()]);
     if !before.is_empty() {
         parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={}", proxy_command(store, before, via)))]);
@@ -181,6 +182,15 @@ fn proxy_command(store: &Store, chain: &[&Server], via: Option<&str>) -> String 
     }
     parts.extend(["-W".into(), "%h:%p".into(), target(hop)]);
     parts.join(" ")
+}
+
+/// For an AI agent (nobody to answer "are you sure you want to continue connecting"): trust a key the first time only.
+fn host_key_args(store: &Store) -> Vec<String> {
+    if store.accept_new_hosts {
+        vec!["-o".into(), "StrictHostKeyChecking=accept-new".into()]
+    } else {
+        vec![]
+    }
 }
 
 /// `-L` / `-R` / `-D` and its value for a forward.
@@ -207,6 +217,7 @@ fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<Stri
     a.extend(["-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ConnectTimeout=15".into()]);
     a.extend(auth_args(store, s));
     a.extend(store.extra_options.iter().cloned());
+    a.extend(host_key_args(store));
     let chain = store.jump_chain(s.id);
     let via = outer_proxy(store, s.id).map(|p| proxy_command_for(tool, p));
     if chain.is_empty() {
@@ -214,7 +225,7 @@ fn build_ssh(store: &Store, s: &Server, tool: ProxyTool, auto: bool) -> Vec<Stri
             a.extend(["-o".into(), format!("ProxyCommand={v}")]);
         }
     } else {
-        if chain.iter().all(|h| h.auth != Auth::Key && h.auth != Auth::VaultKey) && via.is_none() {
+        if chain.iter().all(|h| h.auth != Auth::Key && h.auth != Auth::VaultKey) && via.is_none() && !store.accept_new_hosts {
             let hops: Vec<String> = chain
                 .iter()
                 .map(|h| if h.port == 22 { target(h) } else { format!("{}:{}", target(h), h.port) })
@@ -351,6 +362,16 @@ pub fn scp_argv(store: &Store, s: &Server, dir: Direction, local: &[String], rem
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agents_connection_trusts_a_new_host_key_once_but_the_normal_one_still_asks() {
+        let mut st = Store::default();
+        let s = server(Auth::Agent, "", "me");
+        assert!(!ssh_argv(&st, &s).iter().any(|a| a.contains("StrictHostKeyChecking")));
+        st.accept_new_hosts = true;
+        let a = ssh_argv(&st, &s);
+        assert!(a.windows(2).any(|w| w == ["-o", "StrictHostKeyChecking=accept-new"]), "{a:?}");
+    }
+
     use super::*;
 
     fn server(auth: Auth, key: &str, user: &str) -> Server {
