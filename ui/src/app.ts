@@ -1574,10 +1574,17 @@ export class App {
   }
 
   /** The rows of the tree, flattened: folders open or closed, servers inside. */
+  /** The servers in the order of the chosen column (names break ties); with no column chosen, as they are. */
+  private sorted(list: Server[]): Server[] {
+    const { key, dir } = this.sort;
+    if (!key) return list;
+    return [...list].sort((x, y) => dir * this.sortValue(x, key).localeCompare(this.sortValue(y, key), undefined, { sensitivity: "base", numeric: true }) || x.name.localeCompare(y.name));
+  }
+
   private rows(): { kind: "folder" | "server"; id: number; depth: number }[] {
     const out: { kind: "folder" | "server"; id: number; depth: number }[] = [];
     if (this.filter) {
-      this.visibleServers().forEach((s) => out.push({ kind: "server", id: s.id, depth: 0 }));
+      this.sorted(this.visibleServers()).forEach((s) => out.push({ kind: "server", id: s.id, depth: 0 }));
       return out;
     }
     const walk = (parent: number | null, depth: number) => {
@@ -1585,7 +1592,7 @@ export class App {
         out.push({ kind: "folder", id: f.id, depth });
         if (f.expanded) walk(f.id, depth + 1);
       }
-      for (const s of this.tree.servers.filter((s) => s.parent === parent)) out.push({ kind: "server", id: s.id, depth });
+      for (const s of this.sorted(this.tree.servers.filter((s) => s.parent === parent))) out.push({ kind: "server", id: s.id, depth });
     };
     walk(null, 0);
     return out;
@@ -1674,6 +1681,54 @@ export class App {
   }
 
   /** The folders and servers, or what to do when there are none. */
+  /** The sort of the servers table (kept between runs): by which column, and which way. */
+  private sort: { key: string; dir: 1 | -1 } = (() => {
+    try {
+      const v = JSON.parse(localStorage.getItem("oso.servers.sort") ?? "null");
+      if (v && typeof v.key === "string" && (v.dir === 1 || v.dir === -1)) return v;
+    } catch {
+      /* the default */
+    }
+    return { key: "", dir: 1 };
+  })();
+
+  /** The value a column is sorted by. */
+  private sortValue(s: Server, key: string): string {
+    switch (key) {
+      case "name": return s.name;
+      case "address": return s.host;
+      case "user": return s.user;
+      case "via": return s.jump != null ? (this.tree.servers.find((x) => x.id === s.jump)?.name ?? "") : "";
+      case "env": return ({ production: "0", staging: "1", dev: "2" } as Record<string, string>)[s.env_kind ?? ""] ?? "9";
+      case "ai": return ({ blocked: "0", ask: "1", read_only_auto: "2" } as Record<string, string>)[s.ai_policy] ?? "9";
+      default: return "";
+    }
+  }
+
+  private tableHead(): HTMLElement {
+    const head = el("div", { class: "row trow thead", role: "row" }, el("span", { class: "dot", style: "background:transparent" }));
+    const cols: [string, string, string][] = [["name", "Name", "c-name txt"], ["address", "Address", "c-addr"], ["user", "User", "c-user"], ["via", "Via", "c-via"], ["env", "Env", "c-env"], ["ai", "AI", "c-ai"]];
+    for (const [key, label, cls] of cols) {
+      const on = this.sort.key === key;
+      const b = el("button", { type: "button", class: `c ${cls} th${on ? " on" : ""}`, title: `Sort by ${label.toLowerCase()}`, "data-sort": key }, label + (on ? (this.sort.dir === 1 ? " \u25B4" : " \u25BE") : ""));
+      b.onclick = () => {
+        // a second click flips the way; a third goes back to the order of the folders
+        if (this.sort.key !== key) this.sort = { key, dir: 1 };
+        else if (this.sort.dir === 1) this.sort = { key, dir: -1 };
+        else this.sort = { key: "", dir: 1 };
+        try {
+          localStorage.setItem("oso.servers.sort", JSON.stringify(this.sort));
+        } catch {
+          /* not remembered */
+        }
+        this.renderSidebar();
+      };
+      head.append(b);
+    }
+    head.append(el("span", { class: "tail" }), el("span", { class: "acts-h" }));
+    return head;
+  }
+
   private renderServerRows() {
     const rows = this.rows();
     if (rows.length === 0) {
@@ -1682,6 +1737,7 @@ export class App {
       return;
     }
     const open = this.openServerIds();
+    this.treeEl.append(this.tableHead());
     for (const r of rows) {
       const sel = this.selected?.kind === r.kind && this.selected.id === r.id;
       const row = el("div", { class: `row${sel ? " sel" : ""}${r.kind === "folder" ? " folder" : ""}`, style: `padding-left:${8 + r.depth * 16}px`, "data-kind": r.kind, "data-id": String(r.id) });
@@ -1702,30 +1758,36 @@ export class App {
         };
       } else {
         const s = this.tree.servers.find((s) => s.id === r.id)!;
-        const tail = el("span", { class: "tail" });
-        // what tells servers apart at a glance: production / staging / dev, and what AI agents may do on it
-        if (s.env_kind) tail.append(el("span", { class: `tag env-${s.env_kind}`, title: `This is a ${s.env_kind} server` }, s.env_kind === "production" ? "prod" : s.env_kind));
-        if (s.ai_policy === "blocked") tail.append(el("span", { class: "tag ai-blocked", title: "AI agents cannot use this server" }, "no AI"));
-        else if (s.ai_policy === "ask") tail.append(el("span", { class: "tag ai-ask", title: "AI agents ask you before anything on this server" }, "asks"));
-        if (s.has_secret) tail.append(icon("key", 14));
+        row.classList.add("trow");
+        row.style.paddingLeft = "8px"; // the indent of a folder is inside the first column, so every column lines up
+        row.style.setProperty("--d", String(r.depth));
         const jumpName = s.jump != null ? this.tree.servers.find((x) => x.id === s.jump)?.name : undefined;
-        const where = `${s.user ? s.user + "@" : ""}${s.host}${s.port !== 22 ? ":" + s.port : ""}${jumpName ? " · via " + jumpName : ""}`;
-        const go = this.ibtn("play", "Open a terminal on this server", () => void this.openServer(s.id), false, "go");
-        go.style.cssText = "width:24px;height:24px";
-        go.onclick = (e) => {
-          e.stopPropagation();
-          void this.openServer(s.id);
-        };
-        const addr = el("small", { class: "copyable", title: "Click to copy the name, address, user or the ssh command" }, where);
+        const cell = (cls: string, text: string, title?: string) => el("span", { class: `c ${cls}${text ? "" : " none"}`, title }, text || "\u2013");
+        // the columns: Env (production is red, so it cannot be missed) and AI (what an agent may do on it)
+        const env = s.env_kind ? el("span", { class: `tag env-${s.env_kind}`, title: `This is a ${s.env_kind} server` }, s.env_kind === "production" ? "prod" : s.env_kind) : cell("env", "");
+        const ai =
+          s.ai_policy === "blocked"
+            ? el("span", { class: "tag ai-blocked", title: "AI agents cannot use this server" }, "never")
+            : s.ai_policy === "ask"
+              ? el("span", { class: "tag ai-ask", title: "AI agents ask you before anything on this server" }, "asks")
+              : el("span", { class: "tag ai-read", title: "AI agents read without asking; anything that changes something asks" }, "reads");
+        const addr = el("span", { class: "c c-addr copyable", title: "Click to copy the name, address, user or the ssh command" }, `${s.host}${s.port !== 22 ? ":" + s.port : ""}`);
         addr.onclick = (e) => {
           e.stopPropagation();
           showCopyCard(addr, copyRows(s, jumpName));
         };
+        const tail = el("span", { class: "tail" });
+        if (s.has_secret) tail.append(el("span", { class: "keyi", title: "Has a saved password or key" }, icon("key", 14)));
         row.append(
           el("span", { class: "dot", style: `background:${serverColor(s.id)}` }),
-          el("span", { class: "txt", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name), addr),
+          el("span", { class: "txt c-name", title: `${s.user ? s.user + "@" : ""}${s.host}:${s.port}` }, el("b", {}, s.name)),
+          addr,
+          cell("c-user", s.user),
+          cell("c-via", jumpName ?? "", jumpName ? `Reached through ${jumpName}` : undefined),
+          el("span", { class: "c c-env" }, env),
+          el("span", { class: "c c-ai" }, ai),
         );
-        if (open.has(s.id)) row.append(el("span", { class: "live", title: "Open" }));
+        if (open.has(s.id)) tail.append(el("span", { class: "live", title: "Open" }));
         const edit = this.ibtn("edit", "Edit this server (address, user, credentials...)", () => void this.serverForm(s), false, "edit");
         edit.style.cssText = "width:24px;height:24px";
         edit.onclick = (e) => {
@@ -1740,7 +1802,13 @@ export class App {
           const up = await this.be.serverPing(s.host, s.port).catch(() => false);
           toast(up ? `${s.name} answers.` : `${s.name} does not answer on port ${s.port}.`);
         };
-        row.append(tail, ...(PANEL_ONLY ? [ping] : []), edit, ...(PANEL_ONLY ? [] : [go]));
+        const go = this.ibtn("play", "Open a terminal on this server", () => void this.openServer(s.id), false, "go");
+        go.style.cssText = "width:24px;height:24px";
+        go.onclick = (e) => {
+          e.stopPropagation();
+          void this.openServer(s.id);
+        };
+        row.append(tail, el("span", { class: "racts" }, ...(PANEL_ONLY ? [ping] : []), edit, ...(PANEL_ONLY ? [] : [go])));
         row.onclick = () => {
           this.selected = r;
           this.renderSidebar();

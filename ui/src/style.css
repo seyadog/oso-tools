@@ -627,13 +627,33 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .ul-go[disabled] { opacity: .5; }
 .ul-cancel { color: var(--dim); padding: 8px 12px; }
 
-/* small labels on a server row */
-.row .tag { font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; margin-right: 3px; border: 1px solid var(--line-2); color: var(--dim); }
-.row .tag.env-production { color: var(--red); border-color: var(--red); }
-.row .tag.env-staging { color: var(--amber); border-color: var(--amber); }
-.row .tag.env-dev { color: var(--green); border-color: var(--green); }
-.row .tag.ai-blocked { color: var(--red); }
-.row .tag.ai-ask { color: var(--amber); }
+/* the servers table: one line per server, columns line up */
+.tree { container-type: inline-size; }
+.row.trow { display: grid; grid-template-columns: 34px minmax(110px, 1.5fr) minmax(120px, 1.4fr) minmax(60px, .8fr) minmax(70px, 1fr) 62px 56px 40px 80px; column-gap: 12px; align-items: center; min-height: 34px; }
+.row.trow .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--dim); min-width: 0; }
+.row.trow .c.none { color: var(--muted); }
+.row.trow .c-name b { display: block; font-size: 13.5px; color: var(--fg); }
+.row.trow .c-addr { color: var(--fg); font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 12px; }
+.row.trow .tail { justify-content: flex-end; gap: 6px; }
+.row.trow .racts { display: flex; justify-content: flex-end; }
+.row.trow .c-addr.copyable { cursor: copy; }
+.row.trow .c-addr.copyable:hover { text-decoration: underline dotted; }
+.row.thead { min-height: 26px; margin-top: 2px; border-bottom: 1px solid var(--line); border-radius: 0; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.row.thead:hover { background: var(--bg); }
+.row.thead .th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.row.thead .th:hover, .row.thead .th.on { color: var(--fg); }
+.row.trow .tag { font-size: 10.5px; line-height: 1; padding: 3px 6px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--dim); }
+.row.trow .tag.env-production { color: var(--red); border-color: var(--red); }
+.row.trow .tag.env-staging { color: var(--amber); border-color: var(--amber); }
+.row.trow .tag.env-dev { color: var(--green); border-color: var(--green); }
+.row.trow .tag.ai-blocked { color: var(--red); border-color: var(--red); }
+.row.trow .tag.ai-ask { color: var(--amber); border-color: var(--amber); }
+.row.trow .tag.ai-read { color: var(--muted); border-color: var(--line); }
+/* a narrow panel keeps name, address and the labels that matter */
+@container (max-width: 640px) {
+  .row.trow { grid-template-columns: 34px minmax(90px, 1.5fr) minmax(100px, 1.4fr) 62px 56px 40px 80px; }
+  .row.trow .c-user, .row.trow .c-via { display: none; }
+}
 
 /* the copy card under a server's address */
 .copycard { position: fixed; z-index: 60; min-width: 250px; max-width: 420px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45); overflow: hidden; }
@@ -644,5 +664,6 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .cc-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
 .cc-copy { color: var(--dim); font-size: 11px; padding: 4px; border-radius: 6px; flex: none; }
 .cc-copy:hover { background: var(--hover); color: var(--fg); }
-.row .txt small.copyable { cursor: copy; }
-.row .txt small.copyable:hover { color: var(--fg); text-decoration: underline dotted; }
+.row.trow .c-env, .row.trow .c-ai { overflow: visible; }
+.row.trow .tag { display: inline-block; line-height: 1.2; }
+.row.trow .dot { margin-left: calc(var(--d, 0) * 16px); }
