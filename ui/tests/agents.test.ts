@@ -7,7 +7,7 @@ const req = (over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({ id: 1, 
 describe("what an agent asks", () => {
   it("says who asks and what for", () => {
     expect(actionTitle(req())).toBe("Claude in example-api, pane 2 wants to run a command");
-    expect(actionTitle(req({ action: "sudo" }))).toContain("use sudo on this computer");
+    expect(actionTitle(req({ action: "sudo" }))).toContain("Sudo password on this device");
     expect(actionTitle(req({ action: "run_with" }))).toContain("with secrets");
     expect(actionTitle(req({ action: "tunnel" }))).toContain("tunnel");
     expect(actionTitle(req({ action: "put" }))).toContain("send files to a server");

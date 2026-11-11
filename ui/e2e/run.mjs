@@ -437,6 +437,23 @@ await settle(200);
 await page.click("#modal-bg button.primary");
 await settle(300);
 check("and a secret can be deleted", (await page.$$(".srow")).length === 0);
+// a key made in the vault is tied to machines right there
+if (!(await page.$('[data-act="new-secret"]'))) {
+  await page.click('#rail [data-act="vault"]');
+  await settle(300);
+}
+await page.click('[data-act="new-secret"]');
+await settle(200);
+await page.fill('input[name="name"]', "vault-made-key");
+await page.click('.select[data-name="kind"] .sel-btn');
+await page.click('.select[data-name="kind"] .sel-item[data-value="ssh_key"]');
+await settle(100);
+check("a key offers a file picker and the machines that use it", (await page.$('[data-act="pick-key-file"]')) !== null && (await page.$$('[data-el="machines"] input[type="checkbox"]')).length > 0);
+await page.fill('textarea[name="value-key"]', "-----BEGIN OPENSSH PRIVATE KEY-----\nZmFrZQ==\n-----END OPENSSH PRIVATE KEY-----");
+await page.click('[data-el="machines"] .check:has-text("db-1") input');
+await page.click("#modal-bg button.primary");
+await settle(300);
+check("ticking a machine links the key to it", await page.evaluate(async () => { const be = window.oso.be; const k = (await be.secretList()).find((x) => x.name === "vault-made-key"); return !!k && (await be.tree()).servers.some((sv) => sv.vault_key === k.id && sv.auth === "vaultkey"); }));
 await page.keyboard.press("Escape");
 await settle(150);
 
@@ -557,6 +574,11 @@ check("a key from the vault can be chosen for a server", (await page.$('.select[
 await page.click("#modal-bg button.primary");
 await settle(250);
 check("it asks for the key before saving", (await page.textContent("#modal-bg .err")).includes("Choose the key"));
+await page.click('[data-act="add-vault-key"]');
+await page.fill('textarea[name="new-key"]', "-----BEGIN OPENSSH PRIVATE KEY-----\nZmFrZQ==\n-----END OPENSSH PRIVATE KEY-----");
+await page.click('[data-act="save-vault-key"]');
+await settle(250);
+check("a key can be added from the server form and is chosen at once", (await page.textContent('.select[data-name="vault-key"] .sel-label')).includes("web-1 key") && (await page.evaluate(async () => (await window.oso.be.secretList()).some((k) => k.kind === "ssh_key" && k.name === "web-1 key"))));
 await page.click('.select[data-name="vault-key"] .sel-btn');
 await page.click('.select[data-name="vault-key"] .sel-item:has-text("deploy key")');
 await page.click("#modal-bg button.primary");

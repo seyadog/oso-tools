@@ -36,7 +36,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "oso_sudo",
-            "description": "Run a command with sudo on THIS computer. oso types the user's sudo password; you never see it. The user is asked to approve the exact command each time. It is not for remote servers: a command with sudo on a server goes through oso_run, which does not type a sudo password (read its `sudo_note`).",
+            "description": "Run a command with sudo on THIS computer. Use this whenever you need sudo here: never ask the user to copy the command into a terminal. oso types the user's sudo password; you never see it. The user is asked to approve the exact command each time. It is not for remote servers: a command with sudo on a server goes through oso_run, which does not type a sudo password (read its `sudo_note`).",
             "inputSchema": { "type": "object", "properties": { "command": { "type": "string", "description": "The command, without the word sudo; it runs as `sudo sh -c`." }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["command"], "additionalProperties": false },
         },
         {

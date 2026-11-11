@@ -2330,9 +2330,47 @@ export class App {
         this.openTunnels();
       };
       const folder = makeSelect([["", "(top level)"], ...this.tree.folders.map((f): [string, string] => [String(f.id), f.name])], s.parent == null ? "" : String(s.parent), { "data-name": "folder" });
-      const vaultKey = makeSelect([["", this.vault.unlocked ? (keys.length ? "Choose a key" : "No SSH key in the vault yet") : "Unlock the vault to choose"], ...keys.map((k): [string, string] => [String(k.id), k.name])], s.vault_key == null ? "" : String(s.vault_key), { "data-name": "vault-key" });
+      const keyOptions: [string, string][] = [["", this.vault.unlocked ? (keys.length ? "Choose a key" : "No SSH key in the vault yet") : "Unlock the vault to choose"], ...keys.map((k): [string, string] => [String(k.id), k.name])];
+      const vaultKey = makeSelect(keyOptions, s.vault_key == null ? "" : String(s.vault_key), { "data-name": "vault-key" });
       const mfa = makeSelect([["", this.vault.unlocked ? "None" : "Unlock the vault to choose"], ...seeds.map((k): [string, string] => [String(k.id), k.name])], s.vault_totp == null ? "" : String(s.vault_totp), { "data-name": "mfa" });
       const vaultKeyRow = field("Key (kept in the vault, signed by oso's own ssh-agent)", vaultKey);
+      // add a key right here: paste it or pick a file; it goes into the vault and is chosen for this server
+      const addKeyBtn = el("button", { class: "btn small", type: "button", "data-act": "add-vault-key" }, "Add a key here…");
+      const addKeyBox = el("div", { class: "addkey", hidden: "" });
+      const newKeyText = el("textarea", { name: "new-key", rows: "5", spellcheck: "false", placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----" });
+      const pickFile = el("input", { type: "file", hidden: "" }) as HTMLInputElement;
+      const pickBtn = el("button", { class: "btn small", type: "button", "data-act": "pick-key-file" }, "Choose a key file…");
+      pickBtn.onclick = () => pickFile.click();
+      pickFile.onchange = async () => {
+        const f = pickFile.files?.[0];
+        if (f) newKeyText.value = (await f.text()).trim();
+      };
+      const saveKeyBtn = el("button", { class: "btn small", type: "button", "data-act": "save-vault-key" }, "Save in the vault and use it");
+      const addKeyErr = el("div", { class: "keyerr" });
+      addKeyBox.append(newKeyText, el("div", { class: "actions" }, pickBtn, saveKeyBtn), pickFile, addKeyErr, el("div", { class: "hint" }, "The key is kept encrypted in the vault, under the server's name. The file is not changed."));
+      addKeyBtn.onclick = async () => {
+        if (!this.vault.unlocked) {
+          const r = await this.unlockDialog(false);
+          if (r !== "unlocked") return void (addKeyErr.textContent = "Unlock the vault first");
+        }
+        addKeyBox.hidden = !addKeyBox.hidden;
+      };
+      saveKeyBtn.onclick = async () => {
+        const text = newKeyText.value.trim();
+        if (!text) return void (addKeyErr.textContent = "Paste a key or choose a file");
+        try {
+          const label = `${name.value.trim() || host.value.trim() || "server"} key`;
+          const id = await this.be.secretSave({ id: 0, name: label, kind: "ssh_key", env_var: null, agent_visible: false, notes: "", updated: 0 }, text);
+          keyOptions.push([String(id), label]);
+          vaultKey.value = String(id);
+          newKeyText.value = "";
+          addKeyBox.hidden = true;
+          addKeyErr.textContent = "";
+        } catch (x) {
+          addKeyErr.textContent = (x as Error).message;
+        }
+      };
+      vaultKeyRow.append(addKeyBtn, addKeyBox);
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
       const browse = el("button", { class: "btn small", type: "button", "data-act": "browse-key" }, "Browse…");

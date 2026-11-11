@@ -9,7 +9,7 @@ import { writeCommand } from "./sudo";
 export function actionTitle(r: ApprovalRequest): string {
   switch (r.action) {
     case "sudo":
-      return `${r.label} wants to use sudo on this computer`;
+      return "Sudo password on this device";
     case "run_with":
       return `${r.label} wants to run a command with secrets`;
     case "tunnel":
@@ -151,16 +151,18 @@ export class ApprovalQueue {
     const deny = btn("", "Deny", "deny", "approval-deny");
     // a copy of files is not something to type into a terminal: only commands have that button
     const transfer = r.action === "put" || r.action === "get";
-    const actions = el("div", { class: "actions" }, transfer || PANEL_ONLY ? null : btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", "Allow once", "once", "approval-once"), ...(r.action === "run" && !r.production ? [btn("", "Allow this server for 1 hour", "hour", "approval-hour")] : []));
+    const isSudo = r.action === "sudo";
+    const actions = el("div", { class: "actions" }, transfer || PANEL_ONLY ? null : btn("", "Open in a terminal", "terminal", "approval-terminal"), deny, btn("primary", isSudo ? "Allow and use the sudo password" : "Allow once", "once", "approval-once"), ...(r.action === "run" && !r.production ? [btn("", "Allow this server for 1 hour", "hour", "approval-hour")] : []));
     if (r.can_remember) actions.prepend(btn("", "Always for read-only commands on this host", "always_read", "approval-always"));
     const more = this.queue.length > 1 ? el("div", { class: "hint" }, `${this.queue.length - 1} more waiting after this one`) : null;
     const box = el(
       "div",
-      { class: `modal approval${r.production ? " prod" : ""}`, role: "alertdialog", "aria-label": actionTitle(r) },
+      { class: `modal approval${r.production ? " prod" : ""}${isSudo ? " sudo" : ""}`, role: "alertdialog", "aria-label": actionTitle(r) },
       el("h2", {}, actionTitle(r)),
-      el("div", { class: "where" }, r.host, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
+      isSudo ? el("div", { class: "sudo-who" }, `${r.label} wants to run this with sudo on this computer`) : null,
+      el("div", { class: "where" }, r.host, isSudo ? el("span", { class: "badge-sudo" }, "SUDO PASSWORD") : null, r.production ? el("span", { class: "badge-prod" }, "PRODUCTION") : null),
       cmdPre(r.command),
-      el("div", { class: "hint" }, transfer ? "Nothing is copied unless you allow it. The files go from disk to disk: the agent never sees what is in them." : "It is run only if you allow it. The agent never sees a password or a key."),
+      el("div", { class: "hint" }, transfer ? "Nothing is copied unless you allow it. The files go from disk to disk: the agent never sees what is in them." : isSudo ? "If you allow it, oso types the sudo password saved in the vault for this computer. The agent never sees it." : "It is run only if you allow it. The agent never sees a password or a key."),
       more,
       actions,
     );

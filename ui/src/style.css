@@ -312,6 +312,9 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .modal.approval { width: min(640px, 92vw); border: 1px solid var(--accent); }
 .modal.approval.prod { border-color: var(--red); }
 .modal.approval .where { display: flex; align-items: center; gap: 10px; color: var(--muted); margin-bottom: 8px; }
+.modal.approval.sudo { border: 2px solid var(--amber); }
+.modal.approval .sudo-who { color: var(--muted); margin-bottom: 4px; }
+.badge-sudo { background: var(--amber); color: #1d1d20; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
 .badge-prod { background: var(--red); color: #1d1d20; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
 .modal.approval pre.cmd { background: #151517; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; font-family: "Adwaita Mono", monospace; font-size: 13px; }
 .vrow.arow { grid-template-columns: 1fr; }
@@ -646,3 +649,8 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 .cc-copy:hover { background: var(--hover); color: var(--fg); }
 .row .txt small.copyable { cursor: copy; }
 .row .txt small.copyable:hover { color: var(--fg); text-decoration: underline dotted; }
+.addkey { margin-top: 8px; }
+.addkey textarea { width: 100%; font-family: "Adwaita Mono", monospace; font-size: 12px; }
+.addkey[hidden] { display: none; }
+.modal .keyerr { color: var(--red); margin-top: 8px; font-size: 13px; }
+.machines { max-height: 160px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }

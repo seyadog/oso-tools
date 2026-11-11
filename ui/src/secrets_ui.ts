@@ -211,8 +211,40 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
     const valueRow = el("div", {});
     const sync = () => {
       clear(valueRow);
-      valueRow.append(el("label", {}, long() ? "Private key (OpenSSH format)" : kind.value === "totp" ? "Secret (base32) or otpauth:// link" : "Value"), long() ? keyText : value, el("div", { class: "help" }, long() ? "Paste the private key, without a passphrase. It stays in the vault." : kind.value === "totp" ? "The text next to the QR code of the service, or the otpauth:// link." : "The secret itself. It is encrypted and not shown again unless you ask."));
+      valueRow.append(el("label", {}, long() ? "Private key (OpenSSH format)" : kind.value === "totp" ? "Secret (base32) or otpauth:// link" : "Value"), long() ? keyText : value, ...(long() ? [el("div", { class: "actions" }, pickBtn, pickFile)] : []), el("div", { class: "help" }, long() ? "Paste the private key, without a passphrase. It stays in the vault." : kind.value === "totp" ? "The text next to the QR code of the service, or the otpauth:// link." : "The secret itself. It is encrypted and not shown again unless you ask."));
+      machinesRow.style.display = ["password", "sudo", "ssh_key"].includes(kind.value) ? "" : "none";
     };
+    // key from a file on disk: read here, kept in the vault; the file is not changed
+    const pickFile = el("input", { type: "file", hidden: "" }) as HTMLInputElement;
+    const pickBtn = el("button", { class: "btn small", type: "button", "data-act": "pick-key-file" }, "Choose a key file…");
+    pickBtn.onclick = () => pickFile.click();
+    pickFile.onchange = async () => {
+      const f = pickFile.files?.[0];
+      if (!f) return;
+      keyText.value = (await f.text()).trim();
+      if (!name.value.trim()) name.value = f.name;
+    };
+    // the machines that use it: tick them here instead of going to each server
+    const linked = new Map<number, boolean>();
+    const wasLinked = new Set<number>();
+    const machines = el("div", { class: "machines", "data-el": "machines" });
+    const machinesRow = el("div", {}, el("label", {}, "Machines that use it"), machines, el("div", { class: "help" }, "Tick the servers that log in (or use sudo) with it. For a key they are linked to it; for a password it is saved for each of them."));
+    const paintMachines = (servers: { id: number; name: string; vault_key?: number | null }[]) => {
+      clear(machines);
+      if (!servers.length) machines.append(el("div", { class: "empty" }, "No servers yet"));
+      for (const sv of servers) {
+        const cb = el("input", { type: "checkbox", id: `mach-${sv.id}`, "data-server": String(sv.id) }) as HTMLInputElement;
+        cb.checked = linked.get(sv.id) ?? false;
+        cb.onchange = () => linked.set(sv.id, cb.checked);
+        machines.append(el("div", { class: "check" }, cb, el("label", { for: `mach-${sv.id}` }, sv.name)));
+      }
+    };
+    let serverList: { id: number; name: string; vault_key?: number | null }[] = [];
+    void ctx.be.tree().then((t) => {
+      serverList = t.servers;
+      if (existing && existing.kind === "ssh_key") for (const sv of serverList) if (sv.vault_key === existing.id) { linked.set(sv.id, true); wasLinked.add(sv.id); }
+      paintMachines(serverList);
+    }).catch(() => {});
     kind.onchange = () => {
       if (!existing) agent.checked = kind.value === "api_key";
       sync();
@@ -221,7 +253,7 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
     const err = el("div", { class: "err" });
     const visible = el("div", { class: "check" }, agent, el("label", { for: "agent-visible" }, "Visible to AI agents"));
     visible.append(el("div", { class: "help" }, "If on, the terminals of this Space (or of any Space, for a General one) where an AI tool runs get it in their environment. If off, only you (and tools you approve one by one) can use it."));
-    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), fieldHelp("Name", name, "How you find it in the list. Anything you like."), fieldHelp("Type", kind, "API key, password, SSH key, token, or the seed of one-time codes."), valueRow, fieldHelp("Space", space, "Which Space can use it. General is available in every Space."), fieldHelp("Environment variable", env, "The name a program reads it by, like ANTHROPIC_API_KEY. Leave it empty if programs do not need it."), visible, fieldHelp("Notes", notes, "Anything to remember about it (where it comes from, when it expires). Encrypted too."), err);
+    const form = el("form", {}, el("h2", {}, existing ? `Change ${m.name}` : "New secret"), fieldHelp("Name", name, "How you find it in the list. Anything you like."), fieldHelp("Type", kind, "API key, password, SSH key, token, or the seed of one-time codes."), valueRow, machinesRow, fieldHelp("Space", space, "Which Space can use it. General is available in every Space."), fieldHelp("Environment variable", env, "The name a program reads it by, like ANTHROPIC_API_KEY. Leave it empty if programs do not need it."), visible, fieldHelp("Notes", notes, "Anything to remember about it (where it comes from, when it expires). Encrypted too."), err);
     const ok = el("button", { class: "btn primary", type: "submit" }, "Save");
     const no = el("button", { class: "btn", type: "button" }, "Cancel");
     no.onclick = () => {
@@ -235,6 +267,14 @@ export function secretForm(ctx: Ctx, existing: SecretMeta | null, back: () => vo
       try {
         const id = await ctx.be.secretSave({ ...m, name: name.value.trim(), kind: kind.value as SecretKind, env_var: env.value.trim() || null, agent_visible: agent.checked, notes: notes.value }, v || null);
         await ctx.be.moveToSpace("secret", id, space.value ? Number(space.value) : null);
+        const k = kind.value;
+        for (const sv of serverList) {
+          const on = linked.get(sv.id) ?? false;
+          if (k === "ssh_key") {
+            if (on) await ctx.be.serverSetKey(sv.id, id);
+            else if (wasLinked.has(sv.id)) await ctx.be.serverSetKey(sv.id, null);
+          } else if (on && v && (k === "password" || k === "sudo")) await ctx.be.vaultSet(sv.id, k === "sudo", v);
+        }
         close();
         back();
       } catch (x) {
