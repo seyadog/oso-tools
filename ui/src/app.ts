@@ -1467,7 +1467,7 @@ export class App {
     const open = this.leftSection !== "" && !this.focusMode;
     this.root.classList.toggle("focus", this.focusMode);
     this.root.classList.toggle("panel-only", PANEL_ONLY);
-    this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${PANEL_ONLY ? 72 : RAIL_WIDTH}px`);
+    this.root.style.setProperty("--rail", this.focusMode ? "0px" : `${PANEL_ONLY ? 84 : RAIL_WIDTH}px`);
     this.leftWidth = clampLeft(this.leftWidth, window.innerWidth);
     this.root.style.setProperty("--lw", open ? `${this.leftWidth}px` : "0px");
     this.side.hidden = !open;
@@ -1526,23 +1526,25 @@ export class App {
     for (const sec of SECTIONS.filter((x) => !(PANEL_ONLY && x.key === "kubernetes"))) {
       const on = this.leftSection === sec.key;
       const b = el("button", { class: `rail-btn${on ? " on" : ""}`, type: "button", "data-rail": sec.key, title: `${sec.label}  (${this.keyText(sec.action)})`, "aria-label": sec.label, "aria-pressed": String(on) });
-      b.append(icon(sec.icon, PANEL_ONLY ? 30 : 21));
+      b.append(icon(sec.icon, PANEL_ONLY ? 26 : 21));
+      if (PANEL_ONLY) b.append(el("span", { class: "rail-label" }, sec.label));
       if (sec.key === "agents") b.append(el("span", { class: "rail-n" }), el("span", { class: "rail-mark" }));
       b.onclick = () => this.toggleSection(sec.key);
       top.append(b);
     }
     const bottom = el("div", { class: "rail-bottom" });
-    const tool = (iconName: string, title: string, act: string, run: () => void, cls = "") => {
+    const tool = (iconName: string, title: string, act: string, run: () => void, cls = "", label = "") => {
       const b = el("button", { class: `rail-btn small ${cls}`.trim(), type: "button", title, "aria-label": title, "data-act": act });
-      b.append(icon(iconName, PANEL_ONLY ? 26 : 19));
+      b.append(icon(iconName, PANEL_ONLY ? 24 : 19));
+      if (PANEL_ONLY) b.append(el("span", { class: "rail-label" }, label));
       b.onclick = run;
       return b;
     };
     const vaultTip = this.vault.unlocked ? "Vault unlocked" : this.vault.exists ? "Vault locked" : "Create the vault";
     bottom.append(
-      tool(this.vault.unlocked ? "unlock" : "lock", `${vaultTip}  (${this.keyText("secrets.open")})`, "vault", () => void this.vaultDialog(), this.vault.unlocked ? "open" : ""),
+      tool(this.vault.unlocked ? "unlock" : "lock", `${vaultTip}  (${this.keyText("secrets.open")})`, "vault", () => void this.vaultDialog(), this.vault.unlocked ? "open" : "", this.vault.unlocked ? "Unlocked" : "Vault"),
       ...(PANEL_ONLY ? [] : [tool("terminal", `Local terminal  (${this.keyText("local.new")})`, "foot-local", () => void this.openServer(LOCAL))]),
-      tool("settings", `Settings  (${this.keyText("settings")})`, "foot-settings", () => this.settingsDialog()),
+      tool("settings", `Settings  (${this.keyText("settings")})`, "foot-settings", () => this.settingsDialog(), "", "Settings"),
       ...(PANEL_ONLY ? [] : [tool("bell", `Help  (${this.keyText("help.open")})`, "foot-help", () => this.helpDialog())]),
     );
     this.rail.append(top, bottom);
@@ -2314,7 +2316,7 @@ export class App {
       const host = el("input", { value: s.host, name: "host", autocomplete: "off", spellcheck: "false" });
       const port = el("input", { value: String(s.port), name: "port", inputmode: "numeric" });
       const user = el("input", { value: s.user, name: "user", autocomplete: "off", spellcheck: "false" });
-      const auth = makeSelect([["agent", "SSH agent"], ["key", "Private key"], ["password", "Password"], ["vaultkey", "Key from the vault"]], s.auth, { "data-name": "auth" });
+      const auth = makeSelect([["password", "Password"], ["vaultkey", "SSH key"], ["agent", "SSH agent"], ...(s.auth === "key" ? [["key", "Key file (old way)"] as [string, string]] : [])], s.auth, { "data-name": "auth" });
       const key = el("input", { value: s.key_path, name: "key", placeholder: "~/.ssh/id_ed25519", spellcheck: "false" });
       const login = el("input", { type: "password", name: "login", autocomplete: "new-password", placeholder: s.has_secret ? "saved — leave empty to keep" : "" });
       const sudo = el("input", { type: "password", name: "sudo", autocomplete: "new-password", placeholder: s.has_sudo ? "saved — leave empty to keep" : "" });
@@ -2333,11 +2335,8 @@ export class App {
       const keyOptions: [string, string][] = [["", this.vault.unlocked ? (keys.length ? "Choose a key" : "No SSH key in the vault yet") : "Unlock the vault to choose"], ...keys.map((k): [string, string] => [String(k.id), k.name])];
       const vaultKey = makeSelect(keyOptions, s.vault_key == null ? "" : String(s.vault_key), { "data-name": "vault-key" });
       const mfa = makeSelect([["", this.vault.unlocked ? "None" : "Unlock the vault to choose"], ...seeds.map((k): [string, string] => [String(k.id), k.name])], s.vault_totp == null ? "" : String(s.vault_totp), { "data-name": "mfa" });
-      const vaultKeyRow = field("Key (kept in the vault, signed by oso's own ssh-agent)", vaultKey);
-      // add a key right here: paste it or pick a file; it goes into the vault and is chosen for this server
-      const addKeyBtn = el("button", { class: "btn small", type: "button", "data-act": "add-vault-key" }, "Add a key here…");
-      const addKeyBox = el("div", { class: "addkey", hidden: "" });
-      const newKeyText = el("textarea", { name: "new-key", rows: "5", spellcheck: "false", placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----" });
+      // one step: paste the key or pick a file; it goes into the vault under the server's name when the form is saved
+      const newKeyText = el("textarea", { name: "new-key", rows: "5", spellcheck: "false", placeholder: s.vault_key != null ? "Paste a key here to replace the one in use" : "-----BEGIN OPENSSH PRIVATE KEY-----" });
       const pickFile = el("input", { type: "file", hidden: "" }) as HTMLInputElement;
       const pickBtn = el("button", { class: "btn small", type: "button", "data-act": "pick-key-file" }, "Choose a key file…");
       pickBtn.onclick = () => pickFile.click();
@@ -2345,32 +2344,9 @@ export class App {
         const f = pickFile.files?.[0];
         if (f) newKeyText.value = (await f.text()).trim();
       };
-      const saveKeyBtn = el("button", { class: "btn small", type: "button", "data-act": "save-vault-key" }, "Save in the vault and use it");
-      const addKeyErr = el("div", { class: "keyerr" });
-      addKeyBox.append(newKeyText, el("div", { class: "actions" }, pickBtn, saveKeyBtn), pickFile, addKeyErr, el("div", { class: "hint" }, "The key is kept encrypted in the vault, under the server's name. The file is not changed."));
-      addKeyBtn.onclick = async () => {
-        if (!this.vault.unlocked) {
-          const r = await this.unlockDialog(false);
-          if (r !== "unlocked") return void (addKeyErr.textContent = "Unlock the vault first");
-        }
-        addKeyBox.hidden = !addKeyBox.hidden;
-      };
-      saveKeyBtn.onclick = async () => {
-        const text = newKeyText.value.trim();
-        if (!text) return void (addKeyErr.textContent = "Paste a key or choose a file");
-        try {
-          const label = `${name.value.trim() || host.value.trim() || "server"} key`;
-          const id = await this.be.secretSave({ id: 0, name: label, kind: "ssh_key", env_var: null, agent_visible: false, notes: "", updated: 0 }, text);
-          keyOptions.push([String(id), label]);
-          vaultKey.value = String(id);
-          newKeyText.value = "";
-          addKeyBox.hidden = true;
-          addKeyErr.textContent = "";
-        } catch (x) {
-          addKeyErr.textContent = (x as Error).message;
-        }
-      };
-      vaultKeyRow.append(addKeyBtn, addKeyBox);
+      const useVaultKey = keys.length ? field("Or one already in the vault", vaultKey) : el("div", {}, vaultKey);
+      if (!keys.length) vaultKey.style.display = "none";
+      const vaultKeyRow = el("div", {}, field("SSH key (kept encrypted in the vault)", newKeyText), el("div", { class: "actions" }, pickBtn, pickFile), useVaultKey, el("div", { class: "hint" }, "Saved in the vault under this server's name. The file is not changed."));
       const clearLogin = el("input", { type: "checkbox", id: "clr" });
       const keyRow = field("Key file", key);
       const browse = el("button", { class: "btn small", type: "button", "data-act": "browse-key" }, "Browse…");
@@ -2419,11 +2395,20 @@ export class App {
           const r = await this.unlockDialog(false);
           if (r !== "unlocked") return void (err.textContent = "Unlock the vault to save a password");
         }
+        const pasted = auth.value === "vaultkey" ? newKeyText.value.trim() : "";
         if (auth.value === "vaultkey") {
-          if (!this.vault.unlocked) return void (err.textContent = "Unlock the vault (the lock, bottom left) and open this form again to choose its key");
-          if (!vaultKey.value) return void (err.textContent = "Choose the key it logs in with");
+          if (!this.vault.unlocked) {
+            const r = await this.unlockDialog(false);
+            if (r !== "unlocked") return void (err.textContent = "Unlock the vault to save the key");
+          }
+          if (!pasted && !vaultKey.value && s.vault_key != null) vaultKey.value = String(s.vault_key);
+          if (!pasted && !vaultKey.value) return void (err.textContent = "Paste the key, choose a key file or pick one from the vault");
         }
         try {
+          if (pasted) {
+            const label = `${next.name} key`;
+            vaultKey.value = String(await this.be.secretSave({ id: 0, name: label, kind: "ssh_key", env_var: null, agent_visible: false, notes: "", updated: 0 }, pasted));
+          }
           const id = await this.be.saveServer(next, loginSecret, sudoSecret);
           if (auth.value === "vaultkey") await this.be.serverSetKey(id, Number(vaultKey.value));
           const wantTotp = mfa.value ? Number(mfa.value) : null;

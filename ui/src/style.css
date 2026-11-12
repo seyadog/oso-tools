@@ -599,8 +599,22 @@ mark.sudo { background: rgba(255, 215, 100, .2); color: var(--amber); border-rad
 #app.panel-only #side { grid-column: 2; border-right: 0; align-items: stretch; }
 #app.panel-only #side { font-size: 16px; padding: 0 28px; }
 #app.panel-only #side > * { width: 100%; box-sizing: border-box; }
-#app.panel-only .rail-btn { width: 54px; height: 54px; border-radius: 12px; }
-#app.panel-only .rail-btn.small { width: 50px; height: 50px; }
+#app.panel-only .rail-btn { width: 72px; height: 64px; border-radius: 12px; flex-direction: column; gap: 4px; color: var(--c, var(--dim)); }
+#app.panel-only .rail-btn.small { width: 72px; height: 58px; }
+#app.panel-only .rail-btn:hover { color: var(--c, var(--fg)); background: color-mix(in srgb, var(--c, var(--accent)) 12%, transparent); }
+#app.panel-only .rail-btn.on { color: var(--c, var(--accent)); background: color-mix(in srgb, var(--c, var(--accent)) 18%, transparent); }
+#app.panel-only .rail-btn.on::before { background: var(--c, var(--accent)); left: -6px; }
+.rail-label { font-size: 11px; font-weight: 600; letter-spacing: .01em; line-height: 1; color: var(--fg); opacity: .85; }
+.rail-btn.on .rail-label { color: var(--c, var(--accent)); opacity: 1; }
+#app.panel-only .rail-btn .rail-n { top: 4px; right: 10px; }
+#app.panel-only .rail-btn .rail-mark { top: 8px; left: 14px; }
+.rail-btn[data-rail="servers"] { --c: #6aa8ff; }
+.rail-btn[data-rail="secrets"] { --c: #f0b45a; }
+.rail-btn[data-rail="tunnels"] { --c: #4cc9b0; }
+.rail-btn[data-rail="accounts"] { --c: #f08fb5; }
+.rail-btn[data-rail="agents"] { --c: #b79cff; }
+.rail-btn[data-act="vault"] { --c: #f0b45a; }
+.rail-btn[data-act="vault"].open { --c: var(--green); }
 #app.panel-only .rail-top, #app.panel-only .rail-bottom { gap: 8px; }
 #app.panel-only .row { min-height: 54px; padding: 0 14px; gap: 12px; border-radius: 10px; }
 #app.panel-only .row.folder { min-height: 42px; font-size: 15px; }

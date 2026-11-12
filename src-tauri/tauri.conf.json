@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "oso", "width": 1400, "height": 850, "minWidth": 720, "minHeight": 460 }
+      { "label": "main", "title": "oso", "width": 640, "height": 620, "minWidth": 460, "minHeight": 440, "alwaysOnTop": true }
     ],
     "security": { "csp": null }
   },
