@@ -82,6 +82,30 @@ fn check_local_with(path: &str, cwd: Option<&str>, roots: &[PathBuf], forbidden:
     Ok(real)
 }
 
+/// Creates the missing folders above a download's destination, but only when the nearest folder that exists is inside the
+/// allowed places (and not a forbidden one), and the path has no `..`.
+pub fn make_parent_dirs(path: &str, cwd: Option<&str>, roots: &[PathBuf]) -> Result<(), String> {
+    make_parent_dirs_with(path, cwd, roots, &forbidden())
+}
+
+fn make_parent_dirs_with(path: &str, cwd: Option<&str>, roots: &[PathBuf], forbidden: &[PathBuf]) -> Result<(), String> {
+    let p = Path::new(path);
+    if path.trim().is_empty() || path.contains('\0') || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Ok(()); // the normal check will say what is wrong
+    }
+    let full = if p.is_absolute() { p.to_path_buf() } else { Path::new(cwd.filter(|c| !c.is_empty()).unwrap_or("/")).join(p) };
+    let Some(parent) = full.parent() else { return Ok(()) };
+    let Some(existing) = parent.ancestors().find(|a| a.exists()) else { return Ok(()) };
+    let real = existing.canonicalize().map_err(|e| e.to_string())?;
+    if forbidden.iter().any(|f| real.starts_with(f)) || !roots.iter().any(|r| real.starts_with(r)) {
+        return Ok(()); // outside what is allowed: the normal check refuses it
+    }
+    if real.is_dir() && real != parent.canonicalize().unwrap_or_default() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+    }
+    Ok(())
+}
+
 /// What is at `path`: one file, or every file of a folder. Links and anything that is not a plain file or folder are refused
 /// (a link inside an allowed folder could point anywhere), and so is too much.
 pub fn survey(path: &Path) -> Result<Survey, String> {
@@ -217,6 +241,26 @@ pub fn file_lines(files: &[(String, u64)], show: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_folders_above_a_download_are_made_only_inside_the_allowed_places() {
+        let base = std::env::temp_dir().join(format!("oso-mkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let root = base.canonicalize().unwrap();
+        let roots = vec![root.clone()];
+        make_parent_dirs_with(root.join("a/b/c.txt").to_str().unwrap(), None, &roots, &[]).unwrap();
+        assert!(root.join("a/b").is_dir() && !root.join("a/b/c.txt").exists());
+        // outside the roots, with `..`, or in a forbidden folder: nothing is made
+        let other = std::env::temp_dir().join(format!("oso-mkdir-other-{}", std::process::id()));
+        make_parent_dirs_with(other.join("x/y.txt").to_str().unwrap(), None, &roots, &[]).unwrap();
+        assert!(!other.exists());
+        make_parent_dirs_with("../escape/x.txt", Some(root.to_str().unwrap()), &roots, &[]).unwrap();
+        assert!(!base.parent().unwrap().join("escape").exists());
+        make_parent_dirs_with(root.join("keys/k.txt").to_str().unwrap(), None, &roots, &[root.clone()]).unwrap();
+        assert!(!root.join("keys").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {

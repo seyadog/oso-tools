@@ -75,6 +75,7 @@ pub fn start(path: PathBuf, keys: Arc<dyn KeyProvider>, upstream: Option<PathBuf
         }
         let _ = std::fs::remove_file(&path); // the socket of a dead one
     }
+    crate::daemon::check_socket_len(&path)?;
     let listener = UnixListener::bind(&path).with_context(|| format!("could not listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;

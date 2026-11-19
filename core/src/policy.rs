@@ -87,19 +87,51 @@ fn stage_is_read_only(w: &[String]) -> bool {
     }
     let flag = |f: &str| args.iter().any(|a| a == f || a.starts_with(&format!("{f}=")));
     match cmd.as_str() {
-        "cd" | "sleep" | "true" | "ls" | "pwd" | "whoami" | "id" | "hostname" | "uname" | "date" | "uptime" | "free" | "df" | "du" | "ps" | "lsblk" | "lscpu" | "which" | "stat" | "file" | "tree" | "wc" | "head" | "tail" | "cat" | "grep" | "egrep" | "fgrep" | "cut" | "uniq" | "tr" | "echo" | "basename" | "dirname" | "readlink" | "nproc" | "arch" | "groups" | "lsof" | "ss" | "netstat" | "lsmod" | "lspci" | "lsusb" | "w" | "who" | "last" => true,
+        "cd" | "sleep" | "true" | "ls" | "pwd" | "whoami" | "id" | "hostname" | "uname" | "date" | "uptime" | "free" | "df" | "du" | "lsblk" | "lscpu" | "which" | "stat" | "file" | "tree" | "wc" | "head" | "tail" | "cat" | "grep" | "egrep" | "fgrep" | "cut" | "uniq" | "tr" | "echo" | "basename" | "dirname" | "readlink" | "nproc" | "arch" | "groups" | "lsof" | "ss" | "netstat" | "lsmod" | "lspci" | "lsusb" | "w" | "who" | "last" => true,
+        // BSD-style `ps e`, `ps eww`, `ps auxe` print every process's environment (keys and passwords included)
+        "ps" => !args.iter().any(|a| !a.starts_with('-') && a.chars().all(|c| c.is_ascii_alphabetic()) && a.contains('e')) && !flag("--environment"),
         "sort" => !flag("-o") && !flag("--output"),
         "ip" => matches!(args.first().map(String::as_str), Some("a" | "addr" | "address" | "l" | "link" | "r" | "route" | "n" | "neigh")) && !args.iter().any(|a| matches!(a.as_str(), "add" | "del" | "delete" | "flush" | "set" | "change" | "replace")),
         "journalctl" => !args.iter().any(|a| a.starts_with("--vacuum") || a == "--rotate" || a == "--flush" || a == "--sync" || a.starts_with("--setup")),
         "dmesg" => !flag("-c") && !flag("-C") && !flag("--clear") && !flag("-D") && !flag("-E"),
-        "systemctl" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "is-active" | "is-enabled" | "is-failed" | "list-units" | "list-unit-files" | "list-timers" | "list-sockets" | "show" | "cat")),
-        "docker" | "podman" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "ps" | "images" | "logs" | "inspect" | "version" | "info" | "stats" | "top" | "port" | "diff")),
-        "kubectl" => kubectl_verb(args).is_some_and(|a| matches!(a, "get" | "describe" | "logs" | "version" | "top" | "api-resources" | "api-versions" | "cluster-info" | "explain")) && !flag("--raw") && !flag("--as") && !flag("--token"),
+        // `show` and `cat` print unit files and `Environment=` lines: they ask
+        "systemctl" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "is-active" | "is-enabled" | "is-failed" | "list-units" | "list-unit-files" | "list-timers" | "list-sockets")),
+        "docker" | "podman" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "ps" | "images" | "logs" | "version" | "info" | "stats" | "top" | "port" | "diff")),
+        "kubectl" => kubectl_verb(args).is_some_and(|a| matches!(a, "get" | "logs" | "version" | "top" | "api-resources" | "api-versions" | "cluster-info" | "explain")) && !flag("--raw") && !flag("--as") && !flag("--token") && !dumps_objects(args),
         "k3s" | "microk8s" if args.first().is_some_and(|a| a == "kubectl") => stage_is_read_only(&w[1..]),
-        "git" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "log" | "diff" | "show" | "rev-parse" | "describe" | "ls-files" | "blame" | "shortlog" | "remote" | "branch" | "tag")) && !args.iter().any(|a| matches!(a.as_str(), "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "--delete" | "--move" | "add" | "set-url" | "remove" | "rm" | "rename" | "prune")),
+        "git" => args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| matches!(a.as_str(), "status" | "log" | "diff" | "show" | "rev-parse" | "describe" | "ls-files" | "blame" | "shortlog" | "remote" | "branch" | "tag")) && git_listing_only(args) && !flag("--output") && !args.iter().any(|a| matches!(a.as_str(), "-d" | "-D" | "-m" | "-M" | "-c" | "-C" | "--delete" | "--move" | "add" | "set-url" | "remove" | "rm" | "rename" | "prune")),
         "find" => !args.iter().any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")),
         _ => false,
     }
+}
+
+/// `kubectl ... -o yaml|json|jsonpath|go-template`: whole objects, which carry environment variables and annotations with secrets.
+fn dumps_objects(args: &[String]) -> bool {
+    let wide = |v: &str| matches!(v, "yaml" | "json") || v.starts_with("jsonpath") || v.starts_with("go-template") || v.starts_with("custom-columns-file") || v.starts_with("template");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "-o" || a == "--output" {
+            if it.next().is_some_and(|v| wide(v)) {
+                return true;
+            }
+        } else if let Some(v) = a.strip_prefix("--output=").or_else(|| a.strip_prefix("-o").filter(|v| !v.is_empty() && !v.starts_with('-'))) {
+            if wide(v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `git branch` and `git tag` only list when they have no name to create (`-l`/`--list` makes a pattern a filter, not a name).
+fn git_listing_only(args: &[String]) -> bool {
+    let verb_at = args.iter().position(|a| !a.starts_with('-'));
+    let Some(i) = verb_at else { return true };
+    if !matches!(args[i].as_str(), "branch" | "tag") {
+        return true;
+    }
+    let rest = &args[i + 1..];
+    rest.iter().any(|a| a == "-l" || a == "--list") || rest.iter().all(|a| a.starts_with('-'))
 }
 
 /// The verb of a kubectl command (`get`, `logs`...): the first word that is not a flag or the value of one that takes a value.
@@ -260,11 +292,21 @@ mod tests {
 
     #[test]
     fn kubectl_reads_pass_and_changes_ask() {
-        for c in ["kubectl get pods", "kubectl get pods -A -o wide", "kubectl -n web get pods", "kubectl --context prod -n web logs web-1 --tail 50", "kubectl describe node n1", "kubectl top pods", "k3s kubectl get nodes", "microk8s kubectl get pods", "kubectl get pods -l app=web"] {
+        for c in ["kubectl get pods", "kubectl get pods -A -o wide", "kubectl -n web get pods", "kubectl --context prod -n web logs web-1 --tail 50", "kubectl top pods", "k3s kubectl get nodes", "microk8s kubectl get pods", "kubectl get pods -l app=web"] {
             assert!(is_read_only(c), "{c}");
         }
-        for c in ["kubectl delete pod x", "kubectl -n web delete pod x", "kubectl apply -f x.yaml", "kubectl exec -it web -- sh", "kubectl scale deploy web --replicas=0", "kubectl get secrets", "kubectl get pods --raw /x", "kubectl --as admin get pods", "kubectl rollout restart deploy web", "kubectl config view", "k3s server", "k3s kubectl delete pod x", "kubectl -n"] {
+        for c in ["kubectl delete pod x", "kubectl -n web delete pod x", "kubectl apply -f x.yaml", "kubectl exec -it web -- sh", "kubectl scale deploy web --replicas=0", "kubectl get secrets", "kubectl get pods --raw /x", "kubectl --as admin get pods", "kubectl describe pod web-1", "kubectl get pods -o yaml", "kubectl get deploy web -ojson", "kubectl get pods --output=jsonpath={.items}", "kubectl get cm x -o go-template=x", "kubectl rollout restart deploy web", "kubectl config view", "k3s server", "k3s kubectl delete pod x", "kubectl -n"] {
             assert!(!is_read_only(c), "{c}");
+        }
+    }
+
+    #[test]
+    fn commands_that_print_other_peoples_secrets_ask() {
+        for c in ["docker inspect web", "podman inspect web", "ps e", "ps eww", "ps auxe", "ps aux e", "systemctl show nginx", "systemctl cat nginx", "git branch newname", "git tag v1", "git diff --output=x", "env", "printenv HOME"] {
+            assert!(!is_read_only(c), "{c:?}");
+        }
+        for c in ["ps aux", "ps -ef", "ps -eo pid,comm", "docker ps", "docker logs web", "git branch", "git branch -a", "git branch --list 'x*'", "git tag", "git tag -l", "kubectl get pods -o wide", "kubectl get pods -o name", "systemctl status nginx"] {
+            assert!(is_read_only(c), "{c:?}");
         }
     }
 

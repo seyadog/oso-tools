@@ -291,8 +291,25 @@ fn sudo_on_a_server_with_no_saved_sudo_password_says_so_instead_of_failing_quiet
     r.engine.lock().unwrap().vault_set(id, true, Some(TRAP_SUDO)).unwrap();
     let saved = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -n true; echo after" }));
     let note = saved["result"]["sudo_note"].as_str().expect("a note about sudo");
-    assert!(!note.contains("no sudo password saved") && note.contains("does not type a sudo password"), "{note}");
+    assert!(!note.contains("no sudo password saved") && note.contains("oso_sudo"), "{note}");
     assert!(!saved.to_string().contains("TRAP"), "the password never comes back");
+    // oso_sudo on that server: asks, and when the person says no nothing runs
+    let asked = person(&r.approvals, |_| Decision::Deny);
+    let denied = call(&r, "oso_sudo", json!({ "host": "bare", "command": "true" }));
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert!(asked.lock().unwrap()[0].command.contains("sudo true"));
+    // a server with no sudo password saved is told so, without asking
+    let none = add_server(&r, &sshd, "nopw", None, AiPolicy::ReadOnlyAuto, "");
+    let _ = none;
+    let nopw = call(&r, "oso_sudo", json!({ "host": "nopw", "command": "true" }));
+    assert!(nopw.to_string().contains("No sudo password is saved for nopw"), "{nopw}");
+    person(&r.approvals, |_| Decision::Once);
+    // a sudo that worked (exit 0, nothing masked) gets no warning at all
+    if std::process::Command::new("sudo").arg("-V").output().is_ok_and(|o| o.status.success()) {
+        let fine = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -V" }));
+        assert_eq!(fine["result"]["exit_code"], 0, "{fine}");
+        assert!(fine["result"].get("sudo_note").is_none(), "{fine}");
+    }
     // the vault locked: it cannot tell, and says so
     r.engine.lock().unwrap().vault_lock();
     let locked = call(&r, "oso_run", json!({ "host": "bare", "command": "sudo -n true" }));

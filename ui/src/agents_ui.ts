@@ -54,7 +54,7 @@ export class ApprovalQueue {
   private listeners: (() => void)[] = [];
   private pushListeners: ((r: ApprovalRequest) => void)[] = [];
 
-  /** "Allow all": requests are allowed without asking, except those on a production host. oso remembers it (settings.json), also after a restart. */
+  /** "Allow all": requests are allowed without asking, except those on a production host and sudo, run_with and file transfers. oso remembers it (settings.json), also after a restart. */
   private allowAllOn = false;
 
   constructor(private ctx: QueueCtx) {}
@@ -73,15 +73,20 @@ export class ApprovalQueue {
     }
   }
 
+  /** What "Allow all" may answer by itself: a command or a tunnel. Never sudo, a command with a secret, or a file transfer: those always wait for a person. */
+  private coveredByAllowAll(r: ApprovalRequest): boolean {
+    return !r.production && !["sudo", "run_with", "put", "get"].includes(r.action);
+  }
+
   setAllowAll(on: boolean) {
     this.allowAllOn = on;
     void this.ctx.be.setAllowAll(on).catch(() => {});
-    if (on) for (const r of this.queue.filter((x) => !x.production)) void this.answer(r, "once");
+    if (on) for (const r of this.queue.filter((x) => this.coveredByAllowAll(x))) void this.answer(r, "once");
     else this.changed();
   }
 
   push(r: ApprovalRequest) {
-    if (this.allowAllOn && !r.production) {
+    if (this.allowAllOn && this.coveredByAllowAll(r)) {
       void this.ctx.be.approvalAnswer(r.id, "once").catch(() => false);
       return;
     }

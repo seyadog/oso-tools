@@ -251,7 +251,17 @@ pub fn run_server() -> Result<()> {
     serve(path, true)
 }
 
+/// Unix sockets cannot have a path longer than ~107 bytes: say so instead of failing with a vague error.
+pub fn check_socket_len(path: &Path) -> Result<()> {
+    let n = path.as_os_str().len();
+    if n > 100 {
+        anyhow::bail!("the socket path is too long ({n} bytes, the system allows about 100): {}. Use a shorter OSO_CONFIG_DIR or XDG_RUNTIME_DIR.", path.display());
+    }
+    Ok(())
+}
+
 pub fn serve(path: PathBuf, idle_exit: bool) -> Result<()> {
+    check_socket_len(&path)?;
     prepare_dir(&path)?;
     if path.exists() {
         if UnixStream::connect(&path).is_ok() {

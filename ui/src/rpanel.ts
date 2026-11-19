@@ -469,7 +469,7 @@ export class RightPanel {
       el(
         "div",
         { class: `rp-mode${q.allowAll ? " all" : ""}` },
-        el("div", { class: "segs", role: "group", "aria-label": "What oso does when an agent asks" }, mode(false, "Ask", "Every request waits for your answer"), mode(true, "Allow all", "Allow everything without asking, except production hosts. oso remembers it.")),
+        el("div", { class: "segs", role: "group", "aria-label": "What oso does when an agent asks" }, mode(false, "Ask", "Every request waits for your answer"), mode(true, "Allow all", "Allow commands without asking, except on production hosts; sudo, commands with secrets and file copies always ask. oso remembers it.")),
         q.allowAll ? el("small", {}, "Everything is allowed without asking, except hosts marked production. oso remembers this choice.") : null,
       ),
     );

@@ -40,6 +40,11 @@ impl Job {
         self.pty.with_screen(|s| s.contents())
     }
 
+    /// Bytes typed into the process's terminal (what it reads as stdin).
+    pub fn write(&self, bytes: &[u8]) {
+        self.pty.write(bytes);
+    }
+
     pub fn kill(&mut self) {
         self.pty.kill();
     }

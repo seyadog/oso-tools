@@ -56,6 +56,7 @@ pub fn start(path: PathBuf, handler: Handler) -> Result<Control> {
         }
         let _ = std::fs::remove_file(&path);
     }
+    crate::daemon::check_socket_len(&path)?;
     let listener = UnixListener::bind(&path).with_context(|| format!("could not listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;

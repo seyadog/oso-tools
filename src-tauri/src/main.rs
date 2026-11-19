@@ -927,6 +927,7 @@ fn refresh_tray_menu(app: &AppHandle) {
 }
 
 fn main() {
+    oso_core::harden_process();
     // oso's command line (`oso unlock`, `oso run -- …`): it talks to the window that is open, and never starts one
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
     // `ssh` started by `oso ssh` runs this same program to ask for a saved password (SSH_ASKPASS)

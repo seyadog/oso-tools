@@ -314,6 +314,11 @@ impl Vault {
         }
     }
 
+    /// How long until the idle lock would lock it, given the limit; `None` when it is locked.
+    pub fn locks_in(&self, after: Duration) -> Option<Duration> {
+        self.state.as_ref().map(|s| after.saturating_sub(s.last_used.elapsed()))
+    }
+
     /// Locks the vault after `after` without use.
     pub fn lock_if_idle(&mut self, after: Duration) {
         if self.state.as_ref().is_some_and(|s| s.last_used.elapsed() > after) {

@@ -31,3 +31,16 @@ pub mod store;
 pub mod totp;
 pub mod transfer;
 pub mod vault;
+
+/// Makes it harder for another program of the same user to read oso's memory (where the unlocked vault is): no core dumps and
+/// no `ptrace`/`/proc/<pid>/mem` from a process that is not its parent when the system allows it. It is not a wall against a
+/// determined program of the same user (see docs/STATUS.md), only a step.
+pub fn harden_process() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers and has no memory safety requirements.
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+    }
+}

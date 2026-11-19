@@ -143,6 +143,22 @@ describe("requests waiting for an answer", () => {
     expect(q.list().map((r) => r.id)).toEqual([2, 4, 5]);
   });
 
+  it("Allow all never answers sudo, a command with secrets or a file transfer", () => {
+    const { q, answers } = make();
+    q.setAllowAll(true);
+    for (const [id, action] of [[1, "sudo"], [2, "run_with"], [3, "put"], [4, "get"]] as const) q.push(req(id, { action }));
+    q.push(req(5, { action: "run" }));
+    q.push(req(6, { action: "tunnel" }));
+    expect(answers).toEqual([[5, "once"], [6, "once"]]);
+    expect(q.list().map((r) => r.id)).toEqual([1, 2, 3, 4]);
+    // turning it on with some already waiting answers only the ones it covers
+    const b = make();
+    b.q.push(req(7, { action: "sudo" }));
+    b.q.push(req(8, { action: "run" }));
+    b.q.setAllowAll(true);
+    expect(b.q.list().map((r) => r.id)).toEqual([7]);
+  });
+
   it("Allow all is remembered: the choice is saved, and a new window starts with it", async () => {
     const { q, saved } = make();
     q.setAllowAll(true);

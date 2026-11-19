@@ -134,18 +134,178 @@ fn env_word(e: Option<EnvKind>) -> &'static str {
     }
 }
 
-/// Blanks every secret of the vault out of `text`.
+/// Could this command have failed in a part whose result is not the exit code (errors thrown away, or a later command that
+/// ends with success)? Then an exit code 0 does not show that sudo worked.
+fn hides_failures(command: &str) -> bool {
+    command.contains("2>/dev/null") || command.contains("&>/dev/null") || command.contains("||") || command.contains(';') || command.contains('\n')
+}
+
+/// Did sudo itself say something went wrong (it prefixes its messages with `sudo:`)? Then the note is worth showing even when the
+/// command's last piece ended with exit code 0.
+fn sudo_complained(stderr: &str, stdout: &str) -> bool {
+    let low = |t: &str| t.to_lowercase();
+    [stderr, stdout].iter().any(|t| {
+        let t = low(t);
+        t.contains("sudo: a password is required") || t.contains("sudo: a terminal is required") || t.contains("sudo: no tty") || t.contains("sudo: sorry") || t.contains("is not in the sudoers") || t.contains("sudo: incorrect password")
+    })
+}
+
+/// What an ssh failure (exit code 255) most likely means and what to do next, from what ssh printed.
+fn ssh_hint(stderr: &str, stdout: &str) -> Option<&'static str> {
+    let t = format!("{stderr}\n{stdout}").to_lowercase();
+    let has = |s: &str| t.contains(s);
+    if has("remote host identification has changed") || has("host key verification failed") {
+        Some("The server's host key changed (or is not trusted). Do not retry: tell the person, who can check it and remove the old key in oso.")
+    } else if has("permission denied") {
+        Some("The server refused the login (key or password not accepted). Retrying will not help: tell the person to check the key or password of this server in oso.")
+    } else if has("connection refused") {
+        Some("Nothing is listening on the ssh port: the machine may be rebooting or sshd is down. Wait a minute and try once more; if it persists, tell the person.")
+    } else if has("timed out") || has("no route to host") || has("network is unreachable") {
+        Some("The server cannot be reached (network, firewall or VPN/Tailscale). Tell the person; retrying right away will not help.")
+    } else if has("could not resolve hostname") || has("name or service not known") {
+        Some("The server's name does not resolve. The person can fix the address in oso.")
+    } else if has("connection closed") || has("connection reset") || has("broken pipe") {
+        Some("The connection dropped. If the machine is rebooting, wait a minute and try once more.")
+    } else {
+        None
+    }
+}
+
+/// Agents often write `server` for `host`, or pass `timeout_seconds` as text. Say what they meant instead of failing.
+pub fn normalize_args(args: Value) -> Value {
+    let Value::Object(mut m) = args else { return args };
+    if !m.contains_key("host") {
+        for alias in ["server", "name", "hostname", "machine"] {
+            // `name` is the tunnel's name for oso_tunnel: only borrowed when there is a `command` beside it
+            if alias == "name" && !m.contains_key("command") {
+                continue;
+            }
+            if let Some(v) = m.remove(alias).filter(Value::is_string) {
+                m.insert("host".into(), v);
+                break;
+            }
+        }
+    }
+    for key in ["timeout_seconds", "timeout"] {
+        if let Some(n) = m.get(key).and_then(Value::as_str).and_then(|t| t.trim().parse::<u64>().ok()) {
+            m.insert("timeout_seconds".into(), json!(n));
+            if key == "timeout" {
+                m.remove("timeout");
+            }
+        } else if key == "timeout" {
+            if let Some(n) = m.get(key).and_then(Value::as_u64) {
+                m.remove("timeout");
+                m.insert("timeout_seconds".into(), json!(n));
+            }
+        }
+    }
+    Value::Object(m)
+}
+
+/// Blanks every secret of the vault out of `text`: the value itself and also its base64 and URL-encoded forms (an agent that
+/// pipes a value through `base64` would otherwise get it past the filter).
 pub fn redact(text: &str, hide: &[Zeroizing<String>]) -> String {
-    let mut out = text.to_string();
+    use base64::Engine as _;
+    let mut forms: Vec<String> = vec![];
+    for v in hide.iter().filter(|v| !v.is_empty()) {
+        forms.push(v.to_string());
+        if v.len() >= MIN_ENCODED {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(v.as_bytes());
+            let url = url_encode(v);
+            let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.as_bytes());
+            for f in [b64.trim_end_matches('=').to_string(), b64url, url] {
+                if f != **v && !forms.contains(&f) {
+                    forms.push(f);
+                }
+            }
+        }
+    }
     // longest first, so that a value inside another one does not leave the rest showing
-    let mut order: Vec<&Zeroizing<String>> = hide.iter().collect();
-    order.sort_by_key(|v| std::cmp::Reverse(v.len()));
-    for v in order {
-        if !v.is_empty() && out.contains(v.as_str()) {
+    forms.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut out = text.to_string();
+    for v in forms {
+        if out.contains(v.as_str()) {
             out = out.replace(v.as_str(), "[hidden by oso]");
         }
     }
     out
+}
+
+/// Shorter secrets are not also searched for in base64 and URL form: they would match ordinary text.
+const MIN_ENCODED: usize = 6;
+
+fn url_encode(v: &str) -> String {
+    let mut o = String::new();
+    for b in v.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            o.push(b as char);
+        } else {
+            o.push_str(&format!("%{b:02X}"));
+        }
+    }
+    o
+}
+
+/// Secrets that are not in the vault but that a command's output can carry: private keys, `Bearer` tokens, JWTs, AWS key ids,
+/// and `NAME=value` where the name says it is a secret (`DB_PASSWORD=...`). It is a net with wide holes, not a promise.
+pub fn scrub_patterns(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_key = false;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim_start();
+        if in_key {
+            if t.contains("-----END") {
+                in_key = false;
+            }
+            continue;
+        }
+        if t.contains("-----BEGIN") && t.contains("PRIVATE KEY") {
+            in_key = !t.contains("-----END");
+            out.push_str("[private key hidden by oso]\n");
+            continue;
+        }
+        out.push_str(&scrub_line(line));
+    }
+    out
+}
+
+fn scrub_line(line: &str) -> String {
+    const NAMES: [&str; 9] = ["PASSWORD", "PASSWD", "SECRET", "TOKEN", "API_KEY", "APIKEY", "PRIVATE_KEY", "CREDENTIAL", "ACCESS_KEY"];
+    let mut res = String::with_capacity(line.len());
+    let mut rest = line;
+    // words are cut at spaces, quotes and the separators of key/value lists
+    while !rest.is_empty() {
+        let end = rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',').unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(end);
+        let sep_len = tail.chars().next().map(char::len_utf8).unwrap_or(0);
+        let up = word.to_uppercase();
+        let hidden = if let Some(eq) = word.find('=').filter(|&i| i > 0 && i + 1 < word.len()) {
+            let name = &up[..eq];
+            let looks_like_name = word[..eq].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
+            (looks_like_name && NAMES.iter().any(|n| name.contains(n)) && !name.ends_with("_FILE") && !name.ends_with("_PATH")).then(|| format!("{}=[hidden by oso]", &word[..eq]))
+        } else {
+            None
+        };
+        let hidden = hidden.or_else(|| {
+            let w = word;
+            let jwt = w.starts_with("eyJ") && w.matches('.').count() == 2 && w.len() > 30;
+            let aws = w.len() == 20 && (w.starts_with("AKIA") || w.starts_with("ASIA")) && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+            (jwt || aws).then(|| "[hidden by oso]".to_string())
+        });
+        res.push_str(hidden.as_deref().unwrap_or(word));
+        res.push_str(&tail[..sep_len]);
+        rest = &tail[sep_len..];
+        // `Bearer <token>`: the next word is the token
+        if word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("authorization:") {
+            let next_end = rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'').unwrap_or(rest.len());
+            let tok = &rest[..next_end];
+            if tok.len() >= 16 && !tok.eq_ignore_ascii_case("bearer") {
+                res.push_str("[hidden by oso]");
+                rest = &rest[next_end..];
+            }
+        }
+    }
+    res
 }
 
 /// Removes the colours and cursor moves a terminal adds.
@@ -305,6 +465,8 @@ struct TransferArgs {
     remote: String,
     sha256: Option<String>,
     overwrite: bool,
+    /// Create the folder above the destination on the server (put) if it is missing.
+    mkdir_p: bool,
     timeout: Duration,
     cwd: Option<String>,
     roots: Vec<std::path::PathBuf>,
@@ -376,7 +538,7 @@ impl Handler {
         let agent = call.body.get("agent").and_then(Value::as_str).unwrap_or("").chars().take(60).collect();
         let ctx = Ctx { id: self.next_id.fetch_add(1, Ordering::Relaxed), pane: call.sid, space: call.space, title: call.title, agent };
         let tool = call.body.get("tool").and_then(Value::as_str).unwrap_or("");
-        let args = call.body.get("args").cloned().unwrap_or(Value::Null);
+        let args = normalize_args(call.body.get("args").cloned().unwrap_or(Value::Null));
         if paused() && tool != "oso_event" {
             return no("The person paused AI agents in oso, so nothing can be done now. Do not try another way: tell them, and they can resume it in oso.");
         }
@@ -463,8 +625,16 @@ impl Handler {
         };
         let focus = self.focus_view(&e, &scope);
         let clusters: Vec<Value> = e.clusters.list().iter().map(|c| json!({ "name": c.name, "environment": env_word(c.env_kind), "namespace": c.namespace, "notes": c.notes, "through": c.via_server.and_then(|id| e.store.server(id)).map(|s| s.name.clone()) })).collect();
+        let vault = {
+            let minutes = crate::settings::Settings::load().vault_minutes.clamp(5, 24 * 60);
+            match e.vault.locks_in(Duration::from_secs(minutes * 60)) {
+                Some(left) => json!({ "locked": false, "locks_in_minutes_if_idle": left.as_secs().div_ceil(60) }),
+                None => json!({ "locked": true, "note": "Ask the person to unlock it in oso before a long task; things that need a secret wait for it." }),
+            }
+        };
         let out = ok(json!({
             "space": space,
+            "vault": vault,
             "terminal": ctx.title,
             "servers": list,
             "servers_note": if many { "There are many servers: this is only their names. Use oso_hosts with a search to see one." } else { "" },
@@ -472,7 +642,7 @@ impl Handler {
             "secrets_you_can_use_with_oso_run_with": more,
             "focus": focus,
             "kubernetes_clusters": clusters,
-            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret), oso_kubectl (kubectl on one of the kubernetes_clusters). The user is asked to approve what is not a plain read. Production servers always ask. When the user says \"this server\", call oso_focus.",
+            "rules": "Never ask the user for a password or a key: use oso_run (a command on a server), oso_sudo (sudo on this computer) or oso_run_with (a local command that needs a secret), oso_kubectl (kubectl on one of the kubernetes_clusters). The user is asked to approve what is not a plain read. Production servers always ask. When the user says \"this server\", call oso_focus. If a server lets this user run sudo without a password (NOPASSWD), oso_run with `sudo -n ...` already works: use oso_sudo with `host` only when a password is needed.",
         }));
         drop(e);
         self.log(ctx, "context", "", "", "allowed_without_asking", |_| {});
@@ -572,7 +742,7 @@ impl Handler {
         if e.vault.get(server_id, crate::vault::Kind::Sudo).is_none() {
             return Some(format!("This command uses sudo, and there is no sudo password saved for {name}. Without one, sudo only works if the server lets this user run it without a password; if the sudo part failed or printed nothing, that is why. Ask the user to add the sudo password for {name} in oso (edit the server), or to run it themselves in a terminal. Do not ask them to type the password to you."));
         }
-        Some(format!("This command uses sudo. oso does not type a sudo password into a command run this way: it works only if {name} lets this user run sudo without a password. If it failed for that reason, ask the user to run it in a terminal of oso, where oso types the saved password."))
+        Some(format!("This command uses sudo. A sudo that asks for a password cannot be answered through oso_run: run it again with oso_sudo and `host` set to {name}, and oso types the saved sudo password for you."))
     }
 
     fn granted(&self, server: u64) -> bool {
@@ -662,8 +832,8 @@ impl Handler {
                 no(format!("Could not run it: {e}"))
             }
             Ok(c) => {
-                let (stdout, t1) = cap(redact(&c.stdout, &hide));
-                let (stderr, t2) = cap(redact(&c.stderr, &hide));
+                let (stdout, t1) = cap(scrub_patterns(&redact(&c.stdout, &hide)));
+                let (stderr, t2) = cap(scrub_patterns(&redact(&c.stderr, &hide)));
                 self.log_why(ctx, "run", &t, command, "finished", "", |x| {
                     x.exit_code = c.code;
                     x.bytes_out = Some(stdout.len() + stderr.len());
@@ -676,7 +846,13 @@ impl Handler {
                     "truncated": t1 || t2, "timed_out": c.timed_out,
                     "note": if needs_prompt { "This login needed a typed password, so stdout and stderr come mixed in `stdout`." } else { "" },
                 });
-                if let Some(why) = sudo_note {
+                if c.code == Some(255) {
+                    if let Some(h) = ssh_hint(&c.stderr, &c.stdout) {
+                        answer["ssh_hint"] = json!(h);
+                    }
+                }
+                // only when it may matter: a command that ran fine (exit 0) needs no warning about sudo
+                if let Some(why) = sudo_note.filter(|_| c.code != Some(0) || c.timed_out || sudo_complained(&c.stderr, &c.stdout) || hides_failures(command)) {
                     answer["sudo_note"] = json!(why);
                 }
                 ok(answer)
@@ -688,6 +864,11 @@ impl Handler {
     /// only now, after the person answered: secrets are not held while waiting. Gives what came back, whether it had to go
     /// through a terminal (stdout and stderr mixed) and the secrets to blank out of anything shown.
     fn exec_remote(&self, t: &Target, command: &str, timeout: Duration) -> Result<(Ran, bool, Vec<Zeroizing<String>>), String> {
+        self.exec_remote_in(t, command, timeout, None)
+    }
+
+    /// Same, with bytes for the command's stdin. With a typed login it goes through the terminal ssh runs in.
+    fn exec_remote_in(&self, t: &Target, command: &str, timeout: Duration, stdin: Option<Vec<u8>>) -> Result<(Ran, bool, Vec<Zeroizing<String>>), String> {
         let (mut opts, extra, hide) = {
             let mut guard = self.engine();
             let e = &mut *guard;
@@ -709,7 +890,7 @@ impl Handler {
             opts.argv.extend(["-T".into(), "-o".into(), "BatchMode=yes".into()]);
         }
         opts.argv.extend(["--".into(), target, command.to_string()]);
-        let result = if needs_prompt { run_in_pty(opts, timeout) } else { run_plain(opts, timeout) };
+        let result = if needs_prompt { run_in_pty(opts, timeout, stdin) } else { run_plain(opts, timeout, stdin) };
         Ok((result, needs_prompt, hide))
     }
 
@@ -733,7 +914,7 @@ impl Handler {
             }
             (o, e.vault.values_to_hide())
         };
-        let result = if opts.fills.is_empty() { run_plain(opts, timeout) } else { run_in_pty(opts, timeout) };
+        let result = if opts.fills.is_empty() { run_plain(opts, timeout, None) } else { run_in_pty(opts, timeout, None) };
         Ok((result, hide))
     }
 
@@ -749,10 +930,11 @@ impl Handler {
         transfer::remote_path_ok(remote)?;
         let sha256 = text("sha256").map(transfer::clean_sha256).transpose()?;
         let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+        let mkdir_p = args.get("mkdir_p").and_then(Value::as_bool).unwrap_or(false);
         let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(TRANSFER_TIMEOUT).clamp(1, MAX_TRANSFER_TIMEOUT));
         // the working folder is put in by `oso mcp` itself, from its own process: it is not something the agent says
         let cwd = text("_cwd").map(str::to_string);
-        Ok(TransferArgs { host: host.into(), local: local.into(), remote: remote.into(), sha256, overwrite, timeout, roots: transfer::allowed_roots(cwd.as_deref()), cwd })
+        Ok(TransferArgs { host: host.into(), local: local.into(), remote: remote.into(), sha256, overwrite, mkdir_p, timeout, roots: transfer::allowed_roots(cwd.as_deref()), cwd })
     }
 
     /// Asks about a transfer. `Ok` when the person allowed it; `Err` is the answer to give the agent.
@@ -825,6 +1007,9 @@ impl Handler {
         summary.push_str(&format!("To the server:      {}\n", a.remote));
         summary.push_str(&format!("{} file{}, {} in all\n", survey.files.len(), if survey.files.len() == 1 { "" } else { "s" }, transfer::human(survey.total)));
         summary.push_str(&transfer::file_lines(&survey.files, 15));
+        if a.mkdir_p {
+            summary.push_str("Creates the folder above the destination on the server if it is missing.\n");
+        }
         summary.push_str(if a.overwrite && !survey.is_dir { "Replaces the file on the server if it is already there.\n" } else { "Nothing on the server is replaced: if it is already there, it stops.\n" });
         if let Some(h) = &a.sha256 {
             summary.push_str(&format!("Checked against sha256 {h} here and on the server.\n"));
@@ -849,6 +1034,13 @@ impl Handler {
             ("DIR", false) => return fail(self, format!("{} is a folder on {}: give the full path of the file (for example {}/{}).", a.remote, t.name, a.remote.trim_end_matches('/'), survey.files[0].0)),
             (_, true) => return fail(self, format!("{} already exists on {}: a folder is only sent to a path that is free (oso does not merge or replace folders).", a.remote, t.name)),
             _ => return fail(self, format!("The server answered {state:?} when asked about {}.", a.remote)),
+        }
+        if a.mkdir_p {
+            if let Some((dir, _)) = a.remote.trim_end_matches('/').rsplit_once('/').filter(|(d, _)| !d.is_empty()) {
+                if let Err(m) = self.probe(&t, &format!("mkdir -p -- {}", transfer::remote_arg(dir))) {
+                    return fail(self, m);
+                }
+            }
         }
         let started = Instant::now();
         let (result, hide) = match self.exec_scp(&t, connect::Direction::Up, &[local.to_string_lossy().into_owned()], &a.remote, a.timeout) {
@@ -892,6 +1084,10 @@ impl Handler {
             Ok(a) => a,
             Err(m) => return no(m),
         };
+        // a missing folder above the destination is made (only inside the places an agent may write to)
+        if let Err(m) = transfer::make_parent_dirs(&a.local, a.cwd.as_deref(), &a.roots) {
+            return no(m);
+        }
         let dest = match transfer::check_local(&a.local, a.cwd.as_deref(), &a.roots) {
             Ok(p) => p,
             Err(m) => return no(m),
@@ -1000,6 +1196,9 @@ impl Handler {
         let Some(command) = args.get("command").and_then(Value::as_str).filter(|c| !c.trim().is_empty() && c.len() <= 8000 && !c.contains('\0')) else {
             return no("oso_sudo needs a `command`.");
         };
+        if let Some(host) = args.get("host").and_then(Value::as_str).filter(|h| !h.trim().is_empty()) {
+            return self.sudo_remote(ctx, host, command, args);
+        }
         let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
         {
             let mut e = self.engine();
@@ -1046,6 +1245,79 @@ impl Handler {
         pw.clear();
         let result = run_capture(cmd, Some(input), timeout);
         self.finish_local(ctx, "sudo", "this computer", command, result, &hide)
+    }
+
+    /// `oso_sudo` with a `host`: sudo on a server. The saved sudo password of that server goes to sudo's stdin (`-S`), never into
+    /// the command line, so it is not in the remote process list or history. It always asks, production included.
+    fn sudo_remote(&self, ctx: &Ctx, host: &str, command: &str, args: &Value) -> Value {
+        let timeout = Duration::from_secs(args.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
+        let t = match self.target(ctx, host) {
+            Ok(t) => t,
+            Err(m) => return no(m),
+        };
+        if t.policy == AiPolicy::Blocked {
+            self.log_why(ctx, "sudo", &t, command, "blocked", "The server's policy is \u{201c}blocked\u{201d}: AI agents cannot use it.", |_| {});
+            return no("This server is blocked for AI agents.");
+        }
+        {
+            let mut e = self.engine();
+            let scope = match Scope::of(&e, ctx) {
+                Ok(s) => s,
+                Err(m) => return no(m),
+            };
+            let Some(secret) = e.vault.links(t.id).sudo.filter(|_| e.vault.get(t.id, crate::vault::Kind::Sudo).is_some()) else {
+                return no(format!("No sudo password is saved for {}: the person can add it in oso (edit the server), or run the command in a terminal of oso.", t.name));
+            };
+            if let Scope::Space(sp) = &scope {
+                if !sp.has_secret(secret) {
+                    return no(format!("This Space does not include the sudo password of {}: the person can add it to the Space in oso.", t.name));
+                }
+            }
+        }
+        let production = t.env == Some(EnvKind::Production);
+        match self.ask(ctx, "sudo", &t.name, &format!("sudo {command}"), production, false) {
+            Decision::Once | Decision::AlwaysRead | Decision::Hour => self.log_why(ctx, "sudo", &t, command, "allowed", "sudo always asks: you allowed it once.", |_| {}),
+            Decision::Terminal => {
+                self.log_why(ctx, "sudo", &t, command, "denied", "sudo always asks: you chose to run it yourself in a terminal.", |e| e.note = "the person runs it themselves".into());
+                return no("The user chose to run this themselves, in a terminal. Do not try it again; wait for what they tell you.");
+            }
+            Decision::Deny => {
+                self.log_why(ctx, "sudo", &t, command, "denied", "sudo always asks: you denied it (or nobody answered in time).", |_| {});
+                return no("The user did not allow this command.");
+            }
+        }
+        let mut pw = {
+            let mut e = self.engine();
+            let Some(p) = e.vault.get(t.id, crate::vault::Kind::Sudo) else { return no("The sudo password is gone: the vault changed.") };
+            Zeroizing::new(p)
+        };
+        let input = format!("{}\n", pw.as_str()).into_bytes();
+        pw.clear();
+        // -k: a cached ticket is not trusted; -p '': no prompt text in the output
+        let remote = format!("sudo -S -k -p '' -- sh -c {}", crate::k8s::quote(command));
+        let started = Instant::now();
+        let (result, _, hide) = match self.exec_remote_in(&t, &remote, timeout, Some(input)) {
+            Ok(r) => r,
+            Err(m) => return no(m),
+        };
+        match result {
+            Err(e) => {
+                self.log_why(ctx, "sudo", &t, command, "failed", "", |x| x.note = e.chars().take(200).collect());
+                no(format!("Could not run it: {e}"))
+            }
+            Ok(c) => {
+                let (stdout, t1) = cap(scrub_patterns(&redact(&c.stdout, &hide)));
+                let (stderr, t2) = cap(scrub_patterns(&redact(&c.stderr, &hide)));
+                self.log_why(ctx, "sudo", &t, command, "finished", "", |x| {
+                    x.exit_code = c.code;
+                    x.bytes_out = Some(stdout.len() + stderr.len());
+                    x.preview = crate::audit::preview_of(&stdout, &stderr);
+                    x.output = crate::audit::output_of(&stdout, &stderr);
+                    x.note = format!("{} ms{}", started.elapsed().as_millis(), if c.timed_out { ", timed out" } else { "" });
+                });
+                ok(json!({ "host": t.name, "exit_code": c.code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": c.timed_out }))
+            }
+        }
     }
 
     fn run_with(&self, ctx: &Ctx, args: &Value) -> Value {
@@ -1311,18 +1583,23 @@ impl Handler {
 }
 
 /// `ssh` with its pipes (no password to type).
-fn run_plain(opts: SpawnOpts, timeout: Duration) -> Result<Captured, String> {
+fn run_plain(opts: SpawnOpts, timeout: Duration, stdin: Option<Vec<u8>>) -> Result<Captured, String> {
     let mut cmd = Command::new(&opts.argv[0]);
     cmd.args(&opts.argv[1..]);
     if let Some(env) = opts.env {
         cmd.env_clear().envs(env);
     }
-    run_capture(cmd, None, timeout).map_err(|e| e.to_string())
+    run_capture(cmd, stdin, timeout).map_err(|e| e.to_string())
 }
 
 /// `ssh` in a terminal nobody sees, so that the saved password is typed at its prompt. Everything it prints is mixed.
-fn run_in_pty(opts: SpawnOpts, timeout: Duration) -> Result<Captured, String> {
+fn run_in_pty(opts: SpawnOpts, timeout: Duration, stdin: Option<Vec<u8>>) -> Result<Captured, String> {
     let mut job = Job::spawn(opts).map_err(|e| format!("{e:#}"))?;
+    // the login password comes through SSH_ASKPASS, so the terminal's input is only read by the remote command: the sudo
+    // password typed here waits in the terminal until ssh passes it on
+    if let Some(bytes) = stdin {
+        job.write(&bytes);
+    }
     let end = Instant::now() + timeout;
     let code = loop {
         if let Some(c) = job.poll() {
@@ -1354,6 +1631,40 @@ mod tests {
         let hide = vec![Zeroizing::new("hunter22".to_string()), Zeroizing::new("hunter22-and-more".to_string())];
         assert_eq!(redact("pw=hunter22-and-more and hunter22!", &hide), "pw=[hidden by oso] and [hidden by oso]!");
         assert_eq!(redact("nothing here", &hide), "nothing here");
+    }
+
+    #[test]
+    fn a_secret_is_also_blanked_in_base64_and_url_form() {
+        let hide = vec![Zeroizing::new("hunter22 & more".to_string())];
+        assert_eq!(redact("aHVudGVyMjIgJiBtb3Jl", &hide), "[hidden by oso]");
+        assert_eq!(redact("x=hunter22%20%26%20more", &hide), "x=[hidden by oso]");
+        // a short secret is not also searched for in its encodings
+        let short = vec![Zeroizing::new("abc".to_string())];
+        assert_eq!(redact("YWJj", &short), "YWJj");
+    }
+
+    #[test]
+    fn patterns_that_look_like_secrets_are_blanked() {
+        let t = scrub_patterns("DB_PASSWORD=s3cr3t and API_TOKEN=abc123\nPATH=/usr/bin SECRET_FILE=/x\nAuthorization: Bearer abcdefghijklmnopqrstuv\nkey AKIAABCDEFGHIJKLMNOP end\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\nafter\n");
+        for gone in ["s3cr3t", "abc123", "abcdefghijklmnopqrstuv", "AKIAABCDEFGHIJKLMNOP", "AAAA"] {
+            assert!(!t.contains(gone), "{gone} in {t}");
+        }
+        assert!(t.contains("PATH=/usr/bin") && t.contains("SECRET_FILE=/x") && t.contains("after"), "{t}");
+        assert_eq!(scrub_patterns("plain output 123\n"), "plain output 123\n");
+    }
+
+    #[test]
+    fn agents_get_their_arguments_understood() {
+        let a = normalize_args(json!({ "server": "box", "command": "ls", "timeout_seconds": "30" }));
+        assert_eq!((a["host"].as_str(), a["timeout_seconds"].as_u64()), (Some("box"), Some(30)));
+        let b = normalize_args(json!({ "name": "web", "action": "start" }));
+        assert!(b.get("host").is_none(), "a tunnel's name stays a name");
+        let c = normalize_args(json!({ "name": "box", "command": "ls", "timeout": 5 }));
+        assert_eq!((c["host"].as_str(), c["timeout_seconds"].as_u64()), (Some("box"), Some(5)));
+        assert!(hides_failures("sudo -n true 2>/dev/null; echo after") && !hides_failures("sudo -n systemctl reboot"));
+        assert!(ssh_hint("ssh: connect to host x port 22: Connection refused", "").unwrap().contains("rebooting"));
+        assert!(ssh_hint("fine", "").is_none());
+        assert!(sudo_complained("sudo: a password is required", "") && !sudo_complained("fine", "ok"));
     }
 
     #[test]
